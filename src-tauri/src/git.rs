@@ -1,0 +1,189 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tauri::command;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileStatus {
+    pub path: String,
+    pub index_status: String,
+    pub workdir_status: String,
+}
+
+const DIFF_CAP: usize = 1_000_000; // 1MB per file
+
+fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .map_err(|_| "[git] failed to spawn".to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub path: String,
+    pub name: String,
+    pub is_git: bool,
+    pub git_root: Option<String>,
+    pub branch: Option<String>,
+}
+
+fn dir_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+#[command]
+pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    // `git rev-parse --show-toplevel` succeeds anywhere inside a worktree.
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&p)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let root = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let branch = Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(&root)
+                .output()
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b.stdout).trim().to_string())
+                .filter(|b| !b.is_empty());
+            Ok(ProjectInfo {
+                name: PathBuf::from(&root)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.clone()),
+                path: path.clone(),
+                is_git: true,
+                git_root: Some(root),
+                branch,
+            })
+        }
+        _ => Ok(ProjectInfo {
+            name: dir_name_of(&p),
+            path,
+            is_git: false,
+            git_root: None,
+            branch: None,
+        }),
+    }
+}
+
+#[command]
+pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let initial = branch.unwrap_or_else(|| "main".into());
+    let out = Command::new("git")
+        .args(["init", "-b", &initial])
+        .current_dir(&p)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(p.to_string_lossy().to_string())
+}
+
+#[command]
+pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
+    let repo = PathBuf::from(&path);
+    let out = git(&repo, &["status", "--porcelain", "-z"])?;
+    let mut files = vec![];
+    let mut iter = out.split('\0').filter(|s| !s.is_empty());
+    while let Some(entry) = iter.next() {
+        let mut chars = entry.chars();
+        let ix = chars.next().unwrap_or(' ');
+        let wd = chars.next().unwrap_or(' ');
+        let file_path = entry[3..].to_string();
+        // rename entries: "R  new\0old" — the -z form has the orig path next
+        if ix == 'R' || ix == 'C' || wd == 'R' || wd == 'C' {
+            let _orig = iter.next();
+        }
+        files.push(FileStatus {
+            path: file_path,
+            index_status: ix.to_string(),
+            workdir_status: wd.to_string(),
+        });
+    }
+    Ok(files)
+}
+
+#[command]
+pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
+    let repo = PathBuf::from(&path);
+    let mut args: Vec<String> = vec![
+        "-c".into(),
+        "core.quotepath=false".into(),
+        "diff".into(),
+        "--no-color".into(),
+    ];
+    if let Some(b) = &base {
+        args.push(b.clone());
+    }
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let diff = git(&repo, &args_ref)?;
+    if diff.len() > DIFF_CAP {
+        let mut cut = diff;
+        cut.truncate(DIFF_CAP);
+        cut.push_str("\n... [diff truncated at 1MB]\n");
+        return Ok(cut);
+    }
+    Ok(diff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn status_and_diff() {
+        let dir = std::env::temp_dir().join(format!("guimux-git-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&dir).output().unwrap();
+        }
+        fs::write(dir.join("a.txt"), "hello").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&dir).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().unwrap();
+
+        fs::write(dir.join("a.txt"), "changed").unwrap();
+        let st = git_status(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].path, "a.txt");
+        assert_eq!(st[0].workdir_status, "M");
+
+        let diff = git_diff(dir.to_string_lossy().to_string(), None).unwrap();
+        assert!(diff.contains("-hello"));
+        assert!(diff.contains("+changed"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
