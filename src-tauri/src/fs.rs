@@ -69,6 +69,26 @@ pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
 }
 
 #[command]
+pub fn fs_rename(old: String, new: String) -> Result<(), String> {
+    let from = PathBuf::from(&old);
+    let to = PathBuf::from(&new);
+    if !from.exists() {
+        return Err(format!("not found: {old}"));
+    }
+    if from.parent() != to.parent() {
+        return Err("can only rename within the same folder".into());
+    }
+    match to.file_name().and_then(|s| s.to_str()) {
+        Some(n) if !n.is_empty() && !n.contains(['/', '\\']) => {}
+        _ => return Err("invalid file name".into()),
+    }
+    if to.exists() {
+        return Err("a file with that name already exists".into());
+    }
+    fs::rename(&from, &to).map_err(|e| e.to_string())
+}
+
+#[command]
 pub fn fs_read(path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
     let meta = fs::metadata(&p).map_err(|e| e.to_string())?;

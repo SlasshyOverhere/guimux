@@ -3,26 +3,52 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
 import { confirmDialog, errorDialog } from "../dialogs";
-import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw } from "lucide-react";
+import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
 // when the tree needs type scanning at a glance.
+
+const SEP = /[\\/]/;
+
+function baseName(p: string): string {
+  const parts = p.split(SEP);
+  return parts[parts.length - 1] ?? p;
+}
+
+function siblingPath(oldPath: string, name: string): string {
+  const i = Math.max(oldPath.lastIndexOf("/"), oldPath.lastIndexOf("\\"));
+  const sep = oldPath.includes("\\") ? "\\" : "/";
+  return (i < 0 ? name : oldPath.slice(0, i + 1) + name).replace(/\\/g, sep === "\\" ? "\\" : "/");
+}
 
 function TreeNode({
   node,
   depth,
   onOpen,
   root,
+  onMenu,
+  renaming,
+  renameDraft,
+  setRenameDraft,
+  onRenameCommit,
+  onRenameCancel,
 }: {
   node: FsNode;
   depth: number;
   onOpen: (path: string) => void;
   root: string;
+  onMenu: (path: string, x: number, y: number) => void;
+  renaming: string | null;
+  renameDraft: string;
+  setRenameDraft: (v: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
 }) {
   const [open, setOpen] = useState(depth < 1);
   const isDir = node.is_dir;
   const rel = node.path.slice(root.length + 1);
+  const isRenaming = renaming === node.path;
 
   return (
     <div>
@@ -33,18 +59,28 @@ function TreeNode({
         style={{ paddingLeft: depth * 14 + 6 }}
         onClick={() => (isDir ? setOpen(!open) : onOpen(node.path))}
         onKeyDown={(e) => {
+          if (e.key === "F2") {
+            e.preventDefault();
+            onMenu(node.path, -1, -1);
+            return;
+          }
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             if (isDir) setOpen(!open);
             else onOpen(node.path);
           }
         }}
-        draggable
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onMenu(node.path, e.clientX, e.clientY);
+        }}
+        draggable={!isRenaming}
         onDragStart={(e) => {
           e.dataTransfer.setData("application/guimux-file-path", rel);
           e.dataTransfer.effectAllowed = "copy";
         }}
-        title={node.path}
+        title={`${node.path}\nRight-click to rename`}
       >
         {isDir ? (
           <>
@@ -59,11 +95,35 @@ function TreeNode({
             <FileIcon size={13} className="shrink-0 text-ink-400" strokeWidth={2} />
           </>
         )}
-        <span className="truncate">{node.name}</span>
+        {isRenaming ? (
+          <input
+            autoFocus
+            value={renameDraft}
+            onChange={(e) => setRenameDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onRenameCommit();
+              if (e.key === "Escape") onRenameCancel();
+              e.stopPropagation();
+            }}
+            onBlur={onRenameCommit}
+            onClick={(e) => e.stopPropagation()}
+            onFocus={(e) => {
+              // Select the stem, not the extension, like VS Code.
+              const dot = e.target.value.lastIndexOf(".");
+              if (dot > 0) e.target.setSelectionRange(0, dot);
+              else e.target.select();
+            }}
+            aria-label="Rename file"
+            className="mono min-w-0 flex-1 rounded border bg-ink-950 px-1 text-[12.5px] text-ink-100 outline-none"
+            style={{ borderColor: "var(--gm-hairline)" }}
+          />
+        ) : (
+          <span className="truncate">{node.name}</span>
+        )}
       </div>
       {isDir && open &&
         node.children?.map((c) => (
-          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} />
+          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} />
         ))}
     </div>
   );
@@ -81,11 +141,71 @@ export function ExplorerPane({ root }: { root: string }) {
   const [dirty, setDirty] = useState(false);
   const [contentLoaded, setContentLoaded] = useState(false);
   const [gitDiff, setGitDiff] = useState<string>("");
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
       .then((t) => setTree(t))
       .catch(() => setTree(null));
+  };
+
+  // Click anywhere or Escape dismisses the file context menu.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  // A rename that targets the open file while the editor covers the tree
+  // renames through the header input instead (same state, same commit).
+  const startRename = (path: string) => {
+    setMenu(null);
+    setRenaming(path);
+    setRenameDraft(baseName(path));
+  };
+
+  const openMenu = (path: string, x: number, y: number) => {
+    // Keyboard (F2) goes straight to inline rename; pointer gets the menu.
+    if (x < 0 || y < 0) {
+      startRename(path);
+      return;
+    }
+    setMenu({ x, y, path });
+  };
+
+  const commitRename = async () => {
+    const oldPath = renaming;
+    if (!oldPath) return;
+    const name = renameDraft.trim();
+    if (!name || name === baseName(oldPath)) {
+      setRenaming(null);
+      return;
+    }
+    if (SEP.test(name)) {
+      void errorDialog("name cannot contain slashes");
+      return;
+    }
+    const newPath = siblingPath(oldPath, name);
+    setRenaming(null);
+    try {
+      await invoke("fs_rename", { old: oldPath, new: newPath });
+    } catch (e) {
+      void errorDialog(`rename failed: ${e}`);
+      return;
+    }
+    // Untitled flow: renaming the open file retargets the editor buffer.
+    if (editorPath === oldPath) openEditor(newPath, diffMode);
+    refreshTree();
   };
 
   useEffect(() => {
@@ -102,6 +222,14 @@ export function ExplorerPane({ root }: { root: string }) {
       if (cic) cic(id as number);
       else window.clearTimeout(id as number);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root]);
+
+  // Renaming a file out from under the URL bar input leaves a stale path;
+  // clear the draft when switching roots.
+  useEffect(() => {
+    setRenaming(null);
+    setMenu(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -199,7 +327,41 @@ export function ExplorerPane({ root }: { root: string }) {
       }
     }
     openEditor(p, false);
+    // The editor covers the tree, so the rename affordance lives in the
+    // header pencil: start there immediately for the fresh untitled file.
+    startRename(p);
   };
+
+  const renameRowProps = {
+    onMenu: openMenu,
+    renaming,
+    renameDraft,
+    setRenameDraft,
+    onRenameCommit: () => void commitRename(),
+    onRenameCancel: () => setRenaming(null),
+  };
+
+  const menuEl = menu && (
+    <div
+      className="tnum fixed z-50 w-40 overflow-hidden rounded-lg py-1 shadow-pop"
+      style={{
+        left: Math.min(menu.x, window.innerWidth - 180),
+        top: Math.min(menu.y, window.innerHeight - 80),
+        background: "var(--gm-overlay)",
+        border: "1px solid var(--gm-hairline)",
+      }}
+      onClick={(e) => e.stopPropagation()}
+      role="menu"
+    >
+      <button
+        className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+        onClick={() => startRename(menu.path)}
+        role="menuitem"
+      >
+        Rename
+      </button>
+    </div>
+  );
 
   const [width, setWidth] = useState(() => {
     const v = Number(localStorage.getItem("guimux-explorer-w"));
@@ -260,18 +422,21 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex-1 overflow-y-auto px-1.5 pb-2">
           {tree?.children?.length ? (
             tree.children.map((c) => (
-              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} />
+              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} />
             ))
           ) : (
             <div className="p-2 text-[12px] text-ink-400">No files</div>
           )}
         </div>
         <div className="px-3 py-2 text-[11px] text-ink-400" style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}>
-          Drag a file into a terminal to paste its path
+          Right-click a file to rename · drag into a terminal to paste its path
         </div>
+        {menuEl}
       </div>
     );
   }
+
+  const renamingOpenFile = renaming === editorPath;
 
   return (
     <div className="relative flex h-full max-w-[60vw] shrink-0 flex-col bg-ink-900" style={{ width: Math.max(width, 400), borderLeft: "1px solid var(--gm-hairline)" }}>
@@ -289,14 +454,36 @@ export function ExplorerPane({ root }: { root: string }) {
         className="flex items-center justify-between gap-2 px-2 py-1.5"
         style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
       >
-        <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           <button className="rounded-md p-1 text-ink-400 hover:bg-white/[0.05] hover:text-ink-200" onClick={() => void closeEditorGuarded()} title="Close editor (back to tree)">
             <X size={14} />
           </button>
           <FileIcon size={13} className="shrink-0 text-ink-400" />
-          <span className="truncate text-[12.5px] font-medium text-ink-100" title={editorPath}>
-            {shortName}
-          </span>
+          {renamingOpenFile ? (
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitRename();
+                if (e.key === "Escape") setRenaming(null);
+                e.stopPropagation();
+              }}
+              onBlur={() => void commitRename()}
+              onFocus={(e) => {
+                const dot = e.target.value.lastIndexOf(".");
+                if (dot > 0) e.target.setSelectionRange(0, dot);
+                else e.target.select();
+              }}
+              aria-label="Rename open file"
+              className="mono min-w-0 flex-1 rounded border bg-ink-950 px-1 text-[12.5px] text-ink-100 outline-none"
+              style={{ borderColor: "var(--gm-hairline)" }}
+            />
+          ) : (
+            <span className="truncate text-[12.5px] font-medium text-ink-100" title={editorPath}>
+              {shortName}
+            </span>
+          )}
           {dirty ? (
             <span className="tnum shrink-0 text-[11px] font-medium" style={{ color: "var(--gm-amber)" }}>edited</span>
           ) : (
@@ -306,6 +493,14 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex shrink-0 gap-0.5">
           {!diffMode && (
             <>
+              <button
+                title="Rename file (F2)"
+                aria-label="Rename file"
+                className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+                onClick={() => editorPath && startRename(editorPath)}
+              >
+                <Pencil size={13} />
+              </button>
               <button
                 title="Toggle diff"
                 className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"

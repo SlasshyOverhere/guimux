@@ -11,6 +11,10 @@ import {
   House as HomeIcon,
   Settings as SettingsIcon,
   Bot,
+  PanelLeftOpen,
+  PanelLeftClose,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
 import { useStore } from "./store";
 import { WindowControls } from "./chrome/WindowControls";
@@ -42,6 +46,10 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
     activeWorktreeId,
     setSettingsOpen,
     setAgentOpen,
+    leftVisible,
+    rightVisible,
+    toggleLeft,
+    toggleRight,
   } = useStore();
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
@@ -128,6 +136,17 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
         guimux
       </span>
       <span className="mr-2 h-4 w-px" style={{ background: "var(--gm-hairline)" }} />
+
+      <button
+        title={leftVisible ? "Collapse left sidebar (Ctrl+B)" : "Expand left sidebar (Ctrl+B)"}
+        aria-label={leftVisible ? "Collapse left sidebar" : "Expand left sidebar"}
+        aria-pressed={leftVisible}
+        onClick={toggleLeft}
+        style={leftVisible ? { background: "rgba(255,255,255,0.07)" } : undefined}
+        className={`rounded-md p-2 hover:bg-white/[0.04] hover:text-ink-200 ${leftVisible ? "text-ink-100" : "text-ink-400"}`}
+      >
+        {leftVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+      </button>
 
       {/* project picker, left */}
       <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
@@ -254,6 +273,17 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       </button>
 
       <button
+        title={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
+        aria-label={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
+        aria-pressed={rightVisible}
+        onClick={toggleRight}
+        style={rightVisible ? { background: "rgba(255,255,255,0.07)" } : undefined}
+        className={`rounded-md p-2 hover:bg-white/[0.04] hover:text-ink-200 ${rightVisible ? "text-ink-100" : "text-ink-400"}`}
+      >
+        {rightVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+      </button>
+
+      <button
         title="Settings"
         aria-label="Open settings"
         className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
@@ -366,32 +396,6 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
           </span>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Status strip: quiet session facts, tabular numerals.                */
-/* ------------------------------------------------------------------ */
-
-function StatusStrip() {
-  const proj = useStore((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
-  const wt = useStore((s) => s.worktrees.find((w) => w.id === s.activeWorktreeId));
-  if (!proj) return null;
-  return (
-    <div
-      className="tnum flex h-7 shrink-0 items-center gap-4 overflow-hidden border-t px-3 text-[11px] text-ink-400"
-      style={{ borderColor: "var(--gm-hairline)", background: "var(--gm-canvas)" }}
-    >
-      <span className="flex min-w-0 items-center gap-1.5">
-        {proj.isGit ? <GitBranch size={11} className="shrink-0 text-accent-500" /> : <Folder size={11} className="shrink-0" />}
-        <span className="truncate text-ink-400">{wt ? wt.branch || "(detached)" : proj.name}</span>
-      </span>
-      <span className="hidden max-w-[420px] truncate sm:block" title={wt?.path ?? proj.path}>
-        {wt?.path ?? proj.path}
-      </span>
-      <span className="flex-1" />
-      <span>{proj.isGit ? "git worktree session" : "folder session"}</span>
     </div>
   );
 }
@@ -619,6 +623,14 @@ export default function App() {
         e.preventDefault();
         const st = useStore.getState();
         st.setSettingsOpen(!st.settingsOpen);
+      } else if (mod && e.key.toLowerCase() === "b" && !e.shiftKey) {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag !== "INPUT" && tag !== "TEXTAREA") {
+          e.preventDefault();
+          const st = useStore.getState();
+          if (e.altKey) st.toggleRight();
+          else st.toggleLeft();
+        }
       } else if (mod && e.key.toLowerCase() === "d" && !e.shiftKey) {
         const st = useStore.getState();
         if (st.activePaneId && st.paletteOpen === false) {
@@ -725,7 +737,6 @@ export default function App() {
         </div>
         {wt && rightVisible && <ExplorerPane key={wt.id} root={wt.path} />}
       </div>
-      <StatusStrip />
       <Palette />
       <SettingsPanel />
       <AgentLauncher />

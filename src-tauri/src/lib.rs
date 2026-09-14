@@ -31,6 +31,7 @@ pub fn run() {
             fs::fs_tree,
             fs::fs_read,
             fs::fs_write,
+            fs::fs_rename,
             pty::pty_spawn,
             pty::pty_attach,
             pty::pty_write,
