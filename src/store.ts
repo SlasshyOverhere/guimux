@@ -155,6 +155,7 @@ interface AppState {
   layout: PaneNode | null; // per active worktree; simplified: one layout, reset on switch
   layouts: Record<string, PaneNode>; // worktreeId -> layout
   activePaneId: string | null;
+  maximizedPaneId: string | null; // fullscreened pane; siblings stay mounted but hidden
 
   // agent launcher dialog + sidebar visibility
   agentOpen: boolean;
@@ -186,6 +187,7 @@ interface AppState {
   setSplitRatio: (worktreeId: string, splitId: string, ratio: number) => void;
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
+  toggleMaximizePane: (paneId: string) => void;
   launchAgents: (items: { command: string; count: number }[]) => void;
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
@@ -216,6 +218,7 @@ export const useStore = create<AppState>((set, get) => ({
   layout: null,
   layouts: {},
   activePaneId: null,
+  maximizedPaneId: null,
 
 
   agentOpen: false,
@@ -261,6 +264,7 @@ export const useStore = create<AppState>((set, get) => ({
       layout: seedLayout,
       layouts: seedActive && seedLayout ? { ...s.layouts, [seedActive]: seedLayout } : s.layouts,
       activePaneId: seedLayout && seedLayout.kind === "pane" ? seedLayout.id : null,
+      maximizedPaneId: null,
     }));
   },
   addProject: (p) =>
@@ -291,6 +295,7 @@ export const useStore = create<AppState>((set, get) => ({
       activeWorktreeId: null,
       layout: null,
       activePaneId: null,
+      maximizedPaneId: null,
         });
   },
   setWorktrees: (wts) => set({ worktrees: wts }),
@@ -301,6 +306,7 @@ export const useStore = create<AppState>((set, get) => ({
       activeWorktreeId: id,
       layout,
       activePaneId: collectPanes(layout)[0] ?? null,
+      maximizedPaneId: null,
         });
   },
   setLayout: (worktreeId, node) =>
@@ -327,11 +333,12 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         layout: next,
         layouts: { ...layouts, [activeWorktreeId]: next },
+        maximizedPaneId: null,
       });
     }
   },
   closePane: (paneId) => {
-    const { layout, activeWorktreeId, layouts } = get();
+    const { layout, activeWorktreeId, layouts, maximizedPaneId } = get();
     if (!layout || !activeWorktreeId) return;
     // Never leave a null layout: closing the last pane opens a fresh shell.
     // Null bricks the worktree on "Starting terminal…" with no way back.
@@ -340,8 +347,15 @@ export const useStore = create<AppState>((set, get) => ({
       layout: next,
       layouts: { ...layouts, [activeWorktreeId]: next },
       activePaneId: collectPanes(next)[0],
+      maximizedPaneId: maximizedPaneId === paneId ? null : maximizedPaneId,
     });
   },
+  toggleMaximizePane: (paneId) =>
+    set((s) =>
+      s.maximizedPaneId === paneId
+        ? { maximizedPaneId: null }
+        : { maximizedPaneId: paneId, activePaneId: paneId },
+    ),
   // Fan-out APPENDS to the existing layout: wipe-and-retile orphaned the
   // current session (the old PTY kept running with no pane attached).
   // Total tiles capped at 12: past that every pane drops below usable TUI
@@ -372,6 +386,7 @@ export const useStore = create<AppState>((set, get) => ({
         layout: node,
         layouts: { ...layouts, [activeWorktreeId]: node },
         activePaneId: panes[0].id,
+        maximizedPaneId: null,
             });
       return;
     }
@@ -388,6 +403,7 @@ export const useStore = create<AppState>((set, get) => ({
       layout: node,
       layouts: { ...layouts, [activeWorktreeId]: node },
       activePaneId: panes[0].id,
+      maximizedPaneId: null,
         });
   },
   clearInitCmd: (paneId) =>

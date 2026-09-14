@@ -6,8 +6,8 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Columns2, Rows2, X } from "lucide-react";
-import { useStore } from "../store";
+import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
+import { allPaneIds, useStore } from "../store";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -142,7 +142,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     splitPane,
     setActivePane,
     setPtyId,
+    toggleMaximizePane,
   } = useStore();
+  const maximized = useStore((s) => s.maximizedPaneId === paneId);
+  const paneCount = useStore((s) => allPaneIds(s.layout).length);
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
@@ -576,6 +579,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           >
             <Rows2 size={13} strokeWidth={2} />
           </button>
+          {paneCount > 1 && (
+            <button
+              title={maximized ? "Restore panes" : "Maximize pane"}
+              aria-label={maximized ? "Restore panes" : "Maximize pane"}
+              aria-pressed={maximized}
+              onClick={() => toggleMaximizePane(paneId)}
+            >
+              {maximized ? <Minimize2 size={13} strokeWidth={2} /> : <Maximize2 size={13} strokeWidth={2} />}
+            </button>
+          )}
           <button
             title="Close pane"
             aria-label="Close pane"
