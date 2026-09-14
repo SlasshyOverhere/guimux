@@ -252,10 +252,12 @@ export function ExplorerPane({ root }: { root: string }) {
       });
   }, [editorPath]);
 
-  // Ctrl+S anywhere while editing
+  // Ctrl+S anywhere while editing (never from a focused terminal: the
+  // shell owns that key, and DC3 would silently pause output via XOFF).
   useEffect(() => {
     if (!editorPath || diffMode) return;
     const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement | null)?.closest?.(".xterm")) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void save();

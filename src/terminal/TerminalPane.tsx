@@ -269,6 +269,66 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     term.focus();
   };
 
+  // Raw fallback when the Web Clipboard API is denied (focus/permission):
+  // ^V lets PSReadLine/conhost paste from the system clipboard themselves.
+  const sendRaw = (data: string) => {
+    const sid = sessionRef.current;
+    if (sid != null && !exitedRef.current) invoke("pty_write", { id: sid, data }).catch(() => {});
+  };
+
+  const copySelection = () => {
+    const term = termRef.current;
+    if (!term || !term.hasSelection()) return false;
+    const sel = term.getSelection();
+    if (!sel) return false;
+    const done = () => {
+      term.clearSelection();
+      term.focus();
+    };
+    const fallbackCopy = () => {
+      // No async Clipboard API (denied/unsupported): execCommand from a temp
+      // field. Selection stays put on failure so the user can retry.
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = sel;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        if (ok) done();
+        else term.focus();
+      } catch {
+        term.focus();
+      }
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(sel).then(done, fallbackCopy);
+    else fallbackCopy();
+    return true;
+  };
+
+  const pasteClipboard = () => {
+    const term = termRef.current;
+    term?.focus();
+    if (navigator.clipboard?.readText) {
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (!text) return;
+          // term.paste honors bracketed-paste mode; raw pty_write would not.
+          try {
+            term?.paste(text);
+          } catch {
+            sendRaw(text);
+          }
+        })
+        .catch(() => sendRaw("\x16"));
+    } else {
+      sendRaw("\x16");
+    }
+  };
+
   const fontSize = useStore((s) => s.settings.terminalFontSize);
   const scrollback = useStore((s) => s.settings.scrollback);
 
@@ -301,8 +361,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       e.stopPropagation();
       step(e.deltaY < 0 ? 1 : -1);
     };
+    // Scoped to this pane's own grid: every mounted pane registers this
+    // window listener, and an unscoped check would zoom N times for N panes.
+    const inThisTerm = (e: KeyboardEvent) => {
+      const t = e.target as Node | null;
+      if (t && el.contains(t)) return true;
+      const ae = document.activeElement;
+      return !!ae && el.contains(ae);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || !document.activeElement?.closest(".xterm")) return;
+      if (!(e.ctrlKey || e.metaKey) || !inThisTerm(e)) return;
       if (e.key === "0") {
         e.preventDefault();
         useStore.getState().setSettings({ terminalFontSize: 13 });
@@ -383,6 +451,23 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
+    // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
+    // text is selected (else the SIGINT the TUI may need), Ctrl+V paste.
+    // Returning false keeps xterm from also feeding the key to the PTY.
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.type === "keydown") {
+        const termNow = termRef.current;
+        if (e.key.toLowerCase() === "c" && termNow?.hasSelection()) {
+          copySelection();
+          return false;
+        }
+        if (e.key.toLowerCase() === "v") {
+          pasteClipboard();
+          return false;
+        }
+      }
+      return true;
+    });
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
@@ -548,7 +633,17 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   return (
     <div
       className="relative h-full w-full"
-      onMouseDown={() => setActivePane(paneId)}
+      onMouseDown={() => {
+        setActivePane(paneId);
+        // Clicking pane chrome (toolbar, gutters) parks focus on a button or
+        // div: without this every key after a mouse click goes nowhere.
+        termRef.current?.focus();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (termRef.current?.hasSelection()) copySelection();
+        else pasteClipboard();
+      }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
     >
@@ -566,7 +661,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         )}
         <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
           <button
-            title="Split right (Ctrl+D)"
+            title="Split right (Ctrl+Shift+D)"
             aria-label="Split pane right"
             onClick={() => splitPane(paneId, "h")}
           >

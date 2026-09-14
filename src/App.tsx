@@ -387,7 +387,7 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
             <span className="gm-kbd">Ctrl K</span> palette
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="gm-kbd">Ctrl D</span> split
+            <span className="gm-kbd">Ctrl Shift D</span> split
           </span>
         </div>
       </div>
@@ -590,7 +590,10 @@ export default function App() {
   }, [hydrated, projectsEpoch, activeProjectGitKey]);
 
   // Ctrl+K palette, Ctrl+D split, Ctrl+, settings,
-  // Ctrl+=/-/0 app zoom (terminals own these keys when focused)
+  // Ctrl+=/-/0 app zoom (terminals own these keys when focused).
+  // Every other app shortcut below is also terminal-exempt: when a shell or
+  // TUI has focus its keystrokes (Ctrl+D EOF, Ctrl+B tmux prefix, ...) must
+  // reach the PTY unmodified, never trigger chrome.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -609,16 +612,21 @@ export default function App() {
         return;
       }
       if (mod && e.key.toLowerCase() === "k") {
-        // In a focused terminal Ctrl+K is kill-line: let the shell have it.
-        if (inTerm) return;
+        // In a focused terminal plain Ctrl+K is kill-line: let the shell
+        // have it. Ctrl+Shift+K still opens the palette from a terminal.
+        if (inTerm && !e.shiftKey) return;
         e.preventDefault();
         const st = useStore.getState();
         st.setPaletteOpen(!st.paletteOpen);
       } else if (mod && e.key === ",") {
+        // Ctrl+, is a readline binding in some shells: never steal it.
+        if (inTerm) return;
         e.preventDefault();
         const st = useStore.getState();
         st.setSettingsOpen(!st.settingsOpen);
       } else if (mod && e.key.toLowerCase() === "b" && !e.shiftKey) {
+        // Ctrl+B is the tmux prefix: it must reach the PTY, never chrome.
+        if (inTerm) return;
         const tag = (e.target as HTMLElement | null)?.tagName;
         if (tag !== "INPUT" && tag !== "TEXTAREA") {
           e.preventDefault();
@@ -626,7 +634,10 @@ export default function App() {
           if (e.altKey) st.toggleRight();
           else st.toggleLeft();
         }
-      } else if (mod && e.key.toLowerCase() === "d" && !e.shiftKey) {
+      } else if (mod && e.key.toLowerCase() === "d") {
+        // Plain Ctrl+D is EOF (closes prompts, exits REPLs): it must reach
+        // the PTY. Ctrl+Shift+D splits even from a focused terminal.
+        if (inTerm && !e.shiftKey) return;
         const st = useStore.getState();
         if (st.activePaneId && st.paletteOpen === false) {
           const tag = (e.target as HTMLElement | null)?.tagName;

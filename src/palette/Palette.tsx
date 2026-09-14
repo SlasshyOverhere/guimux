@@ -140,7 +140,7 @@ export function Palette() {
       out.push({
         id: "cmd:split-h",
         label: "Split terminal right",
-        hint: "Ctrl+D",
+        hint: "Ctrl+Shift+D",
         group: "Commands",
         icon: <Columns2 size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
