@@ -89,6 +89,42 @@ function fitSane(term: Terminal, fit: FitAddon): { cols: number; rows: number } 
   return saneDims(term);
 }
 
+// Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
+// (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
+// powershell bootstrap in pty.rs. Snoop the raw output bytes, keep the last
+// match, store it on the pane so splits inherit the source pane's directory.
+// ST is BEL or ESC\. Buffer tail is retained so a sequence split across two
+// output chunks still parses.
+function extractLiveCwd(buf: string): string | null {
+  let native: string | null = null;
+  let uriPath: string | null = null;
+  let m: RegExpExecArray | null;
+  const re99 = /\x1b\]9;9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  while ((m = re99.exec(buf)) !== null) {
+    const p = m[1].trim();
+    if (p) native = p;
+  }
+  const re7 = /\x1b\]7;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  while ((m = re7.exec(buf)) !== null) {
+    const uri = m[1].trim();
+    const i = uri.indexOf("file://");
+    if (i < 0) continue;
+    const rest = uri.slice(i + "file://".length);
+    const slash = rest.indexOf("/");
+    if (slash < 0) continue;
+    let path = rest.slice(slash);
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      /* raw on bad escapes */
+    }
+    path = path.replace(/\//g, "\\");
+    if (/^\\[A-Za-z]:\\/.test(path)) path = path.slice(1);
+    if (/^[A-Za-z]:\\/.test(path) || path.startsWith("\\\\")) uriPath = path;
+  }
+  return native ?? uriPath;
+}
+
 export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -107,6 +143,30 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     setActivePane,
     setPtyId,
   } = useStore();
+  // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
+  // a split from D:/test/workspace/testing/ opens there, not worktree root.
+  const liveCwdRef = useRef<string | null>(null);
+  const snoopTailRef = useRef("");
+  const snoopLiveCwd = (bytes: Uint8Array) => {
+    let text: string;
+    try {
+      text = new TextDecoder().decode(bytes);
+    } catch {
+      return;
+    }
+    if (!text.includes("\x1b]")) {
+      // No OSC opener: still bound the tail for the rare split sequence.
+      snoopTailRef.current = (snoopTailRef.current + text).slice(-128);
+      return;
+    }
+    const buf = snoopTailRef.current + text;
+    const found = extractLiveCwd(buf);
+    snoopTailRef.current = buf.slice(-128);
+    if (found && found !== liveCwdRef.current) {
+      liveCwdRef.current = found;
+      useStore.getState().setPaneCwd(paneId, found);
+    }
+  };
 
   const markExited = () => {
     exitedRef.current = true;
@@ -117,8 +177,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
     const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
+      const bytes = new Uint8Array(ev.payload);
+      snoopLiveCwd(bytes);
       try {
-        term.write(new Uint8Array(ev.payload));
+        term.write(bytes);
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
@@ -129,7 +191,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     });
     unlisteners.current.push(disposeOutput, disposeExit);
     const replay = await invoke<number[]>("pty_attach", { id: sid });
-    if (replay.length > 0) term.write(new Uint8Array(replay));
+    if (replay.length > 0) {
+      const bytes = new Uint8Array(replay);
+      snoopLiveCwd(bytes);
+      term.write(bytes);
+    }
   };
 
   // WebGL primary, canvas/DOM fallback. Buffer, cursor, and focus live on the

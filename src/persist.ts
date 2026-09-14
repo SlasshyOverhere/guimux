@@ -49,8 +49,7 @@ function readLocal(): PersistedState | null {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedState;
-    if (!Array.isArray(parsed.projects)) return null;
-    return { projects: parsed.projects, activeProjectId: parsed.activeProjectId ?? null, settings: cleanSettings(parsed.settings) };
+    return sanitize(parsed);
   } catch {
     return null;
   }

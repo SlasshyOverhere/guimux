@@ -26,7 +26,7 @@ function PaneWrap({ pane, cwd }: { pane: Pane; cwd: string }) {
       <TerminalPane
         paneId={pane.id}
         ptyId={pane.ptyId}
-        cwd={cwd}
+        cwd={pane.cwd ?? cwd}
         visible={true}
         initCmd={pane.initCmd ?? null}
         onClose={() => closePane(pane.id)}

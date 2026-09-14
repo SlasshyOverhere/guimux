@@ -89,7 +89,19 @@ export function ExplorerPane({ root }: { root: string }) {
   };
 
   useEffect(() => {
-    refreshTree();
+    // Idle-deferred: fs_tree walks the disk and the shell burst owns
+    // startup; the tree fills in right after without blocking first paint.
+    const schedule = (cb: () => void) => {
+      const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+      if (ric) return ric.call(window, cb, { timeout: 1500 });
+      return window.setTimeout(cb, 300);
+    };
+    const id = schedule(refreshTree);
+    return () => {
+      const cic = (window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback;
+      if (cic) cic(id as number);
+      else window.clearTimeout(id as number);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 

@@ -143,12 +143,13 @@ export function WorktreeSidebar() {
     try {
       const wts: Worktree[] = await invoke("worktree_list", { repoRoot });
       if (useStore.getState().repoRoot !== repoRoot) return;
+      // Never blank a live list: an empty/errored re-list here used to wipe
+      // the seeded fallback and strand the shell on "Starting terminal…".
+      if (wts.length === 0) return;
       setWorktrees(wts);
-      if (wts.length > 0) {
-        const cur = useStore.getState();
-        if (!wts.find((w) => w.id === cur.activeWorktreeId)) {
-          setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
-        }
+      const cur = useStore.getState();
+      if (!wts.find((w) => w.id === cur.activeWorktreeId)) {
+        setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
       }
     } catch {
       /* App's loader surfaces list errors in the banner; stay quiet here */

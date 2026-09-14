@@ -152,7 +152,7 @@ interface AppState {
   settingsOpen: boolean;
 
   // actions
-  hydrate: (projects: Project[], activeProjectId: string | null) => void;
+  hydrate: (projects: Project[], activeProjectId: string | null, seed?: { worktrees: Worktree[]; activeWorktreeId: string | null }) => void;
   addProject: (p: Project) => void;
   updateProject: (id: string, patch: Partial<Project>) => void;
   removeProject: (id: string) => void;
@@ -167,7 +167,7 @@ interface AppState {
   launchAgents: (items: { command: string; count: number }[]) => void;
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
-  setPaneCwd: (paneId: string, cwd: string) => void;
+  setPaneCwd: (paneId: string, cwd: string | null) => void;
   clearInitCmd: (paneId: string) => void;
   setAgentOpen: (open: boolean) => void;
   toggleLeft: () => void;
@@ -210,20 +210,35 @@ export const useStore = create<AppState>((set, get) => ({
   settingsOpen: false,
 
   setRepoRoot: (root) => set({ repoRoot: root }),
-  hydrate: (projects, activeProjectId) => {
+  // Seed = last-known worktrees from disk: painted instantly so a shell
+  // mounts before git finishes. The loader revalidates in background.
+  // ponytail: seed matches by path prefix only; a stale seed (deleted
+  // worktree) mounts then the loader corrects it. Persist ids per project
+  // when seeds go wrong across multi-root setups.
+  hydrate: (projects, activeProjectId, seed) => {
     const ids = new Set(projects.map((p) => p.id));
     const active = activeProjectId && ids.has(activeProjectId) ? activeProjectId : (projects[0]?.id ?? null);
     const proj = projects.find((p) => p.id === active) ?? null;
+    const seedWts = seed?.worktrees.filter((w) => {
+      // Seed must belong to the active project or the shell spawns elsewhere.
+      const root = proj?.isGit ? (proj.gitRoot ?? proj.path) : proj?.path;
+      return !!root && (w.path === root || w.path.startsWith(root));
+    }) ?? [];
+    const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
+      ? seed.activeWorktreeId
+      : (seedWts.find((w) => w.is_main) ?? seedWts[0])?.id ?? null;
+    const seedLayout = seedActive ? { kind: "pane", id: nextId(), ptyId: null } as PaneNode : null;
     set((s) => ({
       projects,
       activeProjectId: active,
       hydrated: true,
       projectsEpoch: s.projectsEpoch + 1,
-      repoRoot: proj ? proj.path : null,
-      worktrees: [],
-      activeWorktreeId: null,
-      layout: null,
-      activePaneId: null,
+      repoRoot: proj ? (proj.isGit ? (proj.gitRoot ?? proj.path) : proj.path) : null,
+      worktrees: seedWts,
+      activeWorktreeId: seedActive,
+      layout: seedLayout,
+      layouts: seedActive && seedLayout ? { ...s.layouts, [seedActive]: seedLayout } : s.layouts,
+      activePaneId: seedLayout && seedLayout.kind === "pane" ? seedLayout.id : null,
     }));
   },
   addProject: (p) =>

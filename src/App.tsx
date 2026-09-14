@@ -432,10 +432,13 @@ export default function App() {
       const st = useStore.getState();
       if (saved?.settings) st.hydrateSettings(saved.settings);
       if (saved && saved.projects.length > 0) {
-        // Single hydrate AFTER re-detect (parallel): the old two-hydrate
-        // sequence (saved, then fresh) reset layout/worktrees mid-mount,
-        // killing the just-spawned PTY and flashing a kill+respawn cycle —
-        // the "terminals popping in and out" on startup.
+        // Paint instantly from disk, revalidate in background. The old flow
+        // awaited N git rev-parses before the first hydrate, so boot sat on
+        // "Starting terminal…" for 10-30s on cold Windows spawns. Now the
+        // seeded shell mounts at once; re-detect + loader correct it after.
+        const seedWts = saved.worktrees ?? [];
+        const seedActive = saved.activeWorktreeId ?? null;
+        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive });
         // Re-detect refreshes branch/gitRoot and drops deleted folders.
         const settled = await Promise.all(
           saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
@@ -443,14 +446,18 @@ export default function App() {
         if (cancelled) return;
         const fresh = settled.filter((p): p is Project => p !== null);
         if (cancelled) return;
-        const cur = useStore.getState();
         if (fresh.length === 0) {
-          cur.hydrate([], null);
+          useStore.getState().hydrate([], null);
         } else {
           // detectToProject normalizes to git root, so ids may shift; remap by path.
           const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
           const byPath = oldActive ? fresh.find((p) => p.path === oldActive.path) : undefined;
-          cur.hydrate(fresh, byPath?.id ?? fresh[0].id);
+          const cur = useStore.getState();
+          // Keep the seeded shell if the project survived re-detect: a second
+          // hydrate would wipe layout/worktrees mid-mount and respawn the PTY.
+          const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
+          cur.updateProject(kept.id, { isGit: kept.isGit, gitRoot: kept.gitRoot, branch: kept.branch });
+          if (kept.id !== cur.activeProjectId) cur.setActiveProject(kept.id);
         }
       } else {
         st.hydrate([], null);
@@ -465,8 +472,8 @@ export default function App() {
   const settings = useStore((s) => s.settings);
   useEffect(() => {
     if (!hydrated) return;
-    savePersisted({ projects, activeProjectId, settings });
-  }, [hydrated, projects, activeProjectId, settings]);
+    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, settings });
+  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, settings]);
 
   // App-wide zoom: CSS `zoom` on <html> scales all chrome (topbar, sidebar,
   // explorer, dialogs). Terminals refit through their ResizeObserver.
@@ -498,10 +505,11 @@ export default function App() {
     }
   };
 
-  // Worktree loader: keyed ONLY on project identity, never on the object
-  // (a fresh projects array each hydrate re-created `activeProject` and
-  // re-ran this effect, double-listing worktrees and remounting the PTY).
-  const activeProjectIdSel = useStore((s) => s.activeProjectId);
+  // Worktree loader: keyed on project identity + boot epoch. The epoch
+  // pins each run to one boot: without it, the background re-detect patch
+  // (updateProject/setActiveProject above) changed the key mid-load and the
+  // effect re-ran, double-listing worktrees and remounting the PTY.
+  const projectsEpoch = useStore((s) => s.projectsEpoch);
   const activeProjectGitKey = useStore((s) => {
     const p = s.projects.find((x) => x.id === s.activeProjectId) ?? null;
     return p ? `${p.id}::${p.isGit ? (p.gitRoot ?? p.path) : p.path}` : null;
@@ -516,23 +524,35 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        setRepoError(null);
         if (p.isGit) {
           const root = p.gitRoot ?? p.path;
           setRepoRoot(root);
           let wts: Worktree[] | null = null;
-          // Defer one frame: lets first paint land before the shell burst.
-          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          // No frame defer: the seeded shell already painted; revalidate now.
           try {
             const listed = await invoke<Worktree[]>("worktree_list", { repoRoot: root });
             if (listed.length > 0) wts = listed;
           } catch (e) {
-            // Fall through to the plain-folder fallback below. The banner
-            // keeps the git error visible instead of sticking on "Starting…".
+            // Keep the seeded list on git failure (offline/locked): the old
+            // fallthrough replaced it with a plain-folder shell and moved the
+            // user. Banner carries the error instead.
+            const st = useStore.getState();
+            if (st.worktrees.length === 0) {
+              setRepoRoot(p.path);
+              const solo: Worktree[] = [
+                { id: `plain:${p.id}`, path: p.path, branch: p.name, is_main: true },
+              ];
+              if (!cancelled) {
+                setWorktrees(solo);
+                setActiveWorktree(solo[0].id);
+              }
+            }
             if (!cancelled) setRepoError(String(e));
+            return;
           }
           if (cancelled) return;
           if (wts) {
+            if (!cancelled) setRepoError(null);
             setWorktrees(wts);
             const st = useStore.getState();
             if (!wts.find((w) => w.id === st.activeWorktreeId)) {
@@ -541,7 +561,7 @@ export default function App() {
             }
             return;
           }
-          // Git list failed or empty: plain folder terminal on the project
+          // Git list empty (not failed): plain folder terminal on the project
           // path so a shell always mounts.
           setRepoRoot(p.path);
           const solo: Worktree[] = [
@@ -568,7 +588,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, activeProjectGitKey, activeProjectIdSel]);
+  }, [hydrated, projectsEpoch, activeProjectGitKey]);
 
   // Ctrl+K palette, Ctrl+D split, Ctrl+, settings,
   // Ctrl+=/-/0 app zoom (terminals own these keys when focused)

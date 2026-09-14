@@ -63,7 +63,17 @@ fn powershell_bootstrap(cwd: &str) -> String {
          try {{ [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); \
          [Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); \
          $OutputEncoding = [Console]::OutputEncoding }} catch {{}}\n\
-         try {{ Set-Location -LiteralPath '{safe_cwd}' -ErrorAction Stop }} catch {{}}"
+         try {{ Set-Location -LiteralPath '{safe_cwd}' -ErrorAction Stop }} catch {{}}\n\
+         # Split inherits the live cwd: report it on every prompt via OSC 7\n\
+         # (file:// URI) + OSC 9;9 (native path, ConPTY/WT style). Write-Host\n\
+         # side-channel keeps the returned prompt string clean for PSReadLine\n\
+         # width math. ponytail: unix shells ($SHELL spawn) emit no OSC 7;\n\
+         # add PROMPT_COMMAND/precmd injection when split-inherit matters there.\n\
+         function global:prompt {{ try {{ $p = (Get-Location).Path -replace '\\\\','/'; \
+         if ($p -match '^[A-Za-z]:') {{ $p = '/' + $p }}; \
+         $e = [char]27; $b = [char]7; \
+         Write-Host -NoNewline \"${{e}}]7;file://localhost${{p}}${{b}}${{e}}]9;9;$((Get-Location).Path)${{b}}\" }} catch {{}}; \
+         \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" }}"
     )
 }
 
