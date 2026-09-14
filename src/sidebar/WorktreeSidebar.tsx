@@ -243,8 +243,10 @@ export function WorktreeSidebar() {
       });
       setName("");
       setBase("");
-      await refreshList();
+      // Mount the new shell at once; the re-list below reconciles in background.
+      setWorktrees([...useStore.getState().worktrees, created]);
       setActiveWorktree(created.id);
+      await refreshList();
     } catch (e) {
       void errorDialog(`worktree create failed: ${e}`);
     } finally {
