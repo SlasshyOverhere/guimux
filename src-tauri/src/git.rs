@@ -12,8 +12,21 @@ pub struct FileStatus {
 
 const DIFF_CAP: usize = 1_000_000; // 1MB per file
 
+/// All git spawns go through here: on Windows a child console process flashes
+/// a visible console window unless CREATE_NO_WINDOW is set — that flash is
+/// the "terminals popping in and out" on startup and on every status poll.
+pub fn git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(args)
         .current_dir(repo)
         .output()
@@ -50,21 +63,27 @@ pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
-    // `git rev-parse --show-toplevel` succeeds anywhere inside a worktree.
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+    // Single spawn: toplevel + branch in one `rev-parse`. Two spawns per
+    // project doubled startup latency and flashed two console windows each.
+    // `--show-toplevel` succeeds anywhere inside a worktree; a `HEAD`
+    // abbrev-ref means detached (no current branch).
+    let out = git_cmd()
+        .args(["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"])
         .current_dir(&p)
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            let root = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let branch = Command::new("git")
-                .args(["branch", "--show-current"])
-                .current_dir(&root)
-                .output()
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b.stdout).trim().to_string())
-                .filter(|b| !b.is_empty());
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            let mut lines = text.lines();
+            let root = lines.next().unwrap_or("").trim().to_string();
+            if root.is_empty() {
+                return Err("git rev-parse returned no toplevel".into());
+            }
+            let branch = lines
+                .next()
+                .map(str::trim)
+                .filter(|b| !b.is_empty() && *b != "HEAD")
+                .map(str::to_string);
             Ok(ProjectInfo {
                 name: PathBuf::from(&root)
                     .file_name()
@@ -93,7 +112,7 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
         return Err(format!("not a directory: {path}"));
     }
     let initial = branch.unwrap_or_else(|| "main".into());
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["init", "-b", &initial])
         .current_dir(&p)
         .output()

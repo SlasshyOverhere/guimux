@@ -143,13 +143,24 @@ export function WorktreeSidebar() {
 
   const refreshList = async () => {
     if (!repoRoot || !isGit) return;
-    const wts: Worktree[] = await invoke("worktree_list", { repoRoot });
-    setWorktrees(wts);
-    if (wts.length > 0) {
-      const st = useStore.getState();
-      if (!wts.find((w) => w.id === st.activeWorktreeId)) {
-        setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
+    // Skip while App's loader owns this repoRoot: App always lists right
+    // after it sets repoRoot, so a sidebar re-list here doubles the spawns
+    // on every project switch (and on startup).
+    await new Promise((r) => setTimeout(r, 1500));
+    const st = useStore.getState();
+    if (st.repoRoot !== repoRoot) return;
+    try {
+      const wts: Worktree[] = await invoke("worktree_list", { repoRoot });
+      if (useStore.getState().repoRoot !== repoRoot) return;
+      setWorktrees(wts);
+      if (wts.length > 0) {
+        const cur = useStore.getState();
+        if (!wts.find((w) => w.id === cur.activeWorktreeId)) {
+          setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
+        }
       }
+    } catch {
+      /* App's loader surfaces list errors in the banner; stay quiet here */
     }
   };
 
@@ -162,18 +173,29 @@ export function WorktreeSidebar() {
     let cancelled = false;
     const poll = async () => {
       if (!repoRoot || !isGit) return;
+      // Active worktree first (snappy badge), the rest staggered 300ms
+      // apart so N worktrees never burst N git spawns at once on startup.
+      const ids = worktrees.filter((wt) => !wt.id.startsWith("plain:")).map((wt) => wt.id);
+      const paths = new Map(worktrees.map((wt) => [wt.id, wt.path]));
+      const ordered = [
+        ...ids.filter((id) => id === useStore.getState().activeWorktreeId),
+        ...ids.filter((id) => id !== useStore.getState().activeWorktreeId),
+      ];
       const next: Record<string, FileStatus[]> = {};
-      for (const wt of worktrees) {
-        if (wt.id.startsWith("plain:")) continue;
+      for (const [i, id] of ordered.entries()) {
+        if (i > 0) await new Promise((r) => setTimeout(r, 300));
+        if (cancelled) return;
         try {
-          next[wt.id] = await invoke("git_status", { path: wt.path });
+          next[id] = await invoke("git_status", { path: paths.get(id)! });
         } catch {
-          next[wt.id] = [];
+          next[id] = [];
         }
+        if (!cancelled) setStatuses({ ...next });
       }
       if (!cancelled) setStatuses(next);
     };
-    poll();
+    // First poll deferred 3s: the shell burst owns startup; badges catch up.
+    const first = setTimeout(() => void poll(), 3000);
     // 8s (not 4s) and skipped while the window is hidden: git_status runs
     // per worktree and this poll is the app's steady-state background load.
     const t = setInterval(() => {
@@ -181,6 +203,7 @@ export function WorktreeSidebar() {
     }, 8000);
     return () => {
       cancelled = true;
+      clearTimeout(first);
       clearInterval(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

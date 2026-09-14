@@ -1,6 +1,6 @@
+use crate::git::git_cmd;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tauri::command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,7 @@ pub struct Worktree {
 }
 
 fn last_commit_ts(path: &Path) -> Option<i64> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["log", "-1", "--format=%ct"])
         .current_dir(path)
         .output()
@@ -47,7 +47,8 @@ fn rand_id_suffix() -> u16 {
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Some operations (merge) need a real CLI; run in the repo root.
-    let out = Command::new("git")
+    // NO_WINDOW + no rev-parse-audit: one spawn per op, invisible on Windows.
+    let out = git_cmd()
         .args(args)
         .current_dir(repo)
         .output()
@@ -63,21 +64,8 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn repo_root_of(path: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if out.status.success() {
-        Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
-    } else {
-        None
-    }
-}
-
 fn current_branch(path: &Path) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["branch", "--show-current"])
         .current_dir(path)
         .output()
@@ -91,7 +79,7 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
     if !root.exists() {
         return Err(format!("repo root does not exist: {repo_root}"));
     }
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(&root)
         .output()
@@ -105,41 +93,76 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut trees: Vec<Worktree> = vec![];
+    // (path, branch, head-hash, is_main). HEAD is free in this output; the
+    // old code ignored it and ran one `git log` per worktree (N spawns on
+    // the startup path). Timestamps resolve in one batch spawn below.
+    let mut rows: Vec<(String, String, String, bool)> = vec![];
     let mut cur_path = String::new();
     let mut cur_branch = String::new();
-    let mut first = true;
+    let mut cur_head = String::new();
+    // Non-closure flush: borrows of `rows` inside an FnMut closure fight the
+    // loop's later borrows. A macro expands inline, no borrow issue. First
+    // flushed row is main (git lists it first).
+    macro_rules! flush {
+        () => {
+            if !cur_path.is_empty() {
+                let is_main = rows.is_empty();
+                rows.push((cur_path.clone(), cur_branch.clone(), cur_head.clone(), is_main));
+                cur_path.clear();
+                cur_branch.clear();
+                cur_head.clear();
+            }
+        };
+    }
     for line in text.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
+            flush!();
             cur_path = p.to_string();
-            cur_branch = String::new();
         } else if let Some(b) = line.strip_prefix("branch ") {
             cur_branch = b.trim_start_matches("refs/heads/").to_string();
-        } else if line.is_empty() && !cur_path.is_empty() {
-            let is_main = first;
-            first = false;
-            let last_commit = last_commit_ts(Path::new(&cur_path));
-            trees.push(Worktree {
-                id: cur_path.clone(),
-                path: cur_path.clone(),
-                branch: cur_branch.clone(),
-                is_main,
-                last_commit,
-            });
-            cur_path = String::new();
+        } else if let Some(h) = line.strip_prefix("HEAD ") {
+            cur_head = h.trim().to_string();
+        } else if line.is_empty() {
+            flush!();
         }
     }
-    if !cur_path.is_empty() {
-        let last_commit = last_commit_ts(Path::new(&cur_path));
-        trees.push(Worktree {
-            id: cur_path.clone(),
-            path: cur_path.clone(),
-            branch: cur_branch.clone(),
-            is_main: first,
-            last_commit,
-        });
+    flush!();
+    let stamps = batch_commit_ts(&root, rows.iter().map(|r| r.2.clone()).collect());
+    Ok(rows
+        .into_iter()
+        .map(|(path, branch, head, is_main)| Worktree {
+            id: path.clone(),
+            path,
+            branch,
+            is_main,
+            last_commit: stamps.get(&head).copied(),
+        })
+        .collect())
+}
+
+/// One `git log --no-walk` for every worktree HEAD (empty map on failure).
+fn batch_commit_ts(repo: &Path, heads: Vec<String>) -> std::collections::HashMap<String, i64> {
+    use std::collections::HashMap;
+    let mut map = HashMap::new();
+    let heads: Vec<String> = heads.into_iter().filter(|h| !h.is_empty()).collect();
+    if heads.is_empty() {
+        return map;
     }
-    Ok(trees)
+    let mut args: Vec<&str> = vec!["log", "--no-walk", "--format=%H %ct"];
+    args.extend(heads.iter().map(|s| s.as_str()));
+    let out = match git_cmd().args(&args).current_dir(repo).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return map,
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(h), Some(ts)) = (it.next(), it.next()) {
+            if let Ok(ts) = ts.parse() {
+                map.insert(h.to_string(), ts);
+            }
+        }
+    }
+    map
 }
 
 #[command]
@@ -297,7 +320,7 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
 
 fn find_main_worktree(path: &Path) -> Option<PathBuf> {
     // git worktree list from any worktree; first entry is main
-    let out = Command::new("git")
+    let out = git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(path)
         .output()
@@ -314,7 +337,7 @@ fn find_main_worktree(path: &Path) -> Option<PathBuf> {
 fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     // Heuristic: merge-base with main/master; fallback to current HEAD of main worktree.
     for cand in ["main", "master"] {
-        let ok = Command::new("git")
+        let ok = git_cmd()
             .args(["merge-base", "--is-ancestor", branch, cand])
             .current_dir(main_wt)
             .output();
@@ -335,6 +358,7 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
 
     fn fixture_repo() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("guimux-test-{}", std::process::id()));

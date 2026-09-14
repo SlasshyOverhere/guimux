@@ -158,9 +158,12 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
     };
 
     let encoded = cached_bootstrap(cwd);
+    // -NoProfile: user $PROFILE scripts can add seconds per spawn and the
+    // bootstrap below already sets the cwd itself, so profiles buy nothing.
     let ps_args = || {
         vec![
             "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
             "-NoExit".to_string(),
             "-EncodedCommand".to_string(),
             encoded.clone(),

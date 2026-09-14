@@ -570,16 +570,16 @@ export default function App() {
       const st = useStore.getState();
       if (saved?.settings) st.hydrateSettings(saved.settings);
       if (saved && saved.projects.length > 0) {
-        st.hydrate(saved.projects, saved.activeProjectId);
-        // Re-detect each project: refreshes branch/gitRoot, drops deleted folders.
-        const fresh: Project[] = [];
-        for (const p of saved.projects) {
-          try {
-            fresh.push(await detectToProject(p.path));
-          } catch {
-            /* folder gone or unreadable: drop it */
-          }
-        }
+        // Single hydrate AFTER re-detect (parallel): the old two-hydrate
+        // sequence (saved, then fresh) reset layout/worktrees mid-mount,
+        // killing the just-spawned PTY and flashing a kill+respawn cycle —
+        // the "terminals popping in and out" on startup.
+        // Re-detect refreshes branch/gitRoot and drops deleted folders.
+        const settled = await Promise.all(
+          saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
+        );
+        if (cancelled) return;
+        const fresh = settled.filter((p): p is Project => p !== null);
         if (cancelled) return;
         const cur = useStore.getState();
         if (fresh.length === 0) {
@@ -636,13 +636,20 @@ export default function App() {
     }
   };
 
-  // Re-run the worktree loader when git facts of the active project change.
-  const activeProject = useStore((s) =>
-    s.projects.find((x) => x.id === s.activeProjectId) ?? null,
-  );
+  // Worktree loader: keyed ONLY on project identity, never on the object
+  // (a fresh projects array each hydrate re-created `activeProject` and
+  // re-ran this effect, double-listing worktrees and remounting the PTY).
+  const activeProjectIdSel = useStore((s) => s.activeProjectId);
+  const activeProjectGitKey = useStore((s) => {
+    const p = s.projects.find((x) => x.id === s.activeProjectId) ?? null;
+    return p ? `${p.id}::${p.isGit ? (p.gitRoot ?? p.path) : p.path}` : null;
+  });
   useEffect(() => {
-    if (!hydrated) return;
-    const p = activeProject;
+    if (!hydrated || !activeProjectGitKey) return;
+    const sep = activeProjectGitKey.lastIndexOf("::");
+    const id = activeProjectGitKey.slice(0, sep);
+    const st0 = useStore.getState();
+    const p = st0.projects.find((x) => x.id === id) ?? null;
     if (!p) return;
     let cancelled = false;
     (async () => {
@@ -652,6 +659,8 @@ export default function App() {
           const root = p.gitRoot ?? p.path;
           setRepoRoot(root);
           let wts: Worktree[] | null = null;
+          // Defer one frame: lets first paint land before the shell burst.
+          await new Promise((r) => requestAnimationFrame(() => r(null)));
           try {
             const listed = await invoke<Worktree[]>("worktree_list", { repoRoot: root });
             if (listed.length > 0) wts = listed;
@@ -697,7 +706,7 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, activeProjectId, activeProject]);
+  }, [hydrated, activeProjectGitKey, activeProjectIdSel]);
 
   // Ctrl+K palette, Ctrl+D split, Ctrl+, settings,
   // Ctrl+=/-/0 app zoom (terminals own these keys when focused)

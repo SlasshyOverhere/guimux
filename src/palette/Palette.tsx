@@ -74,7 +74,10 @@ export function Palette() {
   }, [paletteOpen]);
 
   useEffect(() => {
-    if (!repoRoot) return;
+    // Lazy: only scan when the palette opens. The old effect walked the
+    // tree on every repoRoot change (startup included) for results nobody
+    // saw until Ctrl+K.
+    if (!repoRoot || !paletteOpen) return;
     invoke<FsNode>("fs_tree", { path: repoRoot, depth: 3 })
       .then((t) => {
         const flat: FsNode[] = [];
@@ -86,7 +89,7 @@ export function Palette() {
         setFiles(flat);
       })
       .catch(() => setFiles([]));
-  }, [repoRoot]);
+  }, [repoRoot, paletteOpen]);
 
   const openFolder = async () => {
     try {

@@ -127,11 +127,13 @@ export function ExplorerPane({ root }: { root: string }) {
   }, [editorPath, diffMode, content]);
 
   useEffect(() => {
-    if (!editorPath) return;
+    if (!editorPath || !diffMode) return;
+    // Diff-only: the old effect ran `git diff` on every file open even when
+    // the diff view was never shown, adding a spawn to the startup path.
     invoke<string>("git_diff", { path: root, base: null })
       .then(setGitDiff)
       .catch(() => setGitDiff(""));
-  }, [root, editorPath]);
+  }, [root, editorPath, diffMode]);
 
   const shortName = useMemo(() => {
     if (!editorPath) return "";
