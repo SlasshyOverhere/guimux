@@ -156,12 +156,12 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     }
     if (!text.includes("\x1b]")) {
       // No OSC opener: still bound the tail for the rare split sequence.
-      snoopTailRef.current = (snoopTailRef.current + text).slice(-128);
+      snoopTailRef.current = (snoopTailRef.current + text).slice(-512);
       return;
     }
     const buf = snoopTailRef.current + text;
     const found = extractLiveCwd(buf);
-    snoopTailRef.current = buf.slice(-128);
+    snoopTailRef.current = buf.slice(-512);
     if (found && found !== liveCwdRef.current) {
       liveCwdRef.current = found;
       useStore.getState().setPaneCwd(paneId, found);
