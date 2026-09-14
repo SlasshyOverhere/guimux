@@ -55,7 +55,7 @@ function TreeNode({
       <div
         role="button"
         tabIndex={0}
-        className="flex cursor-pointer items-center gap-1.5 rounded-md px-1 py-[3px] text-[12.5px] text-ink-300 hover:bg-white/[0.04] hover:text-ink-100"
+        className="gm-row flex cursor-pointer items-center gap-1.5 px-1 py-[5px] text-[12.5px] text-ink-300 hover:text-ink-100"
         style={{ paddingLeft: depth * 14 + 6 }}
         onClick={() => (isDir ? setOpen(!open) : onOpen(node.path))}
         onKeyDown={(e) => {
@@ -84,15 +84,15 @@ function TreeNode({
       >
         {isDir ? (
           <>
-            <span className="w-3 shrink-0 text-ink-400">
-              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span className="w-3 shrink-0 text-ink-500">
+              {open ? <ChevronDown size={12} strokeWidth={2} /> : <ChevronRight size={12} strokeWidth={2} />}
             </span>
-            <Folder size={13} className="shrink-0 text-ink-400" strokeWidth={2} />
+            <Folder size={14} className="shrink-0 text-ink-500" strokeWidth={2} />
           </>
         ) : (
           <>
             <span className="w-3 shrink-0" />
-            <FileIcon size={13} className="shrink-0 text-ink-400" strokeWidth={2} />
+            <FileIcon size={14} className="shrink-0 text-ink-500" strokeWidth={2} />
           </>
         )}
         {isRenaming ? (
@@ -343,18 +343,16 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const menuEl = menu && (
     <div
-      className="tnum fixed z-50 w-40 overflow-hidden rounded-lg py-1 shadow-pop"
+      className="gm-menu tnum fixed z-50 w-40"
       style={{
         left: Math.min(menu.x, window.innerWidth - 180),
         top: Math.min(menu.y, window.innerHeight - 80),
-        background: "var(--gm-overlay)",
-        border: "1px solid var(--gm-hairline)",
       }}
       onClick={(e) => e.stopPropagation()}
       role="menu"
     >
       <button
-        className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+        className="gm-menu-item"
         onClick={() => startRename(menu.path)}
         role="menuitem"
       >
@@ -394,7 +392,7 @@ export function ExplorerPane({ root }: { root: string }) {
 
   if (!editorPath) {
     return (
-      <div className="relative flex h-full shrink-0 flex-col bg-ink-900" style={{ width, borderLeft: "1px solid var(--gm-hairline)" }}>
+      <div className="relative flex h-full shrink-0 flex-col bg-ink-900" style={{ width, borderLeft: "1px solid var(--gm-hairline-soft)" }}>
         <div
           className="group absolute bottom-0 left-[-2.5px] top-0 z-20 w-[5px] cursor-col-resize"
           onMouseDown={onResizeDown}
@@ -405,30 +403,30 @@ export function ExplorerPane({ root }: { root: string }) {
             style={{ background: "var(--gm-ink-mute)" }}
           />
         </div>
-        <div className="flex items-center justify-between px-3 pb-1.5 pt-2.5">
-          <span className="text-[11px] font-semibold text-ink-400">Explorer</span>
+        <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">Explorer</span>
           <span className="flex gap-0.5">
-            <button title="New file" aria-label="New file" className="rounded-md p-1 text-ink-400 hover:bg-white/[0.05] hover:text-ink-200" onClick={() => void newFile()}>
-              <FilePlus2 size={13} />
+            <button title="New file" aria-label="New file" className="gm-icon-btn gm-icon-btn--sm" onClick={() => void newFile()}>
+              <FilePlus2 size={14} strokeWidth={2} />
             </button>
-            <button title="Refresh file tree" aria-label="Refresh file tree" className="rounded-md p-1 text-ink-400 hover:bg-white/[0.05] hover:text-ink-200" onClick={refreshTree}>
-              <RotateCcw size={12} />
+            <button title="Refresh file tree" aria-label="Refresh file tree" className="gm-icon-btn gm-icon-btn--sm" onClick={refreshTree}>
+              <RotateCcw size={13} strokeWidth={2} />
             </button>
           </span>
         </div>
-        <div className="tnum truncate px-3 pb-2 text-[11px] text-ink-400" title={root}>
+        <div className="gm-meta tnum truncate px-4 pb-2" title={root}>
           {root}
         </div>
-        <div className="flex-1 overflow-y-auto px-1.5 pb-2">
+        <div className="flex-1 overflow-y-auto px-2 pb-2">
           {tree?.children?.length ? (
             tree.children.map((c) => (
               <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} />
             ))
           ) : (
-            <div className="p-2 text-[12px] text-ink-400">No files</div>
+            <div className="px-2.5 py-2 text-[12px] text-ink-400">No files</div>
           )}
         </div>
-        <div className="px-3 py-2 text-[11px] text-ink-400" style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}>
+        <div className="gm-meta px-4 py-2.5">
           Right-click a file to rename · drag into a terminal to paste its path
         </div>
         {menuEl}
@@ -439,7 +437,7 @@ export function ExplorerPane({ root }: { root: string }) {
   const renamingOpenFile = renaming === editorPath;
 
   return (
-    <div className="relative flex h-full max-w-[60vw] shrink-0 flex-col bg-ink-900" style={{ width: Math.max(width, 400), borderLeft: "1px solid var(--gm-hairline)" }}>
+    <div className="relative flex h-full max-w-[60vw] shrink-0 flex-col bg-ink-900" style={{ width: Math.max(width, 400), borderLeft: "1px solid var(--gm-hairline-soft)" }}>
       <div
         className="group absolute bottom-0 left-[-2.5px] top-0 z-20 w-[5px] cursor-col-resize"
         onMouseDown={onResizeDown}
@@ -451,14 +449,13 @@ export function ExplorerPane({ root }: { root: string }) {
         />
       </div>
       <div
-        className="flex items-center justify-between gap-2 px-2 py-1.5"
-        style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
+        className="flex items-center justify-between gap-2 px-2.5 py-2"
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <button className="rounded-md p-1 text-ink-400 hover:bg-white/[0.05] hover:text-ink-200" onClick={() => void closeEditorGuarded()} title="Close editor (back to tree)">
-            <X size={14} />
+          <button className="gm-icon-btn gm-icon-btn--sm" onClick={() => void closeEditorGuarded()} title="Close editor (back to tree)">
+            <X size={14} strokeWidth={2} />
           </button>
-          <FileIcon size={13} className="shrink-0 text-ink-400" />
+          <FileIcon size={14} strokeWidth={2} className="shrink-0 text-ink-500" />
           {renamingOpenFile ? (
             <input
               autoFocus
@@ -485,49 +482,49 @@ export function ExplorerPane({ root }: { root: string }) {
             </span>
           )}
           {dirty ? (
-            <span className="tnum shrink-0 text-[11px] font-medium" style={{ color: "var(--gm-amber)" }}>edited</span>
+            <span className="tnum shrink-0 text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>edited</span>
           ) : (
-            <span className="tnum shrink-0 text-[11px] text-ink-400">saved</span>
+            <span className="gm-meta tnum shrink-0">saved</span>
           )}
         </div>
-        <div className="flex shrink-0 gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
           {!diffMode && (
             <>
               <button
                 title="Rename file (F2)"
                 aria-label="Rename file"
-                className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+                className="gm-icon-btn gm-icon-btn--sm"
                 onClick={() => editorPath && startRename(editorPath)}
               >
-                <Pencil size={13} />
+                <Pencil size={14} strokeWidth={2} />
               </button>
               <button
                 title="Toggle diff"
-                className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+                className="gm-icon-btn gm-icon-btn--sm"
                 onClick={() => openEditor(editorPath, true)}
               >
-                <FileDiff size={14} />
+                <FileDiff size={14} strokeWidth={2} />
               </button>
               {dirty && (
                 <button
                   title="Revert"
-                  className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+                  className="gm-icon-btn gm-icon-btn--sm"
                   onClick={revert}
                 >
-                  <RotateCcw size={13} />
+                  <RotateCcw size={13} strokeWidth={2} />
                 </button>
               )}
               <button
                 title="Save (Ctrl+S)"
-                className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-semibold"
+                className="gm-icon-btn ml-1 h-[30px] gap-1.5 px-3 text-[12px] font-semibold"
                 style={
                   dirty
                     ? { background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }
-                    : { color: "var(--gm-ink-mute)" }
+                    : { color: "var(--gm-ink-faint)" }
                 }
                 onClick={save}
               >
-                <Save size={13} /> Save
+                <Save size={13} strokeWidth={2} /> Save
               </button>
             </>
           )}
@@ -536,7 +533,7 @@ export function ExplorerPane({ root }: { root: string }) {
       <div className="min-h-0 flex-1">
         {diffMode ? (
           <div className="flex h-full flex-col">
-            <div className="tnum flex items-center gap-2 px-3 py-1.5 text-[11px] text-ink-400" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
+            <div className="tnum gm-meta flex items-center gap-2 px-3 py-1.5" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
               <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: "var(--gm-green)" }} /> added</span>
               <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm" style={{ background: "var(--gm-red)" }} /> removed</span>
               <span className="flex-1" />

@@ -31,7 +31,7 @@ function statusLetter(s: FileStatus): { letter: string; color: string; label: st
   return { letter: "·", color: "var(--gm-ink-dim)", label: s.workdir_status || "changed" };
 }
 
-// Long Windows paths wrap mid-segment and wreck the table; shorten to the
+// Long Windows paths wrap mid-segment and wreck the list; shorten to the
 // last two segments. Main worktree keeps its full path (it is the anchor).
 function shortPath(p: string, full: boolean): string {
   if (full) return p;
@@ -55,6 +55,7 @@ export function WorktreeSidebar() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [base, setBase] = useState("");
+  const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, FileStatus[]>>({});
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
@@ -216,6 +217,17 @@ export function WorktreeSidebar() {
     };
   }, [menu]);
 
+  const openCreate = async () => {
+    setCreating(true);
+    if (!repoRoot) return;
+    try {
+      const list: string[] = await invoke("git_branches", { repoRoot });
+      setBranches(list);
+    } catch {
+      setBranches([]);
+    }
+  };
+
   const create = async () => {
     if (!repoRoot || !isGit) return;
     const label = name.trim() || "worktree";
@@ -314,13 +326,10 @@ export function WorktreeSidebar() {
     .sort((a, b) => Number(!!pinned[b.id]) - Number(!!pinned[a.id]));
   const menuWt = menu ? worktrees.find((w) => w.id === menu.id) ?? null : null;
 
-  const tabBtn = (active: boolean) =>
-    `text-[12px] ${active ? "font-semibold text-ink-100" : "font-medium text-ink-400 hover:text-ink-200"}`;
-
   return (
     <div
       className="relative flex h-full shrink-0 flex-col bg-ink-900"
-      style={{ width, borderRight: "1px solid var(--gm-hairline)" }}
+      style={{ width, borderRight: "1px solid var(--gm-hairline-soft)" }}
     >
       <div
         className="group absolute bottom-0 right-[-2.5px] top-0 z-20 w-[5px] cursor-col-resize"
@@ -338,55 +347,63 @@ export function WorktreeSidebar() {
         />
       </div>
 
-      {/* ledger sentence: what this project holds, in words */}
-      <div className="px-3.5 pt-2.5">
-        <div className="truncate px-0.5 text-[12.5px] font-semibold text-ink-100" title={proj?.path}>
-          {proj?.name ?? "No project"}{" "}
-          <span className="font-medium text-ink-400">
-            {!isGit ? "is a plain folder." : `has ${live.length} live ${live.length === 1 ? "worktree" : "worktrees"}.`}
-          </span>
-        </div>
+      {/* header: section label + count, the only heading in this panel */}
+      <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">
+          Worktrees
+        </span>
+        {isGit && (
+          <span className="tnum gm-meta">{live.length + settled.length}</span>
+        )}
       </div>
 
       {/* filter: underline, not a box */}
       <div
-        className="mx-3.5 mt-0.5 flex items-center gap-1.5"
-        style={{ borderBottom: "1px solid var(--gm-hairline)" }}
+        className="mx-4 flex items-center gap-1.5"
+        style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
       >
-        <Search size={12} className="shrink-0 text-ink-400" />
+        <Search size={13} strokeWidth={2} className="shrink-0 text-ink-500" />
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={isGit ? "Filter branches and paths" : "Filter"}
           aria-label="Filter worktrees"
-          className="w-full bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
+          className="w-full bg-transparent py-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
         />
         {query && (
           <button
-            className="shrink-0 rounded p-0.5 text-ink-400 hover:text-ink-200"
+            className="shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
             onClick={() => setQuery("")}
             title="Clear filter"
             aria-label="Clear filter"
           >
-            <X size={12} />
+            <X size={12} strokeWidth={2} />
           </button>
         )}
       </div>
 
-      {/* ledger tabs: words with a weight shift, nothing else */}
-      <div className="flex items-center gap-4 px-4 pt-2">
-        <button className={tabBtn(tab === "worktrees")} onClick={() => setTab("worktrees")}>
+      {/* tabs: active reads through weight + color only */}
+      <div className="flex items-center gap-4 px-4 pb-0.5 pt-2">
+        <button
+          className="gm-tab"
+          data-active={tab === "worktrees"}
+          onClick={() => setTab("worktrees")}
+        >
           Worktrees
         </button>
         {isGit && (
-          <button className={`tnum ${tabBtn(tab === "changes")}`} onClick={() => setTab("changes")}>
+          <button
+            className="gm-tab tnum"
+            data-active={tab === "changes"}
+            onClick={() => setTab("changes")}
+          >
             Changes{totalDirty > 0 ? ` · ${totalDirty}` : ""}
           </button>
         )}
       </div>
 
       {tab === "worktrees" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
           {isPlain && (
             <div className="px-1 py-1 text-[12px] leading-5 text-ink-300">
               Terminals and files work now; worktrees appear after init.{" "}
@@ -400,7 +417,7 @@ export function WorktreeSidebar() {
           )}
 
           {pending && (
-            <div className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-ink-400">
+            <div className="flex items-center gap-2 rounded-md px-2.5 py-2 text-[12px] text-ink-400">
               <span
                 className="h-3 w-3 shrink-0 animate-spin rounded-full"
                 style={{ border: "2px solid var(--gm-hairline)", borderTopColor: "var(--gm-ink-mute)" }}
@@ -419,38 +436,45 @@ export function WorktreeSidebar() {
                 role="button"
                 tabIndex={0}
                 aria-pressed={selected}
-                className={`cursor-pointer rounded-md px-2 py-[7px] ${
-                  selected ? "bg-white/[0.055]" : "hover:bg-white/[0.03]"
-                }`}
-                style={selected ? { boxShadow: "inset 2px 0 0 var(--gm-accent)" } : undefined}
+                data-selected={selected}
+                className="gm-row cursor-pointer px-2.5 py-2"
+                style={selected ? { boxShadow: "inset 2px 0 0 var(--gm-ink-mute)" } : undefined}
                 onClick={() => setActiveWorktree(wt.id)}
                 onKeyDown={rowKey(() => setActiveWorktree(wt.id))}
                 onContextMenu={(e) => openMenu(e, wt.id)}
                 title={plainRow ? wt.path : `${wt.branch}\n${wt.path}\nRight-click for open, pin, copy, merge, remove.`}
               >
-                <div
-                  className={`truncate text-[12.5px] ${
-                    selected || dirty > 0 ? "font-semibold text-ink-100" : "font-medium text-ink-300"
-                  }`}
-                >
-                  {wt.branch}
-                  {!plainRow && wt.is_main && (
-                    <span className="font-medium text-ink-400"> · main</span>
-                  )}
-                  {pinned[wt.id] && (
-                    <span className="font-medium text-ink-400"> · pinned</span>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span
+                    className={`min-w-0 flex-1 truncate text-[13px] ${
+                      selected ? "font-semibold text-ink-100" : "font-medium text-ink-200"
+                    }`}
+                  >
+                    {wt.branch}
+                    {!plainRow && wt.is_main && (
+                      <span className="font-normal text-ink-500"> · main</span>
+                    )}
+                    {pinned[wt.id] && (
+                      <span className="font-normal text-ink-500"> · pinned</span>
+                    )}
+                  </span>
+                  {dirty > 0 ? (
+                    <span className="tnum flex-none text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>
+                      {dirty}
+                    </span>
+                  ) : (
+                    <span className="gm-meta tnum flex-none">clean</span>
                   )}
                 </div>
-                <div className="tnum mt-px flex items-baseline justify-between gap-2 text-[11px] text-ink-400">
-                  <span className="mono min-w-0 flex-1 truncate">{shortPath(wt.path, wt.is_main)}</span>
-                  <span className="mono flex-none">{dirty > 0 ? `${dirty} changed` : "clean"}</span>
+                <div className="gm-meta mono mt-0.5 truncate" title={wt.path}>
+                  {shortPath(wt.path, wt.is_main)}
                 </div>
               </div>
             );
           })}
 
           {live.length === 0 && settled.length === 0 && q && (
-            <div className="px-2 py-4 text-center text-[12px] text-ink-400">
+            <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">
               No worktrees match.
             </div>
           )}
@@ -458,13 +482,15 @@ export function WorktreeSidebar() {
           {settled.length > 0 && (
             <div className="mt-1">
               <button
-                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] font-medium text-ink-400 hover:text-ink-300"
+                className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
+                data-active={false}
                 onClick={() => setSettledOpen((o) => !o)}
                 aria-expanded={settledOpen}
                 title="Worktrees quiet for over 48 hours"
               >
                 <ChevronRight
                   size={12}
+                  strokeWidth={2}
                   className={`shrink-0 transition-transform ${settledOpen ? "rotate-90" : ""}`}
                 />
                 <span className="tnum">
@@ -477,19 +503,19 @@ export function WorktreeSidebar() {
                     key={wt.id}
                     role="button"
                     tabIndex={0}
-                    className="cursor-pointer rounded-md px-2 py-[7px] opacity-60 hover:bg-white/[0.03] hover:opacity-100"
+                    className="gm-row cursor-pointer px-2.5 py-2 opacity-60 hover:opacity-100"
                     onClick={() => revive(wt.id)}
                     onKeyDown={rowKey(() => revive(wt.id))}
                     onContextMenu={(e) => openMenu(e, wt.id)}
                     title={`${wt.branch}\n${wt.path}\nQuiet over 48h — click to make active again.`}
                   >
-                    <div className="truncate text-[12px] font-medium text-ink-300">
+                    <div className="truncate text-[12.5px] font-medium text-ink-300">
                       {wt.branch}
                       {pinned[wt.id] && (
-                        <span className="text-ink-400"> · pinned</span>
+                        <span className="font-normal text-ink-500"> · pinned</span>
                       )}
                     </div>
-                    <div className="tnum mono mt-px truncate text-[11px] text-ink-400">
+                    <div className="gm-meta mono mt-0.5 truncate">
                       {shortPath(wt.path, false)}
                     </div>
                   </div>
@@ -498,11 +524,11 @@ export function WorktreeSidebar() {
           )}
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
           {isGit && activeWt && (
-            <div className="px-1 pb-1 text-[12.5px] font-semibold text-ink-100">
+            <div className="px-2.5 pb-1 pt-1 text-[12.5px] font-semibold text-ink-100">
               {activeWt.branch}{" "}
-              <span className="font-medium text-ink-400">
+              <span className="font-normal text-ink-500">
                 {activeStatuses.length === 0
                   ? "is clean."
                   : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
@@ -517,7 +543,7 @@ export function WorktreeSidebar() {
                   key={s.path}
                   role="button"
                   tabIndex={0}
-                  className="flex cursor-pointer items-baseline gap-2 rounded-md px-2 py-[5px] hover:bg-white/[0.03]"
+                  className="gm-row flex cursor-pointer items-baseline gap-2 px-2.5 py-[5px]"
                   onClick={() => openEditor(`${activeWt!.path}/${s.path}`, true)}
                   onKeyDown={rowKey(() => openEditor(`${activeWt!.path}/${s.path}`, true))}
                   title={`${s.path} (${g.label})`}
@@ -536,9 +562,9 @@ export function WorktreeSidebar() {
         </div>
       )}
 
-      {/* footer: new worktree is a ledger line, not a dashed button */}
+      {/* footer: new worktree is a quiet line in the panel, not a box */}
       {tab === "worktrees" && isGit && (
-        <div className="px-3.5 pb-2.5">
+        <div className="px-4 pb-3">
           {creating ? (
             <div className="pt-1">
               <input
@@ -558,12 +584,18 @@ export function WorktreeSidebar() {
                 style={{ borderColor: "var(--gm-hairline)" }}
                 placeholder="start from (blank = current HEAD)"
                 value={base}
+                list="gm-base-branches"
                 onChange={(e) => setBase(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") create();
                   if (e.key === "Escape") setCreating(false);
                 }}
               />
+              <datalist id="gm-base-branches">
+                {branches.map((b) => (
+                  <option key={b} value={b} />
+                ))}
+              </datalist>
               <div className="flex items-center gap-4 pt-2">
                 <button
                   className="text-[12px] font-semibold text-ink-100 hover:underline"
@@ -581,9 +613,8 @@ export function WorktreeSidebar() {
             </div>
           ) : (
             <button
-              className="w-full border-t pt-2 text-left text-[12px] font-medium text-ink-400 hover:text-ink-100"
-              style={{ borderColor: "var(--gm-hairline-soft)" }}
-              onClick={() => setCreating(true)}
+              className="w-full pt-2 text-left text-[12px] font-medium text-ink-500 hover:text-ink-100"
+              onClick={() => void openCreate()}
             >
               + New worktree
             </button>
@@ -594,18 +625,16 @@ export function WorktreeSidebar() {
       {/* row context menu: words only — open, pin, copy, merge, remove */}
       {menu && menuWt && (
         <div
-          className="tnum fixed z-50 w-48 overflow-hidden rounded-lg py-1 shadow-pop"
+          className="gm-menu tnum fixed z-50 w-48"
           style={{
             left: Math.min(menu.x, window.innerWidth - 200),
             top: Math.min(menu.y, window.innerHeight - 220),
-            background: "var(--gm-overlay)",
-            border: "1px solid var(--gm-hairline)",
           }}
           onClick={(e) => e.stopPropagation()}
           role="menu"
         >
           <button
-            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="gm-menu-item"
             onClick={() => {
               setActiveWorktree(menuWt.id);
               setMenu(null);
@@ -615,7 +644,7 @@ export function WorktreeSidebar() {
             Open worktree
           </button>
           <button
-            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="gm-menu-item"
             onClick={() => {
               togglePin(menuWt.id);
               setMenu(null);
@@ -625,7 +654,7 @@ export function WorktreeSidebar() {
             {pinned[menuWt.id] ? "Unpin" : "Pin to top"}
           </button>
           <button
-            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="gm-menu-item"
             onClick={() => {
               void copyPath(menuWt.path);
               setMenu(null);
@@ -637,7 +666,7 @@ export function WorktreeSidebar() {
           {!menuWt.is_main && !menuWt.id.startsWith("plain:") && (
             <>
               <button
-                className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+                className="gm-menu-item"
                 onClick={() => {
                   setMenu(null);
                   merge(menuWt);
@@ -647,7 +676,7 @@ export function WorktreeSidebar() {
                 Merge into base
               </button>
               <button
-                className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+                className="gm-menu-item"
                 onClick={() => {
                   setMenu(null);
                   remove(menuWt);

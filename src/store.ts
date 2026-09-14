@@ -92,6 +92,28 @@ function tileGrid(panes: Pane[], depth = 0): PaneNode {
   };
 }
 
+// Agent fan-out never goes more than 2 across: TUIs wrap at ~80 cols and
+// truncate below ~50, so width is sacred and height is spent instead.
+// 4 tiles = 2x2, 6 tiles = 3 rows of 2. Rows share height equally via the
+// k/(k+1) ratio as each new row appends below.
+function tileAgents(panes: Pane[]): PaneNode {
+  if (panes.length <= 2) return tileGrid(panes);
+  const rows: PaneNode[] = [];
+  for (let i = 0; i < panes.length; i += 2) {
+    const pair = panes.slice(i, i + 2);
+    rows.push(
+      pair.length === 1
+        ? pair[0]
+        : { kind: "split", id: nextId(), direction: "h", ratio: 0.5, first: pair[0], second: pair[1] },
+    );
+  }
+  let node = rows[0];
+  for (let i = 1; i < rows.length; i++) {
+    node = { kind: "split", id: nextId(), direction: "v", ratio: i / (i + 1), first: node, second: rows[i] };
+  }
+  return node;
+}
+
 function collectPaneObjs(node: PaneNode, out: Pane[] = []): Pane[] {
   if (node.kind === "pane") out.push(node);
   else {
@@ -322,9 +344,17 @@ export const useStore = create<AppState>((set, get) => ({
   },
   // Fan-out APPENDS to the existing layout: wipe-and-retile orphaned the
   // current session (the old PTY kept running with no pane attached).
+  // Total tiles capped at 12: past that every pane drops below usable TUI
+  // width. The append direction alternates with the current root so repeated
+  // launches halve height and width in turn instead of squeezing width to a
+  // sliver every time (TUIs tolerate short height, not narrow width).
   launchAgents: (items) => {
     const { activeWorktreeId, layouts, layout } = get();
     if (!activeWorktreeId) return;
+    const cur = layouts[activeWorktreeId] ?? layout;
+    const existing = cur ? collectPaneObjs(cur) : [];
+    const room = Math.max(0, 12 - existing.length);
+    if (room <= 0) return;
     const panes: Pane[] = [];
     for (const item of items) {
       const cmd = item.command.trim();
@@ -333,10 +363,8 @@ export const useStore = create<AppState>((set, get) => ({
       for (let i = 0; i < n; i++) panes.push({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd });
     }
     if (panes.length === 0) return;
-    panes.length = Math.min(panes.length, 12);
-    const fresh = tileGrid(panes);
-    const cur = layouts[activeWorktreeId] ?? layout;
-    const existing = cur ? collectPaneObjs(cur) : [];
+    panes.length = Math.min(panes.length, room);
+    const fresh = tileAgents(panes);
     // No live tiles yet: plain retile keeps the old single-pane behaviour.
     if (existing.length <= 1 && existing.every((p) => p.ptyId == null && !p.initCmd)) {
       const node = fresh;
@@ -351,7 +379,7 @@ export const useStore = create<AppState>((set, get) => ({
     const node: PaneNode = {
       kind: "split",
       id: nextId(),
-      direction: "h",
+      direction: cur?.kind === "split" && cur.direction === "h" ? "v" : "h",
       ratio: Math.max(0.2, Math.min(0.8, live.length / (live.length + panes.length))),
       first: tileGrid(live),
       second: fresh,

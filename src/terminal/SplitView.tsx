@@ -14,14 +14,18 @@ export function SplitView({ node, cwd }: { node: PaneNode; cwd: string }) {
 function PaneWrap({ pane, cwd }: { pane: Pane; cwd: string }) {
   const { activePaneId, closePane } = useStore();
   const active = activePaneId === pane.id;
+  // Native tile: no border, no window-in-window. The canvas itself is
+  // the surface; the active pane reads through a soft inset tint + faint
+  // edge, an inactive pane is bare canvas. Zero splits = zero seams.
   return (
     <div
-      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-md"
-      style={{
-        border: "1px solid var(--gm-hairline-soft)",
-        outline: active ? "1px solid var(--gm-ink-mute)" : "1px solid transparent",
-        outlineOffset: -1,
-      }}
+      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-lg"
+      data-active={active}
+      style={
+        active
+          ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
+          : { background: "var(--gm-canvas)" }
+      }
     >
       <TerminalPane
         paneId={pane.id}
@@ -68,7 +72,7 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
   return (
     <div
       ref={containerRef}
-      className={`flex h-full w-full gap-[3px] ${split.direction === "h" ? "flex-row" : "flex-col"}`}
+      className={`flex h-full w-full gap-1 p-1 ${split.direction === "h" ? "flex-row" : "flex-col"}`}
       style={{ background: "var(--gm-canvas)" }}
     >
       <div
@@ -82,7 +86,7 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
         aria-orientation={split.direction === "h" ? "vertical" : "horizontal"}
         tabIndex={0}
         aria-label="Split resize handle"
-        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-white/[0.12] focus-visible:bg-white/[0.12] ${
+        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
           split.direction === "h" ? "w-[9px] cursor-col-resize" : "h-[9px] cursor-row-resize"
         }`}
         onMouseDown={onDown}
@@ -101,7 +105,8 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
       >
         {/* visible 3px bar inside a 9px hit target */}
         <div
-          className={`rounded-full bg-white/[0.09] ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
+          style={{ background: "rgba(255,255,255,0.09)" }}
+          className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
         />
       </div>
       <div

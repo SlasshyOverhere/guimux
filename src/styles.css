@@ -28,6 +28,121 @@
   --gm-red: #c74e39;
   --gm-red-strong: #c42b1c;
   --gm-amber: #e2c08d;
+
+  /* Interaction surfaces. One scale, every control: hover < selected <
+     pressed. Never hardcode a white/* opacity in components for these. */
+  --gm-hover: rgba(255, 255, 255, 0.05);
+  --gm-selected: rgba(255, 255, 255, 0.07);
+  --gm-pressed: rgba(255, 255, 255, 0.09);
+
+  /* Radius system. Rows 6 / controls + menus 8 / dialogs + cards 12.
+     Nothing else; this is a developer tool, not a phone app. */
+  --gm-r-row: 6px;
+  --gm-r-ctl: 8px;
+  --gm-r-pop: 10px;
+  --gm-r-card: 12px;
+}
+
+/* Shared chrome primitives. Components use these instead of one-off
+   rounded/hover combos so hover, size, and radius stay uniform. */
+.gm-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
+  border-radius: var(--gm-r-ctl);
+  color: var(--gm-ink-mute);
+  flex-shrink: 0;
+}
+.gm-icon-btn:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
+}
+.gm-icon-btn[data-active="true"] {
+  background: var(--gm-selected);
+  color: var(--gm-ink);
+}
+.gm-icon-btn--sm {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+}
+
+/* Sidebar tabs: active reads through type weight + color only. No pills,
+   no underline bars, no extra hairlines. */
+.gm-tab {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--gm-ink-faint);
+  padding: 2px 0;
+}
+.gm-tab:hover {
+  color: var(--gm-ink-dim);
+}
+.gm-tab[data-active="true"] {
+  font-weight: 600;
+  color: var(--gm-ink);
+}
+
+/* Secondary metadata: paths, counts, hints. Always faint, never bold. */
+.gm-meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--gm-ink-faint);
+}
+
+/* Dropdown / context menus: one surface, one radius, one row treatment. */
+.gm-menu {
+  background: var(--gm-overlay);
+  border: 1px solid var(--gm-hairline);
+  border-radius: var(--gm-r-pop);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px 0;
+  overflow: hidden;
+}
+.gm-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--gm-ink-dim);
+  text-align: left;
+}
+.gm-menu-item:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
+}
+
+/* Terminal pane tools: one pill carrying borderless buttons, not three
+   individually boxed buttons. */
+.gm-pane-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--gm-overlay);
+  border: 1px solid var(--gm-hairline);
+  border-radius: var(--gm-r-ctl);
+  padding: 2px;
+}
+.gm-pane-tools > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--gm-ink-mute);
+}
+.gm-pane-tools > button:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
 }
 
 html,
@@ -98,9 +213,25 @@ textarea,
   user-select: text;
 }
 
+/* Selectable rows (sidebar, tree, menus, palette). One hover, one
+   selected. Components use .gm-row + data-selected, never one-off
+   ad-hoc background utilities. */
+.gm-row {
+  border-radius: var(--gm-r-row);
+}
+.gm-row:hover {
+  background: var(--gm-hover);
+}
+.gm-row[data-selected="true"] {
+  background: var(--gm-selected);
+}
+.gm-row[data-selected="true"]:hover {
+  background: var(--gm-pressed);
+}
+
 /* xterm tuning */
 .xterm {
-  padding: 6px 8px;
+  padding: 8px 8px 8px 12px;
   font-feature-settings: "calt", "kern";
 }
 .xterm .xterm-viewport {

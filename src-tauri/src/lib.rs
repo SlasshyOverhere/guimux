@@ -28,6 +28,7 @@ pub fn run() {
             git::git_init,
             git::git_status,
             git::git_diff,
+            git::git_branches,
             fs::fs_tree,
             fs::fs_read,
             fs::fs_write,

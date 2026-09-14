@@ -125,42 +125,42 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       data-tauri-drag-region
       onMouseDown={onBarDown}
       onDoubleClick={onBarDouble}
-      className="flex h-11 shrink-0 select-none items-center gap-1 border-b bg-ink-900 pl-3 pr-0"
-      style={{ borderColor: "var(--gm-hairline)" }}
+      className="flex h-11 shrink-0 select-none items-center gap-1.5 bg-ink-900 pl-3 pr-0"
+      style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
     >
       {/* wordmark: bare type, no tile, no gradient */}
       <span
-        className="mr-1 select-none text-[13px] font-semibold tracking-tight text-ink-100"
+        className="select-none text-[13px] font-semibold tracking-tight text-ink-100"
         style={{ letterSpacing: "-0.02em" }}
       >
         guimux
       </span>
-      <span className="mr-2 h-4 w-px" style={{ background: "var(--gm-hairline)" }} />
 
       <button
         title={leftVisible ? "Collapse left sidebar (Ctrl+B)" : "Expand left sidebar (Ctrl+B)"}
         aria-label={leftVisible ? "Collapse left sidebar" : "Expand left sidebar"}
         aria-pressed={leftVisible}
         onClick={toggleLeft}
-        style={leftVisible ? { background: "rgba(255,255,255,0.07)" } : undefined}
-        className={`rounded-md p-2 hover:bg-white/[0.04] hover:text-ink-200 ${leftVisible ? "text-ink-100" : "text-ink-400"}`}
+        data-active={leftVisible}
+        className="gm-icon-btn gm-icon-btn--sm ml-1"
       >
-        {leftVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+        {leftVisible ? <PanelLeftClose size={14} strokeWidth={2} /> : <PanelLeftOpen size={14} strokeWidth={2} />}
       </button>
 
       {/* project picker, left */}
       <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
         <button
-          className="flex max-w-[200px] items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] font-medium text-ink-200 hover:bg-white/[0.04]"
+          className="gm-icon-btn h-[30px] max-w-[220px] gap-2 px-2 text-[12.5px] font-medium text-ink-200"
+          style={{ width: "auto" }}
           onClick={() => setProjOpen(!projOpen)}
           title={proj?.path ?? "No project open"}
           aria-haspopup="menu"
           aria-expanded={projOpen}
         >
           {proj?.isGit ? (
-            <GitBranch size={13} className="shrink-0 text-accent-500" strokeWidth={2.2} />
+            <GitBranch size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
           ) : (
-            <Folder size={13} className="shrink-0 text-ink-400" strokeWidth={2.2} />
+            <Folder size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
           )}
           <span className="truncate">{proj ? proj.name : "No project"}</span>
         </button>
@@ -168,11 +168,7 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
           <>
             <div className="fixed inset-0 z-30" data-no-drag data-outside />
             <div
-              className="absolute left-0 top-9 z-40 w-80 overflow-hidden rounded-lg py-1 shadow-pop"
-              style={{
-                background: "var(--gm-overlay)",
-                border: "1px solid var(--gm-hairline)",
-              }}
+              className="gm-menu absolute left-0 top-9 z-40 w-80"
             >
               <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-ink-400">
                 Projects
@@ -182,9 +178,8 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                   key={p.id}
                   role="button"
                   tabIndex={0}
-                  className={`group flex cursor-pointer items-center gap-2.5 px-3 py-2 ${
-                    p.id === activeProjectId ? "bg-white/[0.05]" : "hover:bg-white/[0.03]"
-                  }`}
+                  data-selected={p.id === activeProjectId}
+                  className="gm-row group mx-1 flex cursor-pointer items-center gap-2.5 px-2 py-2"
                   onClick={() => {
                     setActiveProject(p.id);
                     setProjOpen(false);
@@ -199,25 +194,26 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                 >
                   {p.isGit ? (
                     <GitBranch
-                      size={13}
-                      className={`shrink-0 ${p.id === activeProjectId ? "text-accent-500" : "text-ink-400"}`}
+                      size={14}
+                      strokeWidth={2}
+                      className="shrink-0 text-ink-400"
                     />
                   ) : (
-                    <Folder size={13} className="shrink-0 text-ink-400" />
+                    <Folder size={14} strokeWidth={2} className="shrink-0 text-ink-400" />
                   )}
                   <div className="min-w-0 flex-1">
                     <div
-                      className={`truncate text-[12.5px] font-medium ${
-                        p.id === activeProjectId ? "text-ink-100" : "text-ink-200"
+                      className={`truncate text-[12.5px] ${
+                        p.id === activeProjectId ? "font-semibold text-ink-100" : "font-medium text-ink-200"
                       }`}
                     >
                       {p.name}
                     </div>
-                    <div className="truncate text-[11px] text-ink-400">{p.path}</div>
+                    <div className="truncate text-[11px] text-ink-500">{p.path}</div>
                   </div>
                   <button
                     title="Remove project"
-                    className="hidden shrink-0 rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400 group-hover:block"
+                    className="hidden shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-clay-400 group-hover:block"
                     onClick={(e) => {
                       e.stopPropagation();
                       removeProject(p.id);
@@ -228,14 +224,14 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                 </div>
               ))}
               <button
-                className="mt-1 flex w-full items-center gap-2 px-3 py-2.5 text-[12.5px] font-medium text-ink-300 hover:bg-white/[0.03] hover:text-ink-100"
+                className="gm-menu-item mt-1 text-[12.5px]"
                 style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
                 onClick={() => {
                   setProjOpen(false);
                   onAdd();
                 }}
               >
-                <Plus size={13} className="text-accent-500" /> Open folder or repository
+                <Plus size={14} strokeWidth={2} className="text-ink-400" /> Open folder or repository
               </button>
             </div>
           </>
@@ -247,10 +243,10 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
         <div className="pointer-events-none absolute left-1/2 flex max-w-[40vw] -translate-x-1/2 items-center gap-1.5">
           {wt.is_main && (
             <span title="Main worktree" className="flex shrink-0">
-              <HomeIcon size={11} className="text-accent-500" />
+              <HomeIcon size={11} strokeWidth={2} className="text-ink-400" />
             </span>
           )}
-          <span className="mono truncate text-[12.5px] font-semibold text-ink-100" title={wt.path}>
+          <span className="truncate text-[12.5px] font-semibold text-ink-100" title={wt.path}>
             {wt.branch || "(detached)"}
           </span>
         </div>
@@ -266,10 +262,10 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       <button
         title="Launch agents"
         onClick={() => setAgentOpen(true)}
-        className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] font-medium text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
+        className="gm-icon-btn text-[12px] font-medium"
       >
-        <Bot size={13} />
-        <span className="hidden md:inline">Agents</span>
+        <Bot size={14} strokeWidth={2} />
+        <span className="hidden pr-0.5 md:inline">Agents</span>
       </button>
 
       <button
@@ -277,22 +273,21 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
         aria-label={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
         aria-pressed={rightVisible}
         onClick={toggleRight}
-        style={rightVisible ? { background: "rgba(255,255,255,0.07)" } : undefined}
-        className={`rounded-md p-2 hover:bg-white/[0.04] hover:text-ink-200 ${rightVisible ? "text-ink-100" : "text-ink-400"}`}
+        data-active={rightVisible}
+        className="gm-icon-btn gm-icon-btn--sm"
       >
-        {rightVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+        {rightVisible ? <PanelRightClose size={14} strokeWidth={2} /> : <PanelRightOpen size={14} strokeWidth={2} />}
       </button>
 
       <button
         title="Settings"
         aria-label="Open settings"
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
+        className="gm-icon-btn gm-icon-btn--sm"
         onClick={() => setSettingsOpen(true)}
       >
-        <SettingsIcon size={14} />
+        <SettingsIcon size={14} strokeWidth={2} />
       </button>
 
-      <span className="mx-1.5 h-4 w-px shrink-0" style={{ background: "var(--gm-hairline)" }} />
       <WindowControls />
     </div>
   );
@@ -318,7 +313,7 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
           <div className="text-[14px] font-semibold tracking-tight text-ink-100">
             Guimux workbench
           </div>
-          <div className="mt-0.5 text-[12px] text-ink-400">
+          <div className="gm-meta mt-1 text-[12px]">
             Terminals, worktrees, and files in one surface
           </div>
         </div>
@@ -344,9 +339,9 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
             style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--gm-hairline-soft)" }}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink-200">
-              <Folder size={12} className="text-ink-400" /> Plain folder
+              <Folder size={12} strokeWidth={2} className="text-ink-400" /> Plain folder
             </div>
-            <div className="mt-1 text-[11.5px] leading-5 text-ink-400">
+            <div className="gm-meta mt-1 text-[11.5px] leading-5">
               Terminals and files work immediately.
             </div>
           </div>
@@ -355,9 +350,9 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
             style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--gm-hairline-soft)" }}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink-200">
-              <GitBranch size={12} className="text-ink-400" /> Git repository
+              <GitBranch size={12} strokeWidth={2} className="text-ink-400" /> Git repository
             </div>
-            <div className="mt-1 text-[11.5px] leading-5 text-ink-400">
+            <div className="gm-meta mt-1 text-[11.5px] leading-5">
               Adds isolated worktrees per branch.
             </div>
           </div>
@@ -365,29 +360,29 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
 
         {projects.length > 0 && (
           <div className="mt-5" style={{ borderTop: "1px solid var(--gm-hairline-soft)", paddingTop: 12 }}>
-            <div className="mb-1.5 text-[11px] font-medium text-ink-400">Recent</div>
+            <div className="gm-meta mb-1.5">Recent</div>
             {projects.slice(0, 4).map((p) => (
               <button
                 key={p.id}
                 onClick={() => setActiveProject(p.id)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-white/[0.04]"
+                className="gm-row flex w-full items-center gap-2 px-2 py-1.5 text-left"
                 title={p.path}
               >
                 {p.isGit ? (
-                  <GitBranch size={12} className="shrink-0 text-accent-500" />
+                  <GitBranch size={12} strokeWidth={2} className="shrink-0 text-ink-400" />
                 ) : (
-                  <Folder size={12} className="shrink-0 text-ink-400" />
+                  <Folder size={12} strokeWidth={2} className="shrink-0 text-ink-400" />
                 )}
                 <span className="flex-1 truncate text-[12.5px] font-medium text-ink-200">
                   {p.name}
                 </span>
-                <span className="max-w-[220px] truncate text-[11px] text-ink-400">{p.path}</span>
+                <span className="max-w-[220px] truncate text-[11px] text-ink-500">{p.path}</span>
               </button>
             ))}
           </div>
         )}
 
-        <div className="mt-5 flex items-center gap-4 text-[11.5px] text-ink-400">
+        <div className="gm-meta mt-5 flex items-center gap-4 text-[11.5px]">
           <span className="flex items-center gap-1.5">
             <span className="gm-kbd">Ctrl K</span> palette
           </span>
@@ -681,21 +676,20 @@ export default function App() {
               getCurrentWindow().toggleMaximize().catch(() => {});
             }).catch(() => {});
           }}
-          className="flex h-11 shrink-0 select-none items-center gap-2 border-b bg-ink-900 pl-3 pr-0"
-          style={{ borderColor: "var(--gm-hairline)" }}
+          className="flex h-11 shrink-0 select-none items-center gap-2 bg-ink-900 pl-3 pr-0"
+          style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
         >
           <span className="text-[13px] font-semibold tracking-tight text-ink-100">
             guimux
           </span>
           <div className="flex-1" />
           <button
-            className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-ink-400 hover:bg-white/[0.04]"
+            className="gm-icon-btn text-[12px]"
             onClick={() => useStore.getState().setPaletteOpen(true)}
           >
-            <Search size={13} />
+            <Search size={14} strokeWidth={2} />
             <span className="gm-kbd">Ctrl K</span>
           </button>
-          <span className="mx-1.5 h-4 w-px shrink-0" style={{ background: "var(--gm-hairline)" }} />
           <WindowControls />
         </div>
         <div className="relative min-h-0 flex-1">
@@ -726,7 +720,7 @@ export default function App() {
       )}
       <div className="flex min-h-0 flex-1">
         {leftVisible && <WorktreeSidebar />}
-        <div className="relative min-w-0 flex-1 bg-ink-950">
+        <div className="relative min-w-0 flex-1 bg-ink-950" style={{ borderLeft: "1px solid var(--gm-hairline-soft)" }}>
           {wt && layout ? (
             <SplitView key={wt.id} node={layout} cwd={wt.path} />
           ) : (

@@ -335,9 +335,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       cursorStyle: "block",
       drawBoldTextInBrightColors: true,
       macOptionClickForcesSelection: true,
+      // Transparent: the tile div owns the surface (canvas vs panel) so
+      // active/inactive reads without a window-inside-window seam.
       theme: {
-        background: "#0a0a0a",
-        foreground: "#fafafa",
+        background: "rgba(0,0,0,0)",
+        foreground: "#e5e5e5",
         cursor: "#e5e5e5",
         cursorAccent: "#171717",
         selectionBackground: "rgba(229,229,229,0.28)",
@@ -542,60 +544,55 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   return (
     <div
-      className="relative h-full w-full bg-ink-950"
+      className="relative h-full w-full"
       onMouseDown={() => setActivePane(paneId)}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
     >
       <div
-        className="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
+        className="absolute right-2 top-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
       >
         {!webgl && (
           <span
             title="Software rendering fallback (WebGL unavailable)"
-            className="rounded-md px-1.5 py-1 text-[10px] text-ink-400"
+            className="mr-1 rounded-md px-1.5 py-1 text-[10px] text-ink-500"
             style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
           >
             sw
           </span>
         )}
-        <button
-          title="Split right (Ctrl+D)"
-          aria-label="Split pane right"
-          className="rounded-md p-1.5 text-ink-300 hover:bg-white/[0.06] hover:text-ink-100"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => splitPane(paneId, "h")}
-        >
-          <Columns2 size={12} />
-        </button>
-        <button
-          title="Split down"
-          aria-label="Split pane down"
-          className="rounded-md p-1.5 text-ink-300 hover:bg-white/[0.06] hover:text-ink-100"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => splitPane(paneId, "v")}
-        >
-          <Rows2 size={12} />
-        </button>
-        <button
-          title="Close pane"
-          aria-label="Close pane"
-          className="rounded-md p-1.5 text-ink-300 hover:text-clay-400"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => {
-            const sid = sessionRef.current;
-            if (sid != null) invoke("pty_kill", { id: sid });
-            onClose();
-          }}
-        >
-          <X size={12} />
-        </button>
+        <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
+          <button
+            title="Split right (Ctrl+D)"
+            aria-label="Split pane right"
+            onClick={() => splitPane(paneId, "h")}
+          >
+            <Columns2 size={13} strokeWidth={2} />
+          </button>
+          <button
+            title="Split down"
+            aria-label="Split pane down"
+            onClick={() => splitPane(paneId, "v")}
+          >
+            <Rows2 size={13} strokeWidth={2} />
+          </button>
+          <button
+            title="Close pane"
+            aria-label="Close pane"
+            onClick={() => {
+              const sid = sessionRef.current;
+              if (sid != null) invoke("pty_kill", { id: sid });
+              onClose();
+            }}
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
+        </div>
       </div>
       {exited && (
         <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pb-3">
           <div
-            className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12px] shadow-pop"
-            style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
+            className="gm-menu flex items-center gap-2 px-3 py-1.5 text-[12px]"
           >
             <span className="text-ink-400">Shell exited</span>
             <button
@@ -606,7 +603,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
               Restart
             </button>
             <button
-              className="rounded-md px-2 py-1 text-ink-400 hover:bg-white/[0.06] hover:text-ink-200"
+              className="rounded-md px-2 py-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
               onClick={() => {
                 const sid = sessionRef.current;
                 if (sid != null) invoke("pty_kill", { id: sid });

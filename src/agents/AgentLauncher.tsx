@@ -3,11 +3,13 @@ import { Plus, X } from "lucide-react";
 import { useStore } from "../store";
 import { errorDialog } from "../dialogs";
 
-const MAX_PER_AGENT = 6;
+// TUIs need width: past ~4 tiles panes drop below ~50 cols and agent
+// interfaces truncate. Cap per-agent and warn past 4 total (see below).
+const MAX_PER_AGENT = 4;
 
 function Stepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
   const btn =
-    "tnum flex h-6 w-6 items-center justify-center rounded-md text-[13px] font-semibold text-ink-300 hover:bg-white/[0.06] hover:text-ink-100 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-300";
+    "tnum gm-icon-btn gm-icon-btn--sm !h-6 !min-w-6 !px-0 text-[13px] font-semibold text-ink-300 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-300";
   return (
     <div className="flex shrink-0 items-center gap-0.5" role="group" aria-label="Pane count">
       <button
@@ -150,22 +152,22 @@ export function AgentLauncher() {
         >
           <div>
             <div className="text-[13px] font-semibold text-ink-100">Launch agents</div>
-            <div className="text-[11.5px] text-ink-400">
+            <div className="gm-meta mt-0.5 text-[11.5px]">
               Mix agents per launch. New tiles append, open work is kept.
             </div>
           </div>
           <button
-            className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+            className="gm-icon-btn gm-icon-btn--sm"
             onClick={() => setOpen(false)}
             title="Close"
             aria-label="Close"
           >
-            <X size={14} />
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
 
         <div className="max-h-[50vh] overflow-y-auto px-4 py-3">
-          <div className="text-[11px] font-medium text-ink-400">Agents and counts</div>
+          <div className="gm-meta">Agents and counts</div>
           <div className="mt-1.5 flex flex-col gap-1.5">
             {agents.map((a) => (
               <div
@@ -201,7 +203,7 @@ export function AgentLauncher() {
               </div>
             ))}
             {agents.length === 0 && (
-              <div className="text-[12px] text-ink-400">
+              <div className="gm-meta text-[12px]">
                 No agents yet — type a custom command below or add one in Settings.
               </div>
             )}
@@ -257,7 +259,7 @@ export function AgentLauncher() {
             </div>
           </div>
           {total > 0 && (
-            <div className="mono mt-2 truncate px-0.5 text-[11px] text-ink-400">
+            <div className="gm-meta mono mt-2 truncate px-0.5">
               {total} {total === 1 ? "tile" : "tiles"}:{" "}
               {items.map((x) => `${x.count}× ${x.command}`).join(" · ")}
             </div>
@@ -265,11 +267,15 @@ export function AgentLauncher() {
         </div>
 
         <div
-          className="flex items-center justify-end gap-2 px-4 py-3"
+          className="flex items-center justify-between gap-2 px-4 py-3"
           style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
         >
+          <span className="gm-meta pr-2 text-[11px]">
+            4+ tiles get cramped. Prefer up to 4 per launch.
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
           <button
-            className="rounded-md px-3 py-1.5 text-[12px] font-medium text-ink-300 hover:bg-white/[0.05]"
+            className="gm-icon-btn text-[12px] font-medium text-ink-300"
             onClick={() => setOpen(false)}
           >
             Cancel
@@ -281,6 +287,7 @@ export function AgentLauncher() {
           >
             {total > 0 ? `Launch ${total} ${total === 1 ? "tile" : "tiles"}` : "Launch"}
           </button>
+          </span>
         </div>
       </div>
     </div>
