@@ -65,10 +65,14 @@ function writeLocal(s: PersistedState) {
 
 function sanitizeWorktrees(wts: unknown): Worktree[] | undefined {
   if (!Array.isArray(wts)) return undefined;
-  const clean = wts.filter(
-    (w): w is Worktree =>
-      !!w && typeof w.id === "string" && typeof w.path === "string" && typeof w.branch === "string",
-  );
+  const clean = wts
+    .filter(
+      (w): w is Worktree =>
+        !!w && typeof w.id === "string" && typeof w.path === "string" && typeof w.branch === "string",
+    )
+    // Pre-fix seeds were saved with `\` ids; backend now emits `/` — normalize
+    // or the seed filter drops them and boot loses its instant shell.
+    .map((w) => ({ ...w, id: w.id.replace(/\\/g, "/"), path: w.path.replace(/\\/g, "/") }));
   return clean.length > 0 ? clean.slice(0, 50) : undefined;
 }
 

@@ -130,12 +130,15 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
     let stamps = batch_commit_ts(&root, rows.iter().map(|r| r.2.clone()).collect());
     Ok(rows
         .into_iter()
-        .map(|(path, branch, head, is_main)| Worktree {
-            id: path.clone(),
-            path,
-            branch,
-            is_main,
-            last_commit: stamps.get(&head).copied(),
+        .map(|(path, branch, head, is_main)| {
+            let path = norm_sep(path);
+            Worktree {
+                id: path.clone(),
+                path,
+                branch,
+                is_main,
+                last_commit: stamps.get(&head).copied(),
+            }
         })
         .collect())
 }
@@ -214,7 +217,8 @@ pub fn worktree_create(
             &base_ref,
         ],
     )?;
-    let created_path = target.to_string_lossy().to_string();
+    // Forward slashes: must `==` the `worktree list` ids for the same path.
+    let created_path = norm_sep(target.to_string_lossy().to_string());
     let last_commit = last_commit_ts(Path::new(&created_path));
     Ok(Worktree {
         id: created_path.clone(),
@@ -233,6 +237,20 @@ fn sanitize(name: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+/// Git for Windows prints paths with `/` (`worktree list --porcelain`,
+/// `rev-parse --show-toplevel`) while PathBuf displays with `\`. A
+/// backslash id from `worktree_create` never `==` its slash id from
+/// `worktree_list`, so the UI selected a ghost worktree and sat on
+/// "Starting terminal…" forever after every create.
+#[cfg(windows)]
+fn norm_sep(s: String) -> String {
+    s.replace('\\', "/")
+}
+#[cfg(not(windows))]
+fn norm_sep(s: String) -> String {
+    s
 }
 
 #[command]
