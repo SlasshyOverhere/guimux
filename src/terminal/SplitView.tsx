@@ -2,32 +2,54 @@ import { useCallback, useRef } from "react";
 import { useStore, type PaneNode, type Pane, type Split } from "../store";
 import { TerminalPane } from "./TerminalPane";
 
-export function SplitView({ node, cwd }: { node: PaneNode; cwd: string }) {
+function containsPane(node: PaneNode, paneId: string): boolean {
+  if (node.kind === "pane") return node.id === paneId;
+  return containsPane(node.first, paneId) || containsPane(node.second, paneId);
+}
+
+export function SplitView({ node, cwd, maximizedId }: { node: PaneNode; cwd: string; maximizedId?: string | null }) {
+  // Root reads the store (stale id restores the full grid); nested levels
+  // inherit the prop so hidden siblings still compute hidden=true.
+  const stored = useStore((s) => s.maximizedPaneId);
+  const maxId =
+    maximizedId !== undefined
+      ? maximizedId
+      : stored && containsPane(node, stored)
+        ? stored
+        : null;
   if (node.kind === "pane") {
     // Key by pane id: without this, splitting elsewhere in the tree remounts
     // surviving panes (new xterm + new PTY listeners mid-stream → blank pane).
-    return <PaneWrap key={node.id} pane={node} cwd={cwd} />;
+    return <PaneWrap key={node.id} pane={node} cwd={cwd} maximizedId={maxId} />;
   }
-  return <SplitNode key={node.id} split={node} cwd={cwd} />;
+  return <SplitNode key={node.id} split={node} cwd={cwd} maximizedId={maxId} />;
 }
 
-function PaneWrap({ pane, cwd }: { pane: Pane; cwd: string }) {
+function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximizedId: string | null }) {
   const { activePaneId, closePane } = useStore();
   const active = activePaneId === pane.id;
+  // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
+  const hidden = maximizedId != null && maximizedId !== pane.id;
+  // Native tile: no border, no window-in-window. The canvas itself is
+  // the surface; the active pane reads through a soft inset tint + faint
+  // edge, an inactive pane is bare canvas. Zero splits = zero seams.
   return (
     <div
-      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-md"
-      style={{
-        border: "1px solid var(--gm-hairline-soft)",
-        outline: active ? "1px solid var(--gm-ink-mute)" : "1px solid transparent",
-        outlineOffset: -1,
-      }}
+      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-lg"
+      data-active={active}
+      style={
+        hidden
+          ? { display: "none" }
+          : active
+            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
+            : { background: "var(--gm-canvas)" }
+      }
     >
       <TerminalPane
         paneId={pane.id}
         ptyId={pane.ptyId}
-        cwd={cwd}
-        visible={true}
+        cwd={pane.cwd ?? cwd}
+        visible={!hidden}
         initCmd={pane.initCmd ?? null}
         onClose={() => closePane(pane.id)}
       />
@@ -35,10 +57,16 @@ function PaneWrap({ pane, cwd }: { pane: Pane; cwd: string }) {
   );
 }
 
-function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
+function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; maximizedId: string | null }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { activeWorktreeId, setLayout } = useStore();
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setSplitRatio = useStore((s) => s.setSplitRatio);
   const dragging = useRef(false);
+  // Maximized: keep both branches mounted (PTYs alive) but show only the
+  // one containing the pane; the other hides via display:none.
+  const firstHas = maximizedId != null && containsPane(split.first, maximizedId);
+  const secondHas = maximizedId != null && containsPane(split.second, maximizedId);
+  const maxed = firstHas || secondHas;
 
   const onDown = useCallback(() => {
     dragging.current = true;
@@ -46,13 +74,11 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
     const move = (e: MouseEvent) => {
       if (!dragging.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      let ratio =
+      const ratio =
         split.direction === "h"
           ? (e.clientX - rect.left) / rect.width
           : (e.clientY - rect.top) / rect.height;
-      ratio = Math.min(0.9, Math.max(0.1, ratio));
-      const next: Split = { ...split, ratio };
-      if (activeWorktreeId) setLayout(activeWorktreeId, next as PaneNode);
+      if (activeWorktreeId) setSplitRatio(activeWorktreeId, split.id, ratio);
     };
     const up = () => {
       dragging.current = false;
@@ -62,28 +88,31 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
-  }, [split, activeWorktreeId, setLayout]);
+  }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
   // Gutters carry the canvas color so splits read as carved channels,
-  // not glowing bars. Rounded caps, stable through drag.
+  // not glowing bars. Rounded caps, stable through drag. Maximized hides
+  // gutters so the pane owns the frame.
   return (
     <div
       ref={containerRef}
-      className={`flex h-full w-full gap-[3px] ${split.direction === "h" ? "flex-row" : "flex-col"}`}
+      className={`flex h-full w-full ${maxed ? "" : "gap-1 p-1"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
       style={{ background: "var(--gm-canvas)" }}
     >
       <div
-        style={{ flexBasis: `calc(${split.ratio * 100}% - 7.5px)` }}
+        style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 7.5px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.first.id} node={split.first} cwd={cwd} />
+        <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
       </div>
       <div
         role="separator"
         aria-orientation={split.direction === "h" ? "vertical" : "horizontal"}
-        tabIndex={0}
+        tabIndex={maxed ? -1 : 0}
+        aria-hidden={maxed}
         aria-label="Split resize handle"
-        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-white/[0.12] focus-visible:bg-white/[0.12] ${
+        style={maxed ? { display: "none" } : undefined}
+        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
           split.direction === "h" ? "w-[9px] cursor-col-resize" : "h-[9px] cursor-row-resize"
         }`}
         onMouseDown={onDown}
@@ -97,22 +126,21 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
           if (!step) return;
           e.preventDefault();
           if (!activeWorktreeId) return;
-          const ratio = Math.min(0.9, Math.max(0.1, split.ratio + step));
-          setLayout(activeWorktreeId, { ...split, ratio } as PaneNode);
+          setSplitRatio(activeWorktreeId, split.id, split.ratio + step);
         }}
       >
         {/* visible 3px bar inside a 9px hit target */}
         <div
-          className={`rounded-full bg-white/[0.09] ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
+          style={{ background: "rgba(255,255,255,0.09)" }}
+          className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
         />
       </div>
       <div
-        style={{ flexBasis: `calc(${(1 - split.ratio) * 100}% - 7.5px)` }}
+        style={secondHas ? { flex: 1 } : firstHas ? { display: "none" } : { flexBasis: `calc(${(1 - split.ratio) * 100}% - 7.5px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.second.id} node={split.second} cwd={cwd} />
+        <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
       </div>
     </div>
   );
 }
-

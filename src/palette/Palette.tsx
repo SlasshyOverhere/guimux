@@ -11,7 +11,6 @@ import {
   GitBranch,
   Columns2,
   Rows2,
-  Radio,
   File as FileIcon,
   CornerDownLeft,
   ArrowUp,
@@ -119,7 +118,7 @@ export function Palette() {
         label: "Open folder or repository",
         hint: "add project",
         group: "Commands",
-        icon: <FolderOpen size={13} className="text-ink-400" />,
+        icon: <FolderOpen size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => void openFolder(),
       });
     }
@@ -129,7 +128,7 @@ export function Palette() {
         label: "New worktree",
         hint: "git worktree add",
         group: "Commands",
-        icon: <GitBranch size={13} className="text-ink-400" />,
+        icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
           invoke("worktree_create", { repoRoot, name: null, base: null }).catch((e) =>
             errorDialog(`${e}`),
@@ -141,9 +140,9 @@ export function Palette() {
       out.push({
         id: "cmd:split-h",
         label: "Split terminal right",
-        hint: "Ctrl+D",
+        hint: "Ctrl+Shift+D",
         group: "Commands",
-        icon: <Columns2 size={13} className="text-ink-400" />,
+        icon: <Columns2 size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
           const st = useStore.getState();
           if (st.activePaneId) st.splitPane(st.activePaneId, "h");
@@ -155,7 +154,7 @@ export function Palette() {
         id: "cmd:split-v",
         label: "Split terminal down",
         group: "Commands",
-        icon: <Rows2 size={13} className="text-ink-400" />,
+        icon: <Rows2 size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
           const st = useStore.getState();
           if (st.activePaneId) st.splitPane(st.activePaneId, "v");
@@ -168,18 +167,8 @@ export function Palette() {
         label: "Launch agents",
         hint: "pick agent + count",
         group: "Commands",
-        icon: <Bot size={13} className="text-ink-400" />,
+        icon: <Bot size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => useStore.getState().setAgentOpen(true),
-      });
-    }
-    if (match("toggle broadcast input all panes")) {
-      out.push({
-        id: "cmd:broadcast",
-        label: "Toggle broadcast input",
-        hint: "all visible panes",
-        group: "Commands",
-        icon: <Radio size={13} className="text-ink-400" />,
-        action: () => useStore.getState().toggleBroadcast(),
       });
     }
     if (match("open settings preferences")) {
@@ -188,7 +177,7 @@ export function Palette() {
         label: "Open settings",
         hint: "fonts, scrollback",
         group: "Commands",
-        icon: <SettingsIcon size={13} className="text-ink-400" />,
+        icon: <SettingsIcon size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => useStore.getState().setSettingsOpen(true),
       });
     }
@@ -203,7 +192,7 @@ export function Palette() {
             label: branch || "(detached)",
             hint: wt.is_main ? "main worktree" : wt.path,
             group: "Worktrees",
-            icon: <GitBranch size={13} className="text-accent-500" />,
+            icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
             action: () => setActiveWorktree(wt.id),
           });
         }
@@ -220,7 +209,7 @@ export function Palette() {
           label: rel,
           hint: "open in editor",
           group: "Files",
-          icon: <FileIcon size={13} className="text-ink-400" />,
+          icon: <FileIcon size={14} strokeWidth={2} className="text-ink-400" />,
           action: () => useStore.getState().openEditor(f.path, false),
         });
       }
@@ -232,7 +221,7 @@ export function Palette() {
           label: p.name,
           hint: p.isGit ? "git project" : "folder project",
           group: "Projects",
-          icon: <GitBranch size={13} className={p.isGit ? "text-accent-500" : "text-ink-400"} />,
+          icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
           action: () => setActiveProject(p.id),
         });
       }
@@ -307,7 +296,7 @@ export function Palette() {
           {items.map((item, i) => {
             const header =
               item.group !== lastGroup ? (
-                <div className="px-4 pb-0.5 pt-2 text-[11px] font-semibold uppercase text-ink-400" style={{ letterSpacing: "0.08em" }}>
+                <div className="px-4 pb-0.5 pt-2 text-[11px] font-semibold uppercase text-ink-500" style={{ letterSpacing: "0.08em" }}>
                   {item.group}
                 </div>
               ) : null;
@@ -320,8 +309,9 @@ export function Palette() {
                   data-idx={i}
                   role="option"
                   aria-selected={i === selected}
-                  className={`flex cursor-pointer items-center gap-2.5 px-4 py-2 text-[12.5px] ${
-                    i === selected ? "bg-white/[0.055] text-ink-100" : "text-ink-300"
+                  data-selected={i === selected}
+                  className={`gm-row mx-1.5 flex cursor-pointer items-center gap-2.5 px-2.5 py-2 text-[12.5px] ${
+                    i === selected ? "text-ink-100" : "text-ink-300"
                   }`}
                   onMouseEnter={() => setSelected(i)}
                   onClick={() => run(i)}

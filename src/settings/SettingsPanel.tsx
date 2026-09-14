@@ -75,15 +75,15 @@ export function SettingsPanel() {
         >
           <div>
             <div className="text-[13px] font-semibold text-ink-100">Settings</div>
-            <div className="text-[11.5px] text-ink-400">Applies instantly, saved with the workspace.</div>
+            <div className="gm-meta mt-0.5 text-[11.5px]">Applies instantly, saved with the workspace.</div>
           </div>
           <button
-            className="rounded-md p-1.5 text-ink-400 hover:bg-white/[0.05] hover:text-ink-100"
+            className="gm-icon-btn gm-icon-btn--sm"
             onClick={() => setOpen(false)}
             title="Close settings"
             aria-label="Close settings"
           >
-            <X size={14} />
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
 
@@ -186,19 +186,19 @@ export function SettingsPanel() {
                   />
                 </div>
                 <button
-                  className="shrink-0 rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400"
+                  className="gm-icon-btn gm-icon-btn--sm shrink-0 hover:text-clay-400"
                   title="Remove agent"
                   aria-label={`Remove ${a.name}`}
                   onClick={() =>
                     setSettings({ agents: settings.agents.filter((x) => x.id !== a.id) })
                   }
                 >
-                  <X size={12} />
+                  <X size={12} strokeWidth={2} />
                 </button>
               </div>
             ))}
             {settings.agents.length === 0 && (
-              <div className="text-[12px] text-ink-400">No agents — add one to launch from the topbar.</div>
+              <div className="gm-meta text-[12px]">No agents — add one to launch from the topbar.</div>
             )}
           </div>
         </div>

@@ -2,22 +2,19 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  Columns2,
-  Rows2,
-  Radio,
   GitBranch,
   Search,
   FolderOpen,
   Folder,
   X,
   Plus,
-  ChevronDown,
-  CircleDot,
   House as HomeIcon,
   Settings as SettingsIcon,
   Bot,
-  PanelLeft,
-  PanelRight,
+  PanelLeftOpen,
+  PanelLeftClose,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
 import { useStore } from "./store";
 import { WindowControls } from "./chrome/WindowControls";
@@ -35,8 +32,8 @@ import { maybeStartStress } from "./terminal/stress";
 export { detectToProject };
 
 /* ------------------------------------------------------------------ */
-/* Topbar: a treated workbench rail. Project switcher + worktree       */
-/* breadcrumb + session controls. One palette, one accent, Inter only. */
+/* Topbar: session title. Project picker left, worktree centered like   */
+/* a document title, tools right. One palette, one accent, Inter only.  */
 /* ------------------------------------------------------------------ */
 
 function Topbar({ onAdd }: { onAdd: () => void }) {
@@ -47,32 +44,24 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
     removeProject,
     worktrees,
     activeWorktreeId,
-    setActiveWorktree,
-    broadcast,
-    toggleBroadcast,
-    setPaletteOpen,
     setSettingsOpen,
     setAgentOpen,
     leftVisible,
-    toggleLeft,
     rightVisible,
+    toggleLeft,
     toggleRight,
   } = useStore();
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
   const [projOpen, setProjOpen] = useState(false);
-  const [wtOpen, setWtOpen] = useState(false);
 
-  // Escape + pointer-down-outside close whichever dropdown is open.
+  // Escape + pointer-down-outside close the project dropdown.
   // pointerdown (not click): a real click-outside that works even when the
   // click itself is swallowed, and it closes before the row's click fires.
   useEffect(() => {
-    if (!projOpen && !wtOpen) return;
+    if (!projOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setProjOpen(false);
-        setWtOpen(false);
-      }
+      if (e.key === "Escape") setProjOpen(false);
     };
     // mousedown (not pointerdown): synthetic PointerEvents dispatched via
     // JS do not trigger real pointerdown listeners in this WebView, but
@@ -83,7 +72,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       const t = e.target as HTMLElement;
       if (t.closest("[data-menu-root]") && !t.closest("[data-outside]")) return;
       setProjOpen(false);
-      setWtOpen(false);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("mousedown", onDown, true);
@@ -91,7 +79,7 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onDown, true);
     };
-  }, [projOpen, wtOpen]);
+  }, [projOpen]);
 
   // Drag must ignore anything clickable: on Windows a native drag started on
   // mousedown swallows the follow-up click, which bricked every dropdown row
@@ -137,49 +125,50 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       data-tauri-drag-region
       onMouseDown={onBarDown}
       onDoubleClick={onBarDouble}
-      className="flex h-11 shrink-0 select-none items-center gap-1 border-b bg-ink-900 pl-3 pr-0"
-      style={{ borderColor: "var(--gm-hairline)" }}
+      className="flex h-11 shrink-0 select-none items-center gap-1.5 bg-ink-900 pl-3 pr-0"
+      style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
     >
       {/* wordmark: bare type, no tile, no gradient */}
       <span
-        className="mr-1 select-none text-[13px] font-semibold tracking-tight text-ink-100"
+        className="select-none text-[13px] font-semibold tracking-tight text-ink-100"
         style={{ letterSpacing: "-0.02em" }}
       >
         guimux
       </span>
-      <span className="mr-2 h-4 w-px" style={{ background: "var(--gm-hairline)" }} />
 
-      {/* project switcher */}
+      <button
+        title={leftVisible ? "Collapse left sidebar (Ctrl+B)" : "Expand left sidebar (Ctrl+B)"}
+        aria-label={leftVisible ? "Collapse left sidebar" : "Expand left sidebar"}
+        aria-pressed={leftVisible}
+        onClick={toggleLeft}
+        data-active={leftVisible}
+        className="gm-icon-btn gm-icon-btn--sm ml-1"
+      >
+        {leftVisible ? <PanelLeftClose size={14} strokeWidth={2} /> : <PanelLeftOpen size={14} strokeWidth={2} />}
+      </button>
+
+      {/* project picker, left */}
       <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
         <button
-          className="flex max-w-[260px] items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] font-medium text-ink-200 hover:bg-white/[0.04]"
+          className="gm-icon-btn h-[30px] max-w-[220px] gap-2 px-2 text-[12.5px] font-medium text-ink-200"
+          style={{ width: "auto" }}
           onClick={() => setProjOpen(!projOpen)}
           title={proj?.path ?? "No project open"}
           aria-haspopup="menu"
           aria-expanded={projOpen}
         >
           {proj?.isGit ? (
-            <GitBranch size={13} className="shrink-0 text-accent-500" strokeWidth={2.2} />
+            <GitBranch size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
           ) : (
-            <Folder size={13} className="shrink-0 text-ink-400" strokeWidth={2.2} />
+            <Folder size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
           )}
           <span className="truncate">{proj ? proj.name : "No project"}</span>
-          {!proj?.isGit && proj && (
-            <span className="tnum shrink-0 text-[11px] font-medium text-ink-400">
-              local
-            </span>
-          )}
-          <ChevronDown size={12} className="shrink-0 text-ink-400" />
         </button>
         {projOpen && (
           <>
             <div className="fixed inset-0 z-30" data-no-drag data-outside />
             <div
-              className="absolute left-0 top-9 z-40 w-80 overflow-hidden rounded-lg py-1 shadow-pop"
-              style={{
-                background: "var(--gm-overlay)",
-                border: "1px solid var(--gm-hairline)",
-              }}
+              className="gm-menu absolute left-0 top-9 z-40 w-80"
             >
               <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-ink-400">
                 Projects
@@ -189,9 +178,8 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                   key={p.id}
                   role="button"
                   tabIndex={0}
-                  className={`group flex cursor-pointer items-center gap-2.5 px-3 py-2 ${
-                    p.id === activeProjectId ? "bg-white/[0.05]" : "hover:bg-white/[0.03]"
-                  }`}
+                  data-selected={p.id === activeProjectId}
+                  className="gm-row group mx-1 flex cursor-pointer items-center gap-2.5 px-2 py-2"
                   onClick={() => {
                     setActiveProject(p.id);
                     setProjOpen(false);
@@ -206,28 +194,26 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                 >
                   {p.isGit ? (
                     <GitBranch
-                      size={13}
-                      className={`shrink-0 ${p.id === activeProjectId ? "text-accent-500" : "text-ink-400"}`}
+                      size={14}
+                      strokeWidth={2}
+                      className="shrink-0 text-ink-400"
                     />
                   ) : (
-                    <Folder size={13} className="shrink-0 text-ink-400" />
+                    <Folder size={14} strokeWidth={2} className="shrink-0 text-ink-400" />
                   )}
                   <div className="min-w-0 flex-1">
                     <div
-                      className={`truncate text-[12.5px] font-medium ${
-                        p.id === activeProjectId ? "text-ink-100" : "text-ink-200"
+                      className={`truncate text-[12.5px] ${
+                        p.id === activeProjectId ? "font-semibold text-ink-100" : "font-medium text-ink-200"
                       }`}
                     >
                       {p.name}
                     </div>
-                    <div className="truncate text-[11px] text-ink-400">{p.path}</div>
+                    <div className="truncate text-[11px] text-ink-500">{p.path}</div>
                   </div>
-                  {p.id === activeProjectId && (
-                    <CircleDot size={12} className="shrink-0 text-accent-500" />
-                  )}
                   <button
                     title="Remove project"
-                    className="hidden shrink-0 rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400 group-hover:block"
+                    className="hidden shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-clay-400 group-hover:block"
                     onClick={(e) => {
                       e.stopPropagation();
                       removeProject(p.id);
@@ -238,160 +224,70 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                 </div>
               ))}
               <button
-                className="mt-1 flex w-full items-center gap-2 px-3 py-2.5 text-[12.5px] font-medium text-ink-300 hover:bg-white/[0.03] hover:text-ink-100"
+                className="gm-menu-item mt-1 text-[12.5px]"
                 style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
                 onClick={() => {
                   setProjOpen(false);
                   onAdd();
                 }}
               >
-                <Plus size={13} className="text-accent-500" /> Open folder or repository
+                <Plus size={14} strokeWidth={2} className="text-ink-400" /> Open folder or repository
               </button>
             </div>
           </>
         )}
       </div>
 
-      {/* worktree breadcrumb */}
-      {proj?.isGit && wt && (
-        <>
-          <span className="px-0.5 text-[12px] text-ink-400">/</span>
-          <div className="relative" data-menu-root style={{ zIndex: wtOpen ? 50 : undefined }}>
-            <button
-              className="flex max-w-[220px] items-center gap-1.5 rounded-md px-2 py-1.5 text-[12.5px] text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-              onClick={() => setWtOpen(!wtOpen)}
-              title={wt.path}
-              aria-haspopup="menu"
-              aria-expanded={wtOpen}
-            >
-              {wt.is_main && <span title="Main worktree" className="flex shrink-0"><HomeIcon size={12} className="text-accent-500" /></span>}
-              <span className="mono truncate text-[12px]">{wt.branch || "(detached)"}</span>
-              <ChevronDown size={12} className="shrink-0 text-ink-400" />
-            </button>
-            {wtOpen && (
-              <>
-                <div className="fixed inset-0 z-30" data-no-drag data-outside />
-                <div
-                  className="absolute left-0 top-9 z-40 w-72 overflow-hidden rounded-lg py-1 shadow-pop"
-                  style={{
-                    background: "var(--gm-overlay)",
-                    border: "1px solid var(--gm-hairline)",
-                  }}
-                >
-                  {worktrees.map((w) => (
-                    <div
-                      key={w.id}
-                      role="button"
-                      tabIndex={0}
-                      className={`cursor-pointer px-3 py-2 ${
-                        w.id === activeWorktreeId ? "bg-white/[0.05]" : "hover:bg-white/[0.03]"
-                      }`}
-                      onClick={() => {
-                        setActiveWorktree(w.id);
-                        setWtOpen(false);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setActiveWorktree(w.id);
-                          setWtOpen(false);
-                        }
-                      }}
-                    >
-                      <div
-                        className={`mono flex items-center gap-1.5 truncate text-[12px] ${
-                          w.id === activeWorktreeId ? "text-accent-400" : "text-ink-200"
-                        }`}
-                      >
-                        {w.is_main && <span title="Main worktree" className="flex shrink-0"><HomeIcon size={11} /></span>}
-                        <span className="truncate">{w.branch || "(detached)"}</span>
-                      </div>
-                      <div className="truncate text-[11px] text-ink-400">{w.path}</div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        </>
+      {/* session title: centered worktree, the document of this app */}
+      {wt ? (
+        <div className="pointer-events-none absolute left-1/2 flex max-w-[40vw] -translate-x-1/2 items-center gap-1.5">
+          {wt.is_main && (
+            <span title="Main worktree" className="flex shrink-0">
+              <HomeIcon size={11} strokeWidth={2} className="text-ink-400" />
+            </span>
+          )}
+          <span className="truncate text-[12.5px] font-semibold text-ink-100" title={wt.path}>
+            {wt.branch || "(detached)"}
+          </span>
+        </div>
+      ) : (
+        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 text-[12.5px] font-medium text-ink-400">
+          No worktree
+        </div>
       )}
 
       <div className="flex-1" />
-
-      <button
-        title="Hide or show the left sidebar"
-        aria-label={leftVisible ? "Collapse left sidebar" : "Expand left sidebar"}
-        aria-pressed={leftVisible}
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        onClick={toggleLeft}
-      >
-        <PanelLeft size={14} />
-      </button>
 
       {/* launch CLI agents into auto-arranged terminal tiles */}
       <button
         title="Launch agents"
         onClick={() => setAgentOpen(true)}
-        className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] font-medium text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
+        className="gm-icon-btn text-[12px] font-medium"
       >
-        <Bot size={13} />
-        <span className="hidden md:inline">Agents</span>
+        <Bot size={14} strokeWidth={2} />
+        <span className="hidden pr-0.5 md:inline">Agents</span>
       </button>
 
       <button
-        title="Hide or show the right sidebar"
+        title={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
         aria-label={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
         aria-pressed={rightVisible}
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
         onClick={toggleRight}
+        data-active={rightVisible}
+        className="gm-icon-btn gm-icon-btn--sm"
       >
-        <PanelRight size={14} />
-      </button>
-
-      {/* broadcast: honest switch, no glow */}
-      <button
-        title="Broadcast input: type once, all visible panes receive"
-        onClick={toggleBroadcast}
-        className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
-          broadcast.active ? "text-ink-100" : "text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        }`}
-        style={broadcast.active ? { background: "var(--gm-accent-wash)" } : undefined}
-      >
-        <span
-          className="flex h-4 w-7 items-center rounded-full px-0.5 transition-colors"
-          style={{
-            background: broadcast.active ? "var(--gm-accent)" : "rgba(255,255,255,0.14)",
-            justifyContent: broadcast.active ? "flex-end" : "flex-start",
-          }}
-        >
-          <span
-            className="h-3 w-3 rounded-full"
-            style={{ background: broadcast.active ? "var(--gm-accent-ink)" : "var(--gm-ink-mute)" }}
-          />
-        </span>
-        <Radio size={13} className={broadcast.active ? "text-accent-400" : ""} />
-        <span className="hidden md:inline">Broadcast</span>
-      </button>
-
-      <button
-        title="Command palette"
-        className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        onClick={() => setPaletteOpen(true)}
-      >
-        <Search size={13} />
-        <span className="gm-kbd">Ctrl K</span>
+        {rightVisible ? <PanelRightClose size={14} strokeWidth={2} /> : <PanelRightOpen size={14} strokeWidth={2} />}
       </button>
 
       <button
         title="Settings"
         aria-label="Open settings"
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
+        className="gm-icon-btn gm-icon-btn--sm"
         onClick={() => setSettingsOpen(true)}
       >
-        <SettingsIcon size={14} />
+        <SettingsIcon size={14} strokeWidth={2} />
       </button>
 
-      <span className="mx-1.5 h-4 w-px shrink-0" style={{ background: "var(--gm-hairline)" }} />
       <WindowControls />
     </div>
   );
@@ -417,7 +313,7 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
           <div className="text-[14px] font-semibold tracking-tight text-ink-100">
             Guimux workbench
           </div>
-          <div className="mt-0.5 text-[12px] text-ink-400">
+          <div className="gm-meta mt-1 text-[12px]">
             Terminals, worktrees, and files in one surface
           </div>
         </div>
@@ -443,9 +339,9 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
             style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--gm-hairline-soft)" }}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink-200">
-              <Folder size={12} className="text-ink-400" /> Plain folder
+              <Folder size={12} strokeWidth={2} className="text-ink-400" /> Plain folder
             </div>
-            <div className="mt-1 text-[11.5px] leading-5 text-ink-400">
+            <div className="gm-meta mt-1 text-[11.5px] leading-5">
               Terminals and files work immediately.
             </div>
           </div>
@@ -454,9 +350,9 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
             style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--gm-hairline-soft)" }}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink-200">
-              <GitBranch size={12} className="text-ink-400" /> Git repository
+              <GitBranch size={12} strokeWidth={2} className="text-ink-400" /> Git repository
             </div>
-            <div className="mt-1 text-[11.5px] leading-5 text-ink-400">
+            <div className="gm-meta mt-1 text-[11.5px] leading-5">
               Adds isolated worktrees per branch.
             </div>
           </div>
@@ -464,69 +360,37 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
 
         {projects.length > 0 && (
           <div className="mt-5" style={{ borderTop: "1px solid var(--gm-hairline-soft)", paddingTop: 12 }}>
-            <div className="mb-1.5 text-[11px] font-medium text-ink-400">Recent</div>
+            <div className="gm-meta mb-1.5">Recent</div>
             {projects.slice(0, 4).map((p) => (
               <button
                 key={p.id}
                 onClick={() => setActiveProject(p.id)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-white/[0.04]"
+                className="gm-row flex w-full items-center gap-2 px-2 py-1.5 text-left"
                 title={p.path}
               >
                 {p.isGit ? (
-                  <GitBranch size={12} className="shrink-0 text-accent-500" />
+                  <GitBranch size={12} strokeWidth={2} className="shrink-0 text-ink-400" />
                 ) : (
-                  <Folder size={12} className="shrink-0 text-ink-400" />
+                  <Folder size={12} strokeWidth={2} className="shrink-0 text-ink-400" />
                 )}
                 <span className="flex-1 truncate text-[12.5px] font-medium text-ink-200">
                   {p.name}
                 </span>
-                <span className="max-w-[220px] truncate text-[11px] text-ink-400">{p.path}</span>
+                <span className="max-w-[220px] truncate text-[11px] text-ink-500">{p.path}</span>
               </button>
             ))}
           </div>
         )}
 
-        <div className="mt-5 flex items-center gap-4 text-[11.5px] text-ink-400">
+        <div className="gm-meta mt-5 flex items-center gap-4 text-[11.5px]">
           <span className="flex items-center gap-1.5">
             <span className="gm-kbd">Ctrl K</span> palette
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="gm-kbd">Ctrl D</span> split
+            <span className="gm-kbd">Ctrl Shift D</span> split
           </span>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Status strip: quiet session facts, tabular numerals.                */
-/* ------------------------------------------------------------------ */
-
-function StatusStrip() {
-  const proj = useStore((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
-  const wt = useStore((s) => s.worktrees.find((w) => w.id === s.activeWorktreeId));
-  const broadcast = useStore((s) => s.broadcast);
-  if (!proj) return null;
-  return (
-    <div
-      className="tnum flex h-7 shrink-0 items-center gap-4 overflow-hidden border-t px-3 text-[11px] text-ink-400"
-      style={{ borderColor: "var(--gm-hairline)", background: "var(--gm-canvas)" }}
-    >
-      <span className="flex min-w-0 items-center gap-1.5">
-        {proj.isGit ? <GitBranch size={11} className="shrink-0 text-accent-500" /> : <Folder size={11} className="shrink-0" />}
-        <span className="truncate text-ink-400">{wt ? wt.branch || "(detached)" : proj.name}</span>
-      </span>
-      <span className="hidden max-w-[420px] truncate sm:block" title={wt?.path ?? proj.path}>
-        {wt?.path ?? proj.path}
-      </span>
-      <span className="flex-1" />
-      {broadcast.active && (
-        <span className="flex items-center gap-1.5 font-medium" style={{ color: "var(--gm-accent)" }}>
-          <Radio size={11} /> broadcast to {broadcast.targetPaneIds.length}
-        </span>
-      )}
-      <span>{proj.isGit ? "git worktree session" : "folder session"}</span>
     </div>
   );
 }
@@ -544,9 +408,6 @@ export default function App() {
     setActiveWorktree,
     setWorktrees,
     layout,
-    activePaneId,
-    splitPane,
-    broadcast,
     leftVisible,
     rightVisible,
   } = useStore();
@@ -570,10 +431,13 @@ export default function App() {
       const st = useStore.getState();
       if (saved?.settings) st.hydrateSettings(saved.settings);
       if (saved && saved.projects.length > 0) {
-        // Single hydrate AFTER re-detect (parallel): the old two-hydrate
-        // sequence (saved, then fresh) reset layout/worktrees mid-mount,
-        // killing the just-spawned PTY and flashing a kill+respawn cycle —
-        // the "terminals popping in and out" on startup.
+        // Paint instantly from disk, revalidate in background. The old flow
+        // awaited N git rev-parses before the first hydrate, so boot sat on
+        // "Starting terminal…" for 10-30s on cold Windows spawns. Now the
+        // seeded shell mounts at once; re-detect + loader correct it after.
+        const seedWts = saved.worktrees ?? [];
+        const seedActive = saved.activeWorktreeId ?? null;
+        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive });
         // Re-detect refreshes branch/gitRoot and drops deleted folders.
         const settled = await Promise.all(
           saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
@@ -581,14 +445,18 @@ export default function App() {
         if (cancelled) return;
         const fresh = settled.filter((p): p is Project => p !== null);
         if (cancelled) return;
-        const cur = useStore.getState();
         if (fresh.length === 0) {
-          cur.hydrate([], null);
+          useStore.getState().hydrate([], null);
         } else {
           // detectToProject normalizes to git root, so ids may shift; remap by path.
           const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
           const byPath = oldActive ? fresh.find((p) => p.path === oldActive.path) : undefined;
-          cur.hydrate(fresh, byPath?.id ?? fresh[0].id);
+          const cur = useStore.getState();
+          // Keep the seeded shell if the project survived re-detect: a second
+          // hydrate would wipe layout/worktrees mid-mount and respawn the PTY.
+          const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
+          cur.updateProject(kept.id, { isGit: kept.isGit, gitRoot: kept.gitRoot, branch: kept.branch });
+          if (kept.id !== cur.activeProjectId) cur.setActiveProject(kept.id);
         }
       } else {
         st.hydrate([], null);
@@ -603,8 +471,8 @@ export default function App() {
   const settings = useStore((s) => s.settings);
   useEffect(() => {
     if (!hydrated) return;
-    savePersisted({ projects, activeProjectId, settings });
-  }, [hydrated, projects, activeProjectId, settings]);
+    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, settings });
+  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, settings]);
 
   // App-wide zoom: CSS `zoom` on <html> scales all chrome (topbar, sidebar,
   // explorer, dialogs). Terminals refit through their ResizeObserver.
@@ -636,10 +504,11 @@ export default function App() {
     }
   };
 
-  // Worktree loader: keyed ONLY on project identity, never on the object
-  // (a fresh projects array each hydrate re-created `activeProject` and
-  // re-ran this effect, double-listing worktrees and remounting the PTY).
-  const activeProjectIdSel = useStore((s) => s.activeProjectId);
+  // Worktree loader: keyed on project identity + boot epoch. The epoch
+  // pins each run to one boot: without it, the background re-detect patch
+  // (updateProject/setActiveProject above) changed the key mid-load and the
+  // effect re-ran, double-listing worktrees and remounting the PTY.
+  const projectsEpoch = useStore((s) => s.projectsEpoch);
   const activeProjectGitKey = useStore((s) => {
     const p = s.projects.find((x) => x.id === s.activeProjectId) ?? null;
     return p ? `${p.id}::${p.isGit ? (p.gitRoot ?? p.path) : p.path}` : null;
@@ -654,23 +523,35 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        setRepoError(null);
         if (p.isGit) {
           const root = p.gitRoot ?? p.path;
           setRepoRoot(root);
           let wts: Worktree[] | null = null;
-          // Defer one frame: lets first paint land before the shell burst.
-          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          // No frame defer: the seeded shell already painted; revalidate now.
           try {
             const listed = await invoke<Worktree[]>("worktree_list", { repoRoot: root });
             if (listed.length > 0) wts = listed;
           } catch (e) {
-            // Fall through to the plain-folder fallback below. The banner
-            // keeps the git error visible instead of sticking on "Starting…".
+            // Keep the seeded list on git failure (offline/locked): the old
+            // fallthrough replaced it with a plain-folder shell and moved the
+            // user. Banner carries the error instead.
+            const st = useStore.getState();
+            if (st.worktrees.length === 0) {
+              setRepoRoot(p.path);
+              const solo: Worktree[] = [
+                { id: `plain:${p.id}`, path: p.path, branch: p.name, is_main: true },
+              ];
+              if (!cancelled) {
+                setWorktrees(solo);
+                setActiveWorktree(solo[0].id);
+              }
+            }
             if (!cancelled) setRepoError(String(e));
+            return;
           }
           if (cancelled) return;
           if (wts) {
+            if (!cancelled) setRepoError(null);
             setWorktrees(wts);
             const st = useStore.getState();
             if (!wts.find((w) => w.id === st.activeWorktreeId)) {
@@ -679,7 +560,7 @@ export default function App() {
             }
             return;
           }
-          // Git list failed or empty: plain folder terminal on the project
+          // Git list empty (not failed): plain folder terminal on the project
           // path so a shell always mounts.
           setRepoRoot(p.path);
           const solo: Worktree[] = [
@@ -706,10 +587,13 @@ export default function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, activeProjectGitKey, activeProjectIdSel]);
+  }, [hydrated, projectsEpoch, activeProjectGitKey]);
 
   // Ctrl+K palette, Ctrl+D split, Ctrl+, settings,
-  // Ctrl+=/-/0 app zoom (terminals own these keys when focused)
+  // Ctrl+=/-/0 app zoom (terminals own these keys when focused).
+  // Every other app shortcut below is also terminal-exempt: when a shell or
+  // TUI has focus its keystrokes (Ctrl+D EOF, Ctrl+B tmux prefix, ...) must
+  // reach the PTY unmodified, never trigger chrome.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
@@ -728,16 +612,32 @@ export default function App() {
         return;
       }
       if (mod && e.key.toLowerCase() === "k") {
-        // In a focused terminal Ctrl+K is kill-line: let the shell have it.
-        if (inTerm) return;
+        // In a focused terminal plain Ctrl+K is kill-line: let the shell
+        // have it. Ctrl+Shift+K still opens the palette from a terminal.
+        if (inTerm && !e.shiftKey) return;
         e.preventDefault();
         const st = useStore.getState();
         st.setPaletteOpen(!st.paletteOpen);
       } else if (mod && e.key === ",") {
+        // Ctrl+, is a readline binding in some shells: never steal it.
+        if (inTerm) return;
         e.preventDefault();
         const st = useStore.getState();
         st.setSettingsOpen(!st.settingsOpen);
-      } else if (mod && e.key.toLowerCase() === "d" && !e.shiftKey) {
+      } else if (mod && e.key.toLowerCase() === "b" && !e.shiftKey) {
+        // Ctrl+B is the tmux prefix: it must reach the PTY, never chrome.
+        if (inTerm) return;
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag !== "INPUT" && tag !== "TEXTAREA") {
+          e.preventDefault();
+          const st = useStore.getState();
+          if (e.altKey) st.toggleRight();
+          else st.toggleLeft();
+        }
+      } else if (mod && e.key.toLowerCase() === "d") {
+        // Plain Ctrl+D is EOF (closes prompts, exits REPLs): it must reach
+        // the PTY. Ctrl+Shift+D splits even from a focused terminal.
+        if (inTerm && !e.shiftKey) return;
         const st = useStore.getState();
         if (st.activePaneId && st.paletteOpen === false) {
           const tag = (e.target as HTMLElement | null)?.tagName;
@@ -751,23 +651,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-
-  useEffect(() => {
-    const st = useStore.getState();
-    const ids: string[] = [];
-    const walk = (n: unknown) => {
-      const v = n as { kind?: string; id?: string; first?: unknown; second?: unknown } | null;
-      if (!v) return;
-      if (v.kind === "pane" && v.id) ids.push(v.id);
-      else {
-        walk(v.first ?? null);
-        walk(v.second ?? null);
-      }
-    };
-    walk(st.layout);
-    st.setBroadcastTargets(ids);
-  }, [layout]);
-
 
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
 
@@ -804,21 +687,20 @@ export default function App() {
               getCurrentWindow().toggleMaximize().catch(() => {});
             }).catch(() => {});
           }}
-          className="flex h-11 shrink-0 select-none items-center gap-2 border-b bg-ink-900 pl-3 pr-0"
-          style={{ borderColor: "var(--gm-hairline)" }}
+          className="flex h-11 shrink-0 select-none items-center gap-2 bg-ink-900 pl-3 pr-0"
+          style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
         >
           <span className="text-[13px] font-semibold tracking-tight text-ink-100">
             guimux
           </span>
           <div className="flex-1" />
           <button
-            className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-ink-400 hover:bg-white/[0.04]"
+            className="gm-icon-btn text-[12px]"
             onClick={() => useStore.getState().setPaletteOpen(true)}
           >
-            <Search size={13} />
+            <Search size={14} strokeWidth={2} />
             <span className="gm-kbd">Ctrl K</span>
           </button>
-          <span className="mx-1.5 h-4 w-px shrink-0" style={{ background: "var(--gm-hairline)" }} />
           <WindowControls />
         </div>
         <div className="relative min-h-0 flex-1">
@@ -849,7 +731,7 @@ export default function App() {
       )}
       <div className="flex min-h-0 flex-1">
         {leftVisible && <WorktreeSidebar />}
-        <div className="relative min-w-0 flex-1 bg-ink-950">
+        <div className="relative min-w-0 flex-1 bg-ink-950" style={{ borderLeft: "1px solid var(--gm-hairline-soft)" }}>
           {wt && layout ? (
             <SplitView key={wt.id} node={layout} cwd={wt.path} />
           ) : (
@@ -857,48 +739,12 @@ export default function App() {
               {busy ? "Loading..." : "Starting terminal..."}
             </div>
           )}
-          {activePaneId && (
-            <div
-              className="pointer-events-none absolute bottom-2.5 right-2.5 flex overflow-hidden rounded-lg shadow-pop"
-              style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-            >
-              <button
-                className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 text-[11.5px] font-medium text-ink-300 hover:bg-white/[0.05] hover:text-ink-100"
-                onClick={() => splitPane(activePaneId, "h")}
-                title="Split right (Ctrl+D)"
-              >
-                <Columns2 size={12} /> Split right
-              </button>
-              <span className="w-px" style={{ background: "var(--gm-hairline)" }} />
-              <button
-                className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 text-[11.5px] font-medium text-ink-300 hover:bg-white/[0.05] hover:text-ink-100"
-                onClick={() => splitPane(activePaneId, "v")}
-                title="Split down"
-              >
-                <Rows2 size={12} /> Split down
-              </button>
-            </div>
-          )}
         </div>
         {wt && rightVisible && <ExplorerPane key={wt.id} root={wt.path} />}
       </div>
-      <StatusStrip />
       <Palette />
       <SettingsPanel />
       <AgentLauncher />
-      {broadcast.active && (
-        <div
-          className="tnum pointer-events-none fixed bottom-10 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-lg px-3.5 py-1.5 text-[12px] font-medium shadow-pop"
-          style={{
-            background: "var(--gm-overlay)",
-            border: "1px solid var(--gm-hairline)",
-            color: "var(--gm-accent)",
-          }}
-        >
-          <Radio size={12} /> Broadcast on: typing goes to {broadcast.targetPaneIds.length}{" "}
-          {broadcast.targetPaneIds.length === 1 ? "pane" : "panes"}
-        </div>
-      )}
     </div>
   );
 }

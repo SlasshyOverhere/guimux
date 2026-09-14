@@ -6,8 +6,8 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Columns2, Rows2, X } from "lucide-react";
-import { useStore } from "../store";
+import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
+import { allPaneIds, useStore } from "../store";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -71,13 +71,6 @@ function paneAlive(node: unknown, paneId: string): boolean {
   return paneAlive(v.first ?? null, paneId) || paneAlive(v.second ?? null, paneId);
 }
 
-function findPtyId(node: unknown, paneId: string): number | null {
-  const v = node as { kind?: string; id?: string; ptyId?: number | null; first?: unknown; second?: unknown } | null;
-  if (!v) return null;
-  if (v.kind === "pane") return v.id === paneId ? (v.ptyId ?? null) : null;
-  return findPtyId(v.first ?? null, paneId) ?? findPtyId(v.second ?? null, paneId);
-}
-
 // Sane grid, never zero: FitAddon on an unmeasured/hidden container reports
 // 0s, and a 0-size ConPTY wedges rendering (blank pane).
 function saneDims(term: Terminal): { cols: number; rows: number } | null {
@@ -94,6 +87,42 @@ function fitSane(term: Terminal, fit: FitAddon): { cols: number; rows: number } 
     return null;
   }
   return saneDims(term);
+}
+
+// Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
+// (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
+// powershell bootstrap in pty.rs. Snoop the raw output bytes, keep the last
+// match, store it on the pane so splits inherit the source pane's directory.
+// ST is BEL or ESC\. Buffer tail is retained so a sequence split across two
+// output chunks still parses.
+function extractLiveCwd(buf: string): string | null {
+  let native: string | null = null;
+  let uriPath: string | null = null;
+  let m: RegExpExecArray | null;
+  const re99 = /\x1b\]9;9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  while ((m = re99.exec(buf)) !== null) {
+    const p = m[1].trim();
+    if (p) native = p;
+  }
+  const re7 = /\x1b\]7;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  while ((m = re7.exec(buf)) !== null) {
+    const uri = m[1].trim();
+    const i = uri.indexOf("file://");
+    if (i < 0) continue;
+    const rest = uri.slice(i + "file://".length);
+    const slash = rest.indexOf("/");
+    if (slash < 0) continue;
+    let path = rest.slice(slash);
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      /* raw on bad escapes */
+    }
+    path = path.replace(/\//g, "\\");
+    if (/^\\[A-Za-z]:\\/.test(path)) path = path.slice(1);
+    if (/^[A-Za-z]:\\/.test(path) || path.startsWith("\\\\")) uriPath = path;
+  }
+  return native ?? uriPath;
 }
 
 export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: Props) {
@@ -113,7 +142,34 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     splitPane,
     setActivePane,
     setPtyId,
+    toggleMaximizePane,
   } = useStore();
+  const maximized = useStore((s) => s.maximizedPaneId === paneId);
+  const paneCount = useStore((s) => allPaneIds(s.layout).length);
+  // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
+  // a split from D:/test/workspace/testing/ opens there, not worktree root.
+  const liveCwdRef = useRef<string | null>(null);
+  const snoopTailRef = useRef("");
+  const snoopLiveCwd = (bytes: Uint8Array) => {
+    let text: string;
+    try {
+      text = new TextDecoder().decode(bytes);
+    } catch {
+      return;
+    }
+    if (!text.includes("\x1b]")) {
+      // No OSC opener: still bound the tail for the rare split sequence.
+      snoopTailRef.current = (snoopTailRef.current + text).slice(-512);
+      return;
+    }
+    const buf = snoopTailRef.current + text;
+    const found = extractLiveCwd(buf);
+    snoopTailRef.current = buf.slice(-512);
+    if (found && found !== liveCwdRef.current) {
+      liveCwdRef.current = found;
+      useStore.getState().setPaneCwd(paneId, found);
+    }
+  };
 
   const markExited = () => {
     exitedRef.current = true;
@@ -124,8 +180,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
     const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
+      const bytes = new Uint8Array(ev.payload);
+      snoopLiveCwd(bytes);
       try {
-        term.write(new Uint8Array(ev.payload));
+        term.write(bytes);
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
@@ -136,7 +194,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     });
     unlisteners.current.push(disposeOutput, disposeExit);
     const replay = await invoke<number[]>("pty_attach", { id: sid });
-    if (replay.length > 0) term.write(new Uint8Array(replay));
+    if (replay.length > 0) {
+      const bytes = new Uint8Array(replay);
+      snoopLiveCwd(bytes);
+      term.write(bytes);
+    }
   };
 
   // WebGL primary, canvas/DOM fallback. Buffer, cursor, and focus live on the
@@ -207,6 +269,66 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     term.focus();
   };
 
+  // Raw fallback when the Web Clipboard API is denied (focus/permission):
+  // ^V lets PSReadLine/conhost paste from the system clipboard themselves.
+  const sendRaw = (data: string) => {
+    const sid = sessionRef.current;
+    if (sid != null && !exitedRef.current) invoke("pty_write", { id: sid, data }).catch(() => {});
+  };
+
+  const copySelection = () => {
+    const term = termRef.current;
+    if (!term || !term.hasSelection()) return false;
+    const sel = term.getSelection();
+    if (!sel) return false;
+    const done = () => {
+      term.clearSelection();
+      term.focus();
+    };
+    const fallbackCopy = () => {
+      // No async Clipboard API (denied/unsupported): execCommand from a temp
+      // field. Selection stays put on failure so the user can retry.
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = sel;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        if (ok) done();
+        else term.focus();
+      } catch {
+        term.focus();
+      }
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(sel).then(done, fallbackCopy);
+    else fallbackCopy();
+    return true;
+  };
+
+  const pasteClipboard = () => {
+    const term = termRef.current;
+    term?.focus();
+    if (navigator.clipboard?.readText) {
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (!text) return;
+          // term.paste honors bracketed-paste mode; raw pty_write would not.
+          try {
+            term?.paste(text);
+          } catch {
+            sendRaw(text);
+          }
+        })
+        .catch(() => sendRaw("\x16"));
+    } else {
+      sendRaw("\x16");
+    }
+  };
+
   const fontSize = useStore((s) => s.settings.terminalFontSize);
   const scrollback = useStore((s) => s.settings.scrollback);
 
@@ -239,8 +361,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       e.stopPropagation();
       step(e.deltaY < 0 ? 1 : -1);
     };
+    // Scoped to this pane's own grid: every mounted pane registers this
+    // window listener, and an unscoped check would zoom N times for N panes.
+    const inThisTerm = (e: KeyboardEvent) => {
+      const t = e.target as Node | null;
+      if (t && el.contains(t)) return true;
+      const ae = document.activeElement;
+      return !!ae && el.contains(ae);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || !document.activeElement?.closest(".xterm")) return;
+      if (!(e.ctrlKey || e.metaKey) || !inThisTerm(e)) return;
       if (e.key === "0") {
         e.preventDefault();
         useStore.getState().setSettings({ terminalFontSize: 13 });
@@ -276,9 +406,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       cursorStyle: "block",
       drawBoldTextInBrightColors: true,
       macOptionClickForcesSelection: true,
+      // Transparent: the tile div owns the surface (canvas vs panel) so
+      // active/inactive reads without a window-inside-window seam.
       theme: {
-        background: "#0a0a0a",
-        foreground: "#fafafa",
+        background: "rgba(0,0,0,0)",
+        foreground: "#e5e5e5",
         cursor: "#e5e5e5",
         cursorAccent: "#171717",
         selectionBackground: "rgba(229,229,229,0.28)",
@@ -319,6 +451,23 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
+    // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
+    // text is selected (else the SIGINT the TUI may need), Ctrl+V paste.
+    // Returning false keeps xterm from also feeding the key to the PTY.
+    term.attachCustomKeyEventHandler((e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.type === "keydown") {
+        const termNow = termRef.current;
+        if (e.key.toLowerCase() === "c" && termNow?.hasSelection()) {
+          copySelection();
+          return false;
+        }
+        if (e.key.toLowerCase() === "v") {
+          pasteClipboard();
+          return false;
+        }
+      }
+      return true;
+    });
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
@@ -400,17 +549,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       term.onData((data) => {
         if (exitedRef.current) return;
         const sid = sessionRef.current;
-        // Broadcast: send to all visible panes in this worktree
-        const st = useStore.getState();
-        if (st.broadcast.active && st.broadcast.targetPaneIds.length > 0) {
-          for (const target of st.broadcast.targetPaneIds) {
-            // each pane writes via its own pty
-            const ptyTarget = findPtyId(st.layout, target);
-            if (ptyTarget != null) {
-              invoke("pty_write", { id: ptyTarget, data });
-            }
-          }
-        } else if (sid != null) {
+        if (sid != null) {
           invoke("pty_write", { id: sid, data });
         }
       });
@@ -493,60 +632,75 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   return (
     <div
-      className="relative h-full w-full bg-ink-950"
-      onMouseDown={() => setActivePane(paneId)}
+      className="relative h-full w-full"
+      onMouseDown={() => {
+        setActivePane(paneId);
+        // Clicking pane chrome (toolbar, gutters) parks focus on a button or
+        // div: without this every key after a mouse click goes nowhere.
+        termRef.current?.focus();
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (termRef.current?.hasSelection()) copySelection();
+        else pasteClipboard();
+      }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDrop}
     >
       <div
-        className="absolute right-1.5 top-1.5 z-10 flex gap-1 opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
+        className="absolute right-2 top-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
       >
         {!webgl && (
           <span
             title="Software rendering fallback (WebGL unavailable)"
-            className="rounded-md px-1.5 py-1 text-[10px] text-ink-400"
+            className="mr-1 rounded-md px-1.5 py-1 text-[10px] text-ink-500"
             style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
           >
             sw
           </span>
         )}
-        <button
-          title="Split right (Ctrl+D)"
-          aria-label="Split pane right"
-          className="rounded-md p-1.5 text-ink-300 hover:bg-white/[0.06] hover:text-ink-100"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => splitPane(paneId, "h")}
-        >
-          <Columns2 size={12} />
-        </button>
-        <button
-          title="Split down"
-          aria-label="Split pane down"
-          className="rounded-md p-1.5 text-ink-300 hover:bg-white/[0.06] hover:text-ink-100"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => splitPane(paneId, "v")}
-        >
-          <Rows2 size={12} />
-        </button>
-        <button
-          title="Close pane"
-          aria-label="Close pane"
-          className="rounded-md p-1.5 text-ink-300 hover:text-clay-400"
-          style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-          onClick={() => {
-            const sid = sessionRef.current;
-            if (sid != null) invoke("pty_kill", { id: sid });
-            onClose();
-          }}
-        >
-          <X size={12} />
-        </button>
+        <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
+          <button
+            title="Split right (Ctrl+Shift+D)"
+            aria-label="Split pane right"
+            onClick={() => splitPane(paneId, "h")}
+          >
+            <Columns2 size={13} strokeWidth={2} />
+          </button>
+          <button
+            title="Split down"
+            aria-label="Split pane down"
+            onClick={() => splitPane(paneId, "v")}
+          >
+            <Rows2 size={13} strokeWidth={2} />
+          </button>
+          {paneCount > 1 && (
+            <button
+              title={maximized ? "Restore panes" : "Maximize pane"}
+              aria-label={maximized ? "Restore panes" : "Maximize pane"}
+              aria-pressed={maximized}
+              onClick={() => toggleMaximizePane(paneId)}
+            >
+              {maximized ? <Minimize2 size={13} strokeWidth={2} /> : <Maximize2 size={13} strokeWidth={2} />}
+            </button>
+          )}
+          <button
+            title="Close pane"
+            aria-label="Close pane"
+            onClick={() => {
+              const sid = sessionRef.current;
+              if (sid != null) invoke("pty_kill", { id: sid });
+              onClose();
+            }}
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
+        </div>
       </div>
       {exited && (
         <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pb-3">
           <div
-            className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12px] shadow-pop"
-            style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
+            className="gm-menu flex items-center gap-2 px-3 py-1.5 text-[12px]"
           >
             <span className="text-ink-400">Shell exited</span>
             <button
@@ -557,7 +711,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
               Restart
             </button>
             <button
-              className="rounded-md px-2 py-1 text-ink-400 hover:bg-white/[0.06] hover:text-ink-200"
+              className="rounded-md px-2 py-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
               onClick={() => {
                 const sid = sessionRef.current;
                 if (sid != null) invoke("pty_kill", { id: sid });

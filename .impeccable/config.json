@@ -8,6 +8,53 @@
         "value": "inter",
         "createdAt": "2026-09-13T03:06:21.212Z",
         "reason": "user confirmed: explicit requirement to force Inter font in /goal special requirements"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          "src/sidebar/WorktreeSidebar.tsx",
+          "src/App.tsx"
+        ],
+        "createdAt": "2026-09-14T03:49:55.871Z",
+        "reason": "user confirmed: 11-12px chrome text is the workbench scale; shipped UI, accepted"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "src/sidebar/WorktreeSidebar.tsx",
+          "src/App.tsx"
+        ],
+        "createdAt": "2026-09-14T03:51:46.241Z",
+        "reason": "user confirmed: muted meta tokens are the workbench voice; shipped UI, accepted"
+      },
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "topbar-demos.html"
+        ],
+        "createdAt": "2026-09-14T03:56:49.621Z",
+        "reason": "intentional demo fixture mirroring app muted meta tokens at 1:1; not shipped UI"
+      },
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          "topbar-demos.html"
+        ],
+        "createdAt": "2026-09-14T03:56:49.844Z",
+        "reason": "intentional demo fixture mirroring app 11-12px chrome scale at 1:1; not shipped UI"
+      },
+      {
+        "rule": "undersized-ui-text",
+        "value": "*",
+        "files": [
+          "topbar-demos.html"
+        ],
+        "createdAt": "2026-09-14T03:56:59.708Z",
+        "reason": "intentional demo fixture mirroring app 11-12px chrome scale at 1:1; not shipped UI"
       }
     ]
   }

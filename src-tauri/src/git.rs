@@ -173,6 +173,21 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
     Ok(diff)
 }
 
+#[command]
+pub fn git_branches(repo_root: String) -> Result<Vec<String>, String> {
+    let repo = PathBuf::from(&repo_root);
+    let out = git(&repo, &["branch", "-a", "--format=%(refname:short)"])?;
+    let mut branches: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains(" -> "))
+        .map(str::to_string)
+        .collect();
+    branches.sort();
+    branches.dedup();
+    Ok(branches)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
