@@ -71,13 +71,6 @@ function paneAlive(node: unknown, paneId: string): boolean {
   return paneAlive(v.first ?? null, paneId) || paneAlive(v.second ?? null, paneId);
 }
 
-function findPtyId(node: unknown, paneId: string): number | null {
-  const v = node as { kind?: string; id?: string; ptyId?: number | null; first?: unknown; second?: unknown } | null;
-  if (!v) return null;
-  if (v.kind === "pane") return v.id === paneId ? (v.ptyId ?? null) : null;
-  return findPtyId(v.first ?? null, paneId) ?? findPtyId(v.second ?? null, paneId);
-}
-
 // Sane grid, never zero: FitAddon on an unmeasured/hidden container reports
 // 0s, and a 0-size ConPTY wedges rendering (blank pane).
 function saneDims(term: Terminal): { cols: number; rows: number } | null {
@@ -400,17 +393,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       term.onData((data) => {
         if (exitedRef.current) return;
         const sid = sessionRef.current;
-        // Broadcast: send to all visible panes in this worktree
-        const st = useStore.getState();
-        if (st.broadcast.active && st.broadcast.targetPaneIds.length > 0) {
-          for (const target of st.broadcast.targetPaneIds) {
-            // each pane writes via its own pty
-            const ptyTarget = findPtyId(st.layout, target);
-            if (ptyTarget != null) {
-              invoke("pty_write", { id: ptyTarget, data });
-            }
-          }
-        } else if (sid != null) {
+        if (sid != null) {
           invoke("pty_write", { id: sid, data });
         }
       });

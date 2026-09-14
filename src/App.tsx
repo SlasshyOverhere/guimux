@@ -2,22 +2,15 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  Columns2,
-  Rows2,
-  Radio,
   GitBranch,
   Search,
   FolderOpen,
   Folder,
   X,
   Plus,
-  ChevronDown,
-  CircleDot,
   House as HomeIcon,
   Settings as SettingsIcon,
   Bot,
-  PanelLeft,
-  PanelRight,
 } from "lucide-react";
 import { useStore } from "./store";
 import { WindowControls } from "./chrome/WindowControls";
@@ -35,8 +28,8 @@ import { maybeStartStress } from "./terminal/stress";
 export { detectToProject };
 
 /* ------------------------------------------------------------------ */
-/* Topbar: a treated workbench rail. Project switcher + worktree       */
-/* breadcrumb + session controls. One palette, one accent, Inter only. */
+/* Topbar: session title. Project picker left, worktree centered like   */
+/* a document title, tools right. One palette, one accent, Inter only.  */
 /* ------------------------------------------------------------------ */
 
 function Topbar({ onAdd }: { onAdd: () => void }) {
@@ -47,32 +40,20 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
     removeProject,
     worktrees,
     activeWorktreeId,
-    setActiveWorktree,
-    broadcast,
-    toggleBroadcast,
-    setPaletteOpen,
     setSettingsOpen,
     setAgentOpen,
-    leftVisible,
-    toggleLeft,
-    rightVisible,
-    toggleRight,
   } = useStore();
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
   const [projOpen, setProjOpen] = useState(false);
-  const [wtOpen, setWtOpen] = useState(false);
 
-  // Escape + pointer-down-outside close whichever dropdown is open.
+  // Escape + pointer-down-outside close the project dropdown.
   // pointerdown (not click): a real click-outside that works even when the
   // click itself is swallowed, and it closes before the row's click fires.
   useEffect(() => {
-    if (!projOpen && !wtOpen) return;
+    if (!projOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setProjOpen(false);
-        setWtOpen(false);
-      }
+      if (e.key === "Escape") setProjOpen(false);
     };
     // mousedown (not pointerdown): synthetic PointerEvents dispatched via
     // JS do not trigger real pointerdown listeners in this WebView, but
@@ -83,7 +64,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       const t = e.target as HTMLElement;
       if (t.closest("[data-menu-root]") && !t.closest("[data-outside]")) return;
       setProjOpen(false);
-      setWtOpen(false);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("mousedown", onDown, true);
@@ -91,7 +71,7 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onDown, true);
     };
-  }, [projOpen, wtOpen]);
+  }, [projOpen]);
 
   // Drag must ignore anything clickable: on Windows a native drag started on
   // mousedown swallows the follow-up click, which bricked every dropdown row
@@ -149,10 +129,10 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       </span>
       <span className="mr-2 h-4 w-px" style={{ background: "var(--gm-hairline)" }} />
 
-      {/* project switcher */}
+      {/* project picker, left */}
       <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
         <button
-          className="flex max-w-[260px] items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] font-medium text-ink-200 hover:bg-white/[0.04]"
+          className="flex max-w-[200px] items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] font-medium text-ink-200 hover:bg-white/[0.04]"
           onClick={() => setProjOpen(!projOpen)}
           title={proj?.path ?? "No project open"}
           aria-haspopup="menu"
@@ -164,12 +144,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
             <Folder size={13} className="shrink-0 text-ink-400" strokeWidth={2.2} />
           )}
           <span className="truncate">{proj ? proj.name : "No project"}</span>
-          {!proj?.isGit && proj && (
-            <span className="tnum shrink-0 text-[11px] font-medium text-ink-400">
-              local
-            </span>
-          )}
-          <ChevronDown size={12} className="shrink-0 text-ink-400" />
         </button>
         {projOpen && (
           <>
@@ -222,9 +196,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
                     </div>
                     <div className="truncate text-[11px] text-ink-400">{p.path}</div>
                   </div>
-                  {p.id === activeProjectId && (
-                    <CircleDot size={12} className="shrink-0 text-accent-500" />
-                  )}
                   <button
                     title="Remove project"
                     className="hidden shrink-0 rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400 group-hover:block"
@@ -252,81 +223,25 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
         )}
       </div>
 
-      {/* worktree breadcrumb */}
-      {proj?.isGit && wt && (
-        <>
-          <span className="px-0.5 text-[12px] text-ink-400">/</span>
-          <div className="relative" data-menu-root style={{ zIndex: wtOpen ? 50 : undefined }}>
-            <button
-              className="flex max-w-[220px] items-center gap-1.5 rounded-md px-2 py-1.5 text-[12.5px] text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-              onClick={() => setWtOpen(!wtOpen)}
-              title={wt.path}
-              aria-haspopup="menu"
-              aria-expanded={wtOpen}
-            >
-              {wt.is_main && <span title="Main worktree" className="flex shrink-0"><HomeIcon size={12} className="text-accent-500" /></span>}
-              <span className="mono truncate text-[12px]">{wt.branch || "(detached)"}</span>
-              <ChevronDown size={12} className="shrink-0 text-ink-400" />
-            </button>
-            {wtOpen && (
-              <>
-                <div className="fixed inset-0 z-30" data-no-drag data-outside />
-                <div
-                  className="absolute left-0 top-9 z-40 w-72 overflow-hidden rounded-lg py-1 shadow-pop"
-                  style={{
-                    background: "var(--gm-overlay)",
-                    border: "1px solid var(--gm-hairline)",
-                  }}
-                >
-                  {worktrees.map((w) => (
-                    <div
-                      key={w.id}
-                      role="button"
-                      tabIndex={0}
-                      className={`cursor-pointer px-3 py-2 ${
-                        w.id === activeWorktreeId ? "bg-white/[0.05]" : "hover:bg-white/[0.03]"
-                      }`}
-                      onClick={() => {
-                        setActiveWorktree(w.id);
-                        setWtOpen(false);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setActiveWorktree(w.id);
-                          setWtOpen(false);
-                        }
-                      }}
-                    >
-                      <div
-                        className={`mono flex items-center gap-1.5 truncate text-[12px] ${
-                          w.id === activeWorktreeId ? "text-accent-400" : "text-ink-200"
-                        }`}
-                      >
-                        {w.is_main && <span title="Main worktree" className="flex shrink-0"><HomeIcon size={11} /></span>}
-                        <span className="truncate">{w.branch || "(detached)"}</span>
-                      </div>
-                      <div className="truncate text-[11px] text-ink-400">{w.path}</div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        </>
+      {/* session title: centered worktree, the document of this app */}
+      {wt ? (
+        <div className="pointer-events-none absolute left-1/2 flex max-w-[40vw] -translate-x-1/2 items-center gap-1.5">
+          {wt.is_main && (
+            <span title="Main worktree" className="flex shrink-0">
+              <HomeIcon size={11} className="text-accent-500" />
+            </span>
+          )}
+          <span className="mono truncate text-[12.5px] font-semibold text-ink-100" title={wt.path}>
+            {wt.branch || "(detached)"}
+          </span>
+        </div>
+      ) : (
+        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 text-[12.5px] font-medium text-ink-400">
+          No worktree
+        </div>
       )}
 
       <div className="flex-1" />
-
-      <button
-        title="Hide or show the left sidebar"
-        aria-label={leftVisible ? "Collapse left sidebar" : "Expand left sidebar"}
-        aria-pressed={leftVisible}
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        onClick={toggleLeft}
-      >
-        <PanelLeft size={14} />
-      </button>
 
       {/* launch CLI agents into auto-arranged terminal tiles */}
       <button
@@ -336,50 +251,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       >
         <Bot size={13} />
         <span className="hidden md:inline">Agents</span>
-      </button>
-
-      <button
-        title="Hide or show the right sidebar"
-        aria-label={rightVisible ? "Collapse right sidebar" : "Expand right sidebar"}
-        aria-pressed={rightVisible}
-        className="rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        onClick={toggleRight}
-      >
-        <PanelRight size={14} />
-      </button>
-
-      {/* broadcast: honest switch, no glow */}
-      <button
-        title="Broadcast input: type once, all visible panes receive"
-        onClick={toggleBroadcast}
-        className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
-          broadcast.active ? "text-ink-100" : "text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        }`}
-        style={broadcast.active ? { background: "var(--gm-accent-wash)" } : undefined}
-      >
-        <span
-          className="flex h-4 w-7 items-center rounded-full px-0.5 transition-colors"
-          style={{
-            background: broadcast.active ? "var(--gm-accent)" : "rgba(255,255,255,0.14)",
-            justifyContent: broadcast.active ? "flex-end" : "flex-start",
-          }}
-        >
-          <span
-            className="h-3 w-3 rounded-full"
-            style={{ background: broadcast.active ? "var(--gm-accent-ink)" : "var(--gm-ink-mute)" }}
-          />
-        </span>
-        <Radio size={13} className={broadcast.active ? "text-accent-400" : ""} />
-        <span className="hidden md:inline">Broadcast</span>
-      </button>
-
-      <button
-        title="Command palette"
-        className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-        onClick={() => setPaletteOpen(true)}
-      >
-        <Search size={13} />
-        <span className="gm-kbd">Ctrl K</span>
       </button>
 
       <button
@@ -506,7 +377,6 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
 function StatusStrip() {
   const proj = useStore((s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null);
   const wt = useStore((s) => s.worktrees.find((w) => w.id === s.activeWorktreeId));
-  const broadcast = useStore((s) => s.broadcast);
   if (!proj) return null;
   return (
     <div
@@ -521,11 +391,6 @@ function StatusStrip() {
         {wt?.path ?? proj.path}
       </span>
       <span className="flex-1" />
-      {broadcast.active && (
-        <span className="flex items-center gap-1.5 font-medium" style={{ color: "var(--gm-accent)" }}>
-          <Radio size={11} /> broadcast to {broadcast.targetPaneIds.length}
-        </span>
-      )}
       <span>{proj.isGit ? "git worktree session" : "folder session"}</span>
     </div>
   );
@@ -544,9 +409,6 @@ export default function App() {
     setActiveWorktree,
     setWorktrees,
     layout,
-    activePaneId,
-    splitPane,
-    broadcast,
     leftVisible,
     rightVisible,
   } = useStore();
@@ -752,23 +614,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  useEffect(() => {
-    const st = useStore.getState();
-    const ids: string[] = [];
-    const walk = (n: unknown) => {
-      const v = n as { kind?: string; id?: string; first?: unknown; second?: unknown } | null;
-      if (!v) return;
-      if (v.kind === "pane" && v.id) ids.push(v.id);
-      else {
-        walk(v.first ?? null);
-        walk(v.second ?? null);
-      }
-    };
-    walk(st.layout);
-    st.setBroadcastTargets(ids);
-  }, [layout]);
-
-
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
 
   useEffect(() => {
@@ -857,28 +702,6 @@ export default function App() {
               {busy ? "Loading..." : "Starting terminal..."}
             </div>
           )}
-          {activePaneId && (
-            <div
-              className="pointer-events-none absolute bottom-2.5 right-2.5 flex overflow-hidden rounded-lg shadow-pop"
-              style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
-            >
-              <button
-                className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 text-[11.5px] font-medium text-ink-300 hover:bg-white/[0.05] hover:text-ink-100"
-                onClick={() => splitPane(activePaneId, "h")}
-                title="Split right (Ctrl+D)"
-              >
-                <Columns2 size={12} /> Split right
-              </button>
-              <span className="w-px" style={{ background: "var(--gm-hairline)" }} />
-              <button
-                className="pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 text-[11.5px] font-medium text-ink-300 hover:bg-white/[0.05] hover:text-ink-100"
-                onClick={() => splitPane(activePaneId, "v")}
-                title="Split down"
-              >
-                <Rows2 size={12} /> Split down
-              </button>
-            </div>
-          )}
         </div>
         {wt && rightVisible && <ExplorerPane key={wt.id} root={wt.path} />}
       </div>
@@ -886,19 +709,6 @@ export default function App() {
       <Palette />
       <SettingsPanel />
       <AgentLauncher />
-      {broadcast.active && (
-        <div
-          className="tnum pointer-events-none fixed bottom-10 left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-lg px-3.5 py-1.5 text-[12px] font-medium shadow-pop"
-          style={{
-            background: "var(--gm-overlay)",
-            border: "1px solid var(--gm-hairline)",
-            color: "var(--gm-accent)",
-          }}
-        >
-          <Radio size={12} /> Broadcast on: typing goes to {broadcast.targetPaneIds.length}{" "}
-          {broadcast.targetPaneIds.length === 1 ? "pane" : "panes"}
-        </div>
-      )}
     </div>
   );
 }

@@ -1,27 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  FolderGit2,
-  Plus,
-  Trash2,
-  GitMerge,
-  House as HomeIcon,
-  Check,
-  FilePlus2,
-  FilePenLine,
-  FileX2,
-  ArrowRightLeft,
-  Dot,
-  ChevronRight,
-  Archive,
-  Search,
-  Pin,
-  Copy,
-  X,
-  type LucideIcon,
-} from "lucide-react";
-// ponytail: sidebar shows worktrees only; Projects lives in the topbar
-// switcher. Re-add a sidebar list only when multi-project is visible at once.
+import { Search, ChevronRight, X } from "lucide-react";
+// Ledger sidebar: typographic rows only. No status dots, no row icons, no
+// hover icon buttons — status reads as words ("3 changed", "clean"), actions
+// live in the right-click menu. Re-add inline affordances only if the menu
+// proves undiscoverable.
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { confirmDialog, errorDialog } from "../dialogs";
@@ -35,16 +18,26 @@ const rowKey = (fn: () => void) => (e: React.KeyboardEvent) => {
   }
 };
 
-function statusGlyph(s: FileStatus): { Icon: LucideIcon; color: string; label: string } {
+// Porcelain letters, not icon glyphs: M amber, added green, deleted red.
+function statusLetter(s: FileStatus): { letter: string; color: string; label: string } {
   if (s.workdir_status === "?" || s.index_status === "?")
-    return { Icon: FilePlus2, color: "var(--gm-green)", label: "untracked" };
+    return { letter: "A", color: "var(--gm-green)", label: "untracked" };
   if (s.workdir_status === "M" || s.index_status === "M")
-    return { Icon: FilePenLine, color: "var(--gm-amber)", label: "modified" };
+    return { letter: "M", color: "var(--gm-amber)", label: "modified" };
   if (s.workdir_status === "D" || s.index_status === "D")
-    return { Icon: FileX2, color: "var(--gm-red)", label: "deleted" };
+    return { letter: "D", color: "var(--gm-red)", label: "deleted" };
   if (s.workdir_status === "R" || s.index_status === "R")
-    return { Icon: ArrowRightLeft, color: "var(--gm-ink-dim)", label: "renamed" };
-  return { Icon: Dot, color: "var(--gm-ink-dim)", label: s.workdir_status || "changed" };
+    return { letter: "R", color: "var(--gm-ink-dim)", label: "renamed" };
+  return { letter: "·", color: "var(--gm-ink-dim)", label: s.workdir_status || "changed" };
+}
+
+// Long Windows paths wrap mid-segment and wreck the table; shorten to the
+// last two segments. Main worktree keeps its full path (it is the anchor).
+function shortPath(p: string, full: boolean): string {
+  if (full) return p;
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= 3) return p;
+  return "…/" + parts.slice(-2).join("/");
 }
 
 export function WorktreeSidebar() {
@@ -58,7 +51,6 @@ export function WorktreeSidebar() {
     setWorktrees,
     updateProject,
     openEditor,
-    setPaletteOpen,
   } = useStore();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -68,7 +60,6 @@ export function WorktreeSidebar() {
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [projCollapsed, setProjCollapsed] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [pinned, setPinned] = useState<Record<string, true>>(() => {
     try {
@@ -322,6 +313,9 @@ export function WorktreeSidebar() {
     .sort((a, b) => Number(!!pinned[b.id]) - Number(!!pinned[a.id]));
   const menuWt = menu ? worktrees.find((w) => w.id === menu.id) ?? null : null;
 
+  const tabBtn = (active: boolean) =>
+    `text-[12px] ${active ? "font-semibold text-ink-100" : "font-medium text-ink-400 hover:text-ink-200"}`;
+
   return (
     <div
       className="relative flex h-full shrink-0 flex-col bg-ink-900"
@@ -342,116 +336,70 @@ export function WorktreeSidebar() {
           style={{ background: "var(--gm-ink-mute)" }}
         />
       </div>
-      {/* header: sidebar filter plus a search button that opens the jump
-          palette (Orca: header filter input + Cmd-J search button). */}
-      <div className="flex items-center gap-1.5 px-2 pt-2">
-        <div
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5"
-          style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--gm-hairline-soft)" }}
-        >
-          <Search size={12} className="shrink-0 text-ink-400" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={isGit ? "Filter worktrees" : "Filter"}
-            aria-label="Filter worktrees"
-            className="w-full bg-transparent text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
-          />
-          {query && (
-            <button
-              className="shrink-0 rounded p-0.5 text-ink-400 hover:text-ink-200"
-              onClick={() => setQuery("")}
-              title="Clear filter"
-              aria-label="Clear filter"
-            >
-              <X size={12} />
-            </button>
-          )}
+
+      {/* ledger sentence: what this project holds, in words */}
+      <div className="px-3.5 pt-2.5">
+        <div className="truncate px-0.5 text-[12.5px] font-semibold text-ink-100" title={proj?.path}>
+          {proj?.name ?? "No project"}{" "}
+          <span className="font-medium text-ink-400">
+            {!isGit ? "is a plain folder." : `has ${live.length} live ${live.length === 1 ? "worktree" : "worktrees"}.`}
+          </span>
         </div>
-        <button
-          className="shrink-0 rounded-md p-2 text-ink-400 hover:bg-white/[0.04] hover:text-ink-200"
-          onClick={() => setPaletteOpen(true)}
-          title="Jump to worktree, file, or command (Ctrl K)"
-          aria-label="Open jump palette"
-        >
-          <Search size={13} />
-        </button>
       </div>
-      {/* tabs: real tab indicator, weight shift, no travelling underline.
-          Changes tab only exists for git projects (no dead tab in folders). */}
-      <div className="flex px-2 pt-2" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
-        <button
-          className={`flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] ${
-            isGit ? "flex-1" : ""
-          } ${
-            tab === "worktrees"
-              ? "bg-white/[0.06] font-semibold text-ink-100"
-              : "font-medium text-ink-400 hover:bg-white/[0.03] hover:text-ink-300"
-          }`}
-          onClick={() => setTab("worktrees")}
-        >
-          <FolderGit2 size={12} />
-          {isGit ? "Worktrees" : "Folder"}
+
+      {/* filter: underline, not a box */}
+      <div
+        className="mx-3.5 mt-0.5 flex items-center gap-1.5"
+        style={{ borderBottom: "1px solid var(--gm-hairline)" }}
+      >
+        <Search size={12} className="shrink-0 text-ink-400" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={isGit ? "Filter branches and paths" : "Filter"}
+          aria-label="Filter worktrees"
+          className="w-full bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
+        />
+        {query && (
+          <button
+            className="shrink-0 rounded p-0.5 text-ink-400 hover:text-ink-200"
+            onClick={() => setQuery("")}
+            title="Clear filter"
+            aria-label="Clear filter"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+
+      {/* ledger tabs: words with a weight shift, nothing else */}
+      <div className="flex items-center gap-4 px-4 pt-2">
+        <button className={tabBtn(tab === "worktrees")} onClick={() => setTab("worktrees")}>
+          Worktrees
         </button>
         {isGit && (
-        <button
-          className={`tnum flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] ${
-            tab === "changes"
-              ? "bg-white/[0.06] font-semibold text-ink-100"
-              : "font-medium text-ink-400 hover:bg-white/[0.03] hover:text-ink-300"
-          }`}
-          onClick={() => setTab("changes")}
-        >
-          Changes
-          {totalDirty > 0 && (
-            <span className="text-[11px] font-semibold" style={{ color: "var(--gm-accent)" }}>
-              {totalDirty}
-            </span>
-          )}
-        </button>
+          <button className={`tnum ${tabBtn(tab === "changes")}`} onClick={() => setTab("changes")}>
+            Changes{totalDirty > 0 ? ` · ${totalDirty}` : ""}
+          </button>
         )}
       </div>
 
       {tab === "worktrees" ? (
-        <div className="flex-1 overflow-y-auto p-2">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
           {isPlain && (
-            <div
-              className="mb-2 rounded-lg p-2.5 text-[11.5px] leading-5 text-ink-300"
-              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--gm-hairline-soft)" }}
-            >
-              Plain folder. Terminals and files work now; worktrees appear after init.
+            <div className="px-1 py-1 text-[12px] leading-5 text-ink-300">
+              Terminals and files work now; worktrees appear after init.{" "}
               <button
-                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md py-1.5 text-[12px] font-medium text-ink-200 hover:bg-white/[0.05]"
-                style={{ border: "1px solid var(--gm-hairline)" }}
+                className="font-semibold text-ink-100 hover:underline"
                 onClick={initGit}
               >
-                <Plus size={12} /> Init git here
+                Init git here
               </button>
             </div>
           )}
 
-          {/* project row: Orca groups worktrees under their project. */}
-          {proj && isGit && (
-            <button
-              className="tnum mb-1 flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-ink-400 hover:bg-white/[0.03] hover:text-ink-300"
-              onClick={() => setProjCollapsed((c) => !c)}
-              aria-expanded={!projCollapsed}
-              title={proj.path}
-            >
-              <ChevronRight
-                size={12}
-                className={`shrink-0 transition-transform ${projCollapsed ? "" : "rotate-90"}`}
-              />
-              <FolderGit2 size={12} className="shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-left">{proj.name}</span>
-              <span>{gitRows.length}</span>
-            </button>
-          )}
-
-          {!projCollapsed && (
-          <>
           {pending && (
-            <div className="mb-px flex items-center gap-2 rounded-md px-2.5 py-2 text-[12.5px] text-ink-300">
+            <div className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-ink-400">
               <span
                 className="h-3 w-3 shrink-0 animate-spin rounded-full"
                 style={{ border: "2px solid var(--gm-hairline)", borderTopColor: "var(--gm-ink-mute)" }}
@@ -461,84 +409,55 @@ export function WorktreeSidebar() {
           )}
 
           {live.map((wt) => {
-              const dirty = (statuses[wt.id] ?? []).length;
-              const plainRow = wt.id.startsWith("plain:");
-              const selected = wt.id === activeWorktreeId;
-              return (
+            const dirty = (statuses[wt.id] ?? []).length;
+            const plainRow = wt.id.startsWith("plain:");
+            const selected = wt.id === activeWorktreeId;
+            return (
+              <div
+                key={wt.id}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selected}
+                className={`cursor-pointer rounded-md px-2 py-[7px] ${
+                  selected ? "bg-white/[0.055]" : "hover:bg-white/[0.03]"
+                }`}
+                style={selected ? { boxShadow: "inset 2px 0 0 var(--gm-accent)" } : undefined}
+                onClick={() => setActiveWorktree(wt.id)}
+                onKeyDown={rowKey(() => setActiveWorktree(wt.id))}
+                onContextMenu={(e) => openMenu(e, wt.id)}
+                title={plainRow ? wt.path : `${wt.branch}\n${wt.path}\nRight-click for open, pin, copy, merge, remove.`}
+              >
                 <div
-                  key={wt.id}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={selected}
-                  className={`group mb-px cursor-pointer rounded-md px-2.5 py-2 ${
-                    selected ? "bg-white/[0.055]" : "hover:bg-white/[0.03]"
+                  className={`truncate text-[12.5px] ${
+                    selected || dirty > 0 ? "font-semibold text-ink-100" : "font-medium text-ink-300"
                   }`}
-                  style={selected ? { boxShadow: "inset 2px 0 0 var(--gm-accent)" } : undefined}
-                  onClick={() => setActiveWorktree(wt.id)}
-                  onKeyDown={rowKey(() => setActiveWorktree(wt.id))}
-                  onContextMenu={(e) => openMenu(e, wt.id)}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span
-                      className={`flex min-w-0 items-center gap-1.5 text-[12.5px] ${
-                        selected || dirty > 0 ? "font-semibold text-ink-100" : "font-medium text-ink-300"
-                      }`}
-                    >
-                      {!plainRow && wt.is_main && (
-                        <span title="Main worktree" className="flex shrink-0"><HomeIcon size={11} className="text-accent-500" /></span>
-                      )}
-                      {pinned[wt.id] && (
-                        <span title="Pinned to top" className="flex shrink-0"><Pin size={10} className="text-ink-400" /></span>
-                      )}
-                      <span className="truncate">{wt.branch}</span>
-                    </span>
-                    {!plainRow && !wt.is_main && (
-                      <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-                        <button
-                          title="Merge into base"
-                          className="rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-moss-400"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            merge(wt);
-                          }}
-                        >
-                          <GitMerge size={12} />
-                        </button>
-                        <button
-                          title="Remove worktree"
-                          className="rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            remove(wt);
-                          }}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                  <div className="tnum mt-0.5 flex items-center justify-between gap-2 text-[11px] text-ink-400">
-                    <span className="truncate">{wt.path}</span>
-                    {dirty > 0 && (
-                      <span className="shrink-0 font-medium" style={{ color: "var(--gm-amber)" }}>
-                        {dirty} changed
-                      </span>
-                    )}
-                  </div>
+                  {wt.branch}
+                  {!plainRow && wt.is_main && (
+                    <span className="font-medium text-ink-400"> · main</span>
+                  )}
+                  {pinned[wt.id] && (
+                    <span className="font-medium text-ink-400"> · pinned</span>
+                  )}
                 </div>
-              );
-            })}
+                <div className="tnum mt-px flex items-baseline justify-between gap-2 text-[11px] text-ink-400">
+                  <span className="mono min-w-0 flex-1 truncate">{shortPath(wt.path, wt.is_main)}</span>
+                  <span className="mono flex-none">{dirty > 0 ? `${dirty} changed` : "clean"}</span>
+                </div>
+              </div>
+            );
+          })}
 
           {live.length === 0 && settled.length === 0 && q && (
-            <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">
+            <div className="px-2 py-4 text-center text-[12px] text-ink-400">
               No worktrees match.
             </div>
           )}
 
           {settled.length > 0 && (
-            <div className="mt-1.5">
+            <div className="mt-1">
               <button
-                className="flex w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-ink-400 hover:bg-white/[0.03] hover:text-ink-300"
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] font-medium text-ink-400 hover:text-ink-300"
                 onClick={() => setSettledOpen((o) => !o)}
                 aria-expanded={settledOpen}
                 title="Worktrees quiet for over 48 hours"
@@ -547,7 +466,6 @@ export function WorktreeSidebar() {
                   size={12}
                   className={`shrink-0 transition-transform ${settledOpen ? "rotate-90" : ""}`}
                 />
-                <Archive size={12} className="shrink-0" />
                 <span className="tnum">
                   Sleeping · {settled.length}
                 </span>
@@ -558,143 +476,121 @@ export function WorktreeSidebar() {
                     key={wt.id}
                     role="button"
                     tabIndex={0}
-                    className="group mb-px cursor-pointer rounded-md px-2.5 py-2 opacity-60 hover:bg-white/[0.03] hover:opacity-100"
+                    className="cursor-pointer rounded-md px-2 py-[7px] opacity-60 hover:bg-white/[0.03] hover:opacity-100"
                     onClick={() => revive(wt.id)}
                     onKeyDown={rowKey(() => revive(wt.id))}
                     onContextMenu={(e) => openMenu(e, wt.id)}
-                    title="Quiet over 48h — click to make active again"
+                    title={`${wt.branch}\n${wt.path}\nQuiet over 48h — click to make active again.`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-ink-300">
-                        {pinned[wt.id] && (
-                          <span title="Pinned to top" className="flex shrink-0"><Pin size={10} className="text-ink-400" /></span>
-                        )}
-                        <span className="truncate">{wt.branch}</span>
-                      </span>
-                      <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-                        <button
-                          title="Merge into base"
-                          className="rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-moss-400"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            merge(wt);
-                          }}
-                        >
-                          <GitMerge size={12} />
-                        </button>
-                        <button
-                          title="Remove worktree"
-                          className="rounded p-1 text-ink-400 hover:bg-white/[0.06] hover:text-clay-400"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            remove(wt);
-                          }}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </span>
+                    <div className="truncate text-[12px] font-medium text-ink-300">
+                      {wt.branch}
+                      {pinned[wt.id] && (
+                        <span className="text-ink-400"> · pinned</span>
+                      )}
                     </div>
-                    <div className="tnum mt-0.5 truncate text-[11px] text-ink-400">
-                      {wt.path}
+                    <div className="tnum mono mt-px truncate text-[11px] text-ink-400">
+                      {shortPath(wt.path, false)}
                     </div>
                   </div>
                 ))}
             </div>
           )}
-
-          {isGit &&
-            (creating ? (
-              <div
-                className="mt-2 rounded-lg p-2.5"
-                style={{ background: "var(--gm-raised)", border: "1px solid var(--gm-hairline)" }}
-              >
-                <input
-                  autoFocus
-                  className="mono w-full rounded-md bg-ink-950 px-2.5 py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
-                  style={{ border: "1px solid var(--gm-hairline)" }}
-                  placeholder="branch name (optional)"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") create();
-                    if (e.key === "Escape") setCreating(false);
-                  }}
-                />
-                <input
-                  className="mono mt-1.5 w-full rounded-md bg-ink-950 px-2.5 py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
-                  style={{ border: "1px solid var(--gm-hairline)" }}
-                  placeholder="start from (blank = current HEAD)"
-                  value={base}
-                  onChange={(e) => setBase(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") create();
-                    if (e.key === "Escape") setCreating(false);
-                  }}
-                />
-                <div className="mt-2 flex gap-1.5">
-                  <button
-                    className="flex-1 rounded-md py-1.5 text-[12px] font-semibold"
-                    style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
-                    onClick={create}
-                  >
-                    Create worktree
-                  </button>
-                  <button
-                    className="rounded-md px-2.5 py-1.5 text-[12px] font-medium text-ink-300 hover:bg-white/[0.05]"
-                    onClick={() => setCreating(false)}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <button
-                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md py-2 text-[12px] font-medium text-ink-300 hover:bg-white/[0.03] hover:text-ink-200"
-                style={{ border: "1px dashed rgba(255,255,255,0.16)" }}
-                onClick={() => setCreating(true)}
-              >
-                <Plus size={12} /> New worktree
-              </button>
-            ))}
-          </>
-          )}
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto p-1.5">
-          {isGit && activeWt && activeStatuses.length === 0 && (
-            <div className="flex flex-col items-center px-2 py-4 text-center">
-              <span
-                className="flex h-7 w-7 items-center justify-center rounded-full"
-                style={{ background: "rgba(129,184,139,0.1)", border: "1px solid rgba(129,184,139,0.25)" }}
-              >
-                <Check size={13} style={{ color: "var(--gm-green)" }} />
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+          {isGit && activeWt && (
+            <div className="px-1 pb-1 text-[12.5px] font-semibold text-ink-100">
+              {activeWt.branch}{" "}
+              <span className="font-medium text-ink-400">
+                {activeStatuses.length === 0
+                  ? "is clean."
+                  : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
               </span>
-              <div className="mt-2 text-[12.5px] font-medium text-ink-200">Working tree clean</div>
-              <div className="mt-0.5 text-[11.5px] text-ink-300">Nothing to review in this worktree.</div>
             </div>
           )}
           {isGit &&
             activeStatuses.map((s) => {
-              const g = statusGlyph(s);
+              const g = statusLetter(s);
               return (
                 <div
                   key={s.path}
                   role="button"
                   tabIndex={0}
-                  className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-[5px] hover:bg-white/[0.03]"
+                  className="flex cursor-pointer items-baseline gap-2 rounded-md px-2 py-[5px] hover:bg-white/[0.03]"
                   onClick={() => openEditor(`${activeWt!.path}/${s.path}`, true)}
                   onKeyDown={rowKey(() => openEditor(`${activeWt!.path}/${s.path}`, true))}
                   title={`${s.path} (${g.label})`}
                 >
-                  <g.Icon size={13} className="shrink-0" style={{ color: g.color }} aria-hidden />
-                  <span className="truncate text-[12px] text-ink-200">{s.path}</span>
+                  <span
+                    className="mono w-3 flex-none text-center text-[11px] font-bold"
+                    style={{ color: g.color }}
+                    aria-hidden
+                  >
+                    {g.letter}
+                  </span>
+                  <span className="mono min-w-0 flex-1 truncate text-[12px] text-ink-200">{s.path}</span>
                 </div>
               );
             })}
         </div>
       )}
 
-      {/* row context menu: open / pin / copy / merge / remove (Orca: right-click actions). */}
+      {/* footer: new worktree is a ledger line, not a dashed button */}
+      {tab === "worktrees" && isGit && (
+        <div className="px-3.5 pb-2.5">
+          {creating ? (
+            <div className="pt-1">
+              <input
+                autoFocus
+                className="mono w-full border-b bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
+                style={{ borderColor: "var(--gm-hairline)" }}
+                placeholder="branch name (optional)"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") create();
+                  if (e.key === "Escape") setCreating(false);
+                }}
+              />
+              <input
+                className="mono w-full border-b bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
+                style={{ borderColor: "var(--gm-hairline)" }}
+                placeholder="start from (blank = current HEAD)"
+                value={base}
+                onChange={(e) => setBase(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") create();
+                  if (e.key === "Escape") setCreating(false);
+                }}
+              />
+              <div className="flex items-center gap-4 pt-2">
+                <button
+                  className="text-[12px] font-semibold text-ink-100 hover:underline"
+                  onClick={create}
+                >
+                  Create worktree
+                </button>
+                <button
+                  className="text-[12px] font-medium text-ink-400 hover:text-ink-200"
+                  onClick={() => setCreating(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              className="w-full border-t pt-2 text-left text-[12px] font-medium text-ink-400 hover:text-ink-100"
+              style={{ borderColor: "var(--gm-hairline-soft)" }}
+              onClick={() => setCreating(true)}
+            >
+              + New worktree
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* row context menu: words only — open, pin, copy, merge, remove */}
       {menu && menuWt && (
         <div
           className="tnum fixed z-50 w-48 overflow-hidden rounded-lg py-1 shadow-pop"
@@ -708,56 +604,56 @@ export function WorktreeSidebar() {
           role="menu"
         >
           <button
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
             onClick={() => {
               setActiveWorktree(menuWt.id);
               setMenu(null);
             }}
             role="menuitem"
           >
-            <Check size={12} className="text-ink-400" /> Open worktree
+            Open worktree
           </button>
           <button
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
             onClick={() => {
               togglePin(menuWt.id);
               setMenu(null);
             }}
             role="menuitem"
           >
-            <Pin size={12} className="text-ink-400" /> {pinned[menuWt.id] ? "Unpin" : "Pin to top"}
+            {pinned[menuWt.id] ? "Unpin" : "Pin to top"}
           </button>
           <button
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+            className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
             onClick={() => {
               void copyPath(menuWt.path);
               setMenu(null);
             }}
             role="menuitem"
           >
-            <Copy size={12} className="text-ink-400" /> Copy path
+            Copy path
           </button>
           {!menuWt.is_main && !menuWt.id.startsWith("plain:") && (
             <>
               <button
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+                className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
                 onClick={() => {
                   setMenu(null);
                   merge(menuWt);
                 }}
                 role="menuitem"
               >
-                <GitMerge size={12} className="text-ink-400" /> Merge into base
+                Merge into base
               </button>
               <button
-                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
+                className="flex w-full items-center px-3 py-2 text-left text-[12px] font-medium text-ink-200 hover:bg-white/[0.04]"
                 onClick={() => {
                   setMenu(null);
                   remove(menuWt);
                 }}
                 role="menuitem"
               >
-                <Trash2 size={12} className="text-ink-400" /> Remove worktree
+                Remove worktree
               </button>
             </>
           )}

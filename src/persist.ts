@@ -1,9 +1,13 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
-import { DEFAULT_SETTINGS, type Project, type Settings } from "./types";
+import { DEFAULT_SETTINGS, type Project, type Settings, type Worktree } from "./types";
 
 export interface PersistedState {
   projects: Project[];
   activeProjectId: string | null;
+  // Last-known worktree list + selection: painted instantly on boot so a
+  // shell mounts before git finishes. Revalidated in background.
+  worktrees?: Worktree[];
+  activeWorktreeId?: string | null;
   settings?: Settings;
 }
 
@@ -60,6 +64,15 @@ function writeLocal(s: PersistedState) {
   }
 }
 
+function sanitizeWorktrees(wts: unknown): Worktree[] | undefined {
+  if (!Array.isArray(wts)) return undefined;
+  const clean = wts.filter(
+    (w): w is Worktree =>
+      !!w && typeof w.id === "string" && typeof w.path === "string" && typeof w.branch === "string",
+  );
+  return clean.length > 0 ? clean.slice(0, 50) : undefined;
+}
+
 function sanitize(s: PersistedState | null | undefined): PersistedState | null {
   if (!s || !Array.isArray(s.projects)) return null;
   const projects = s.projects.filter(
@@ -68,7 +81,11 @@ function sanitize(s: PersistedState | null | undefined): PersistedState | null {
   const ids = new Set(projects.map((p) => p.id));
   const activeProjectId =
     s.activeProjectId && ids.has(s.activeProjectId) ? s.activeProjectId : (projects[0]?.id ?? null);
-  return { projects, activeProjectId, settings: cleanSettings(s.settings) };
+  const worktrees = sanitizeWorktrees(s.worktrees);
+  const wtIds = worktrees ? new Set(worktrees.map((w) => w.id)) : null;
+  const activeWorktreeId =
+    s.activeWorktreeId && wtIds?.has(s.activeWorktreeId) ? s.activeWorktreeId : undefined;
+  return { projects, activeProjectId, worktrees, activeWorktreeId, settings: cleanSettings(s.settings) };
 }
 
 export async function loadPersisted(): Promise<PersistedState | null> {

@@ -37,7 +37,8 @@ function PaneWrap({ pane, cwd }: { pane: Pane; cwd: string }) {
 
 function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { activeWorktreeId, setLayout } = useStore();
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setSplitRatio = useStore((s) => s.setSplitRatio);
   const dragging = useRef(false);
 
   const onDown = useCallback(() => {
@@ -46,13 +47,11 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
     const move = (e: MouseEvent) => {
       if (!dragging.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      let ratio =
+      const ratio =
         split.direction === "h"
           ? (e.clientX - rect.left) / rect.width
           : (e.clientY - rect.top) / rect.height;
-      ratio = Math.min(0.9, Math.max(0.1, ratio));
-      const next: Split = { ...split, ratio };
-      if (activeWorktreeId) setLayout(activeWorktreeId, next as PaneNode);
+      if (activeWorktreeId) setSplitRatio(activeWorktreeId, split.id, ratio);
     };
     const up = () => {
       dragging.current = false;
@@ -62,7 +61,7 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
     };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
-  }, [split, activeWorktreeId, setLayout]);
+  }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
   // Gutters carry the canvas color so splits read as carved channels,
   // not glowing bars. Rounded caps, stable through drag.
@@ -97,8 +96,7 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
           if (!step) return;
           e.preventDefault();
           if (!activeWorktreeId) return;
-          const ratio = Math.min(0.9, Math.max(0.1, split.ratio + step));
-          setLayout(activeWorktreeId, { ...split, ratio } as PaneNode);
+          setSplitRatio(activeWorktreeId, split.id, split.ratio + step);
         }}
       >
         {/* visible 3px bar inside a 9px hit target */}
@@ -115,4 +113,3 @@ function SplitNode({ split, cwd }: { split: Split; cwd: string }) {
     </div>
   );
 }
-

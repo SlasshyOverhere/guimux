@@ -11,7 +11,6 @@ import {
   GitBranch,
   Columns2,
   Rows2,
-  Radio,
   File as FileIcon,
   CornerDownLeft,
   ArrowUp,
@@ -170,16 +169,6 @@ export function Palette() {
         group: "Commands",
         icon: <Bot size={13} className="text-ink-400" />,
         action: () => useStore.getState().setAgentOpen(true),
-      });
-    }
-    if (match("toggle broadcast input all panes")) {
-      out.push({
-        id: "cmd:broadcast",
-        label: "Toggle broadcast input",
-        hint: "all visible panes",
-        group: "Commands",
-        icon: <Radio size={13} className="text-ink-400" />,
-        action: () => useStore.getState().toggleBroadcast(),
       });
     }
     if (match("open settings preferences")) {
