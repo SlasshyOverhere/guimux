@@ -622,7 +622,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const path = e.dataTransfer.getData("application/guimux-file-path");
+    const dt = e.dataTransfer;
+    // ponytail: webviews may strip custom MIME types, so dragstart also
+    // sets text/plain (absolute path). OS file drops land in files[].
+    const path =
+      dt.getData("text/plain") ||
+      dt.getData("application/guimux-file-path") ||
+      (dt.files?.[0] as (File & { path?: string }) | undefined)?.path ||
+      "";
     const sid = sessionRef.current;
     if (!path || sid == null || exitedRef.current) return;
     // relative-ish: use as-is, quoted
@@ -644,7 +651,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         if (termRef.current?.hasSelection()) copySelection();
         else pasteClipboard();
       }}
-      onDragOver={(e) => e.preventDefault()}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
       onDrop={handleDrop}
     >
       <div

@@ -33,6 +33,8 @@ function TreeNode({
   setRenameDraft,
   onRenameCommit,
   onRenameCancel,
+  bulkOpen,
+  bulkN,
 }: {
   node: FsNode;
   depth: number;
@@ -44,8 +46,16 @@ function TreeNode({
   setRenameDraft: (v: string) => void;
   onRenameCommit: () => void;
   onRenameCancel: () => void;
+  bulkOpen: boolean;
+  bulkN: number;
 }) {
   const [open, setOpen] = useState(depth < 1);
+  // ponytail: one counter drives collapse/expand-all; it also runs on mount
+  // so expand-all reaches nested dirs that mount after their parent opens.
+  useEffect(() => {
+    if (bulkN > 0) setOpen(bulkOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkN]);
   const isDir = node.is_dir;
   const rel = node.path.slice(root.length + 1);
   const isRenaming = renaming === node.path;
@@ -78,6 +88,8 @@ function TreeNode({
         draggable={!isRenaming}
         onDragStart={(e) => {
           e.dataTransfer.setData("application/guimux-file-path", rel);
+          // text/plain fallback: some webviews strip custom MIME types on drop
+          e.dataTransfer.setData("text/plain", node.path);
           e.dataTransfer.effectAllowed = "copy";
         }}
         title={`${node.path}\nRight-click to rename`}
@@ -123,7 +135,7 @@ function TreeNode({
       </div>
       {isDir && open &&
         node.children?.map((c) => (
-          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} />
+          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} bulkOpen={bulkOpen} bulkN={bulkN} />
         ))}
     </div>
   );
@@ -144,6 +156,7 @@ export function ExplorerPane({ root }: { root: string }) {
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [bulk, setBulk] = useState({ open: true, n: 0 });
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -408,6 +421,12 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
           <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">Explorer</span>
           <span className="flex gap-0.5">
+            <button title="Collapse all folders" aria-label="Collapse all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))}>
+              <ChevronRight size={14} strokeWidth={2} />
+            </button>
+            <button title="Expand all folders" aria-label="Expand all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))}>
+              <ChevronDown size={14} strokeWidth={2} />
+            </button>
             <button title="New file" aria-label="New file" className="gm-icon-btn gm-icon-btn--sm" onClick={() => void newFile()}>
               <FilePlus2 size={14} strokeWidth={2} />
             </button>
@@ -422,7 +441,7 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {tree?.children?.length ? (
             tree.children.map((c) => (
-              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} />
+              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} bulkOpen={bulk.open} bulkN={bulk.n} />
             ))
           ) : (
             <div className="px-2.5 py-2 text-[12px] text-ink-400">No files</div>
