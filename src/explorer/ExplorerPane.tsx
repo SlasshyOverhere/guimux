@@ -137,6 +137,11 @@ function TreeNode({
         node.children?.map((c) => (
           <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} bulkOpen={bulkOpen} bulkN={bulkN} />
         ))}
+      {isDir && open && node.truncated && (
+        <div className="gm-meta pl-5 py-0.5 text-[11px]" title="Directory listing capped at 2000 entries">
+          … truncated
+        </div>
+      )}
     </div>
   );
 }

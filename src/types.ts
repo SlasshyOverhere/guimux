@@ -31,6 +31,7 @@ export interface FsNode {
   path: string;
   is_dir: boolean;
   children: FsNode[] | null;
+  truncated?: boolean;
 }
 
 export interface AgentDef {

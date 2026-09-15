@@ -17,10 +17,15 @@ tauri-plugin-store = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
 portable-pty = "0.8"
-git2 = "0.19"
-notify = "6"
 dirs = "5"
-tauri-plugin-mcp-bridge = "0.13.0"
+[dependencies.tauri-plugin-mcp-bridge]
+version = "0.13.0"
+optional = true
+
+[features]
+default = []
+# Debug-only MCP bridge: enable with --features debug-mcp in dev.
+# (cfg(debug_assertions) cannot select dependencies; the plugin init in
+# lib.rs stays cfg-gated so release never references it.)
+debug-mcp = ["dep:tauri-plugin-mcp-bridge"]

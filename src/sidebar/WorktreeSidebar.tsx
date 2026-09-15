@@ -293,6 +293,15 @@ export function WorktreeSidebar() {
     }
   };
 
+  const abortMerge = async (wt: Worktree) => {
+    try {
+      await invoke("worktree_merge_abort", { id: wt.id });
+      await refreshList();
+    } catch (e) {
+      void errorDialog(`abort failed: ${e}`);
+    }
+  };
+
   const copyPath = async (path: string) => {
     try {
       await navigator.clipboard.writeText(path);
@@ -680,6 +689,16 @@ export function WorktreeSidebar() {
                 role="menuitem"
               >
                 Merge into base
+              </button>
+              <button
+                className="gm-menu-item"
+                onClick={() => {
+                  setMenu(null);
+                  abortMerge(menuWt);
+                }}
+                role="menuitem"
+              >
+                Abort merge
               </button>
               <button
                 className="gm-menu-item"
