@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -218,6 +218,11 @@ static ATTACHED: std::sync::LazyLock<Mutex<HashMap<u64, bool>>> =
 /// the old child never emits `pty:exit-{id}` at the reused numeric id.
 static EPOCHS: std::sync::LazyLock<Mutex<HashMap<u64, u64>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Shells that died while their pane was unmounted (exit event fired with
+/// no listener): `pty_alive` reports them so the remount shows Restart
+/// instead of a bricked, prompt-less grid.
+static EXITED: std::sync::LazyLock<Mutex<HashSet<u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.max(1), rows.max(1))
@@ -293,6 +298,7 @@ fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn po
             }
         };
         if epoch_current(id, epoch) {
+            EXITED.lock().unwrap().insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
         }
     });
@@ -450,6 +456,15 @@ pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
     Ok(BUFFERS.lock().unwrap().remove(&id).unwrap_or_default())
 }
 
+/// Liveness probe for remounts: false when the session is unknown OR its
+/// shell already exited (e.g. while the pane sat unmounted on another
+/// worktree). `pty_restart` still recovers such ids (cwd is retained).
+#[command]
+pub fn pty_alive(id: u64) -> bool {
+    SPAWN_CWDS.lock().unwrap().contains_key(&id)
+        && !EXITED.lock().unwrap().contains(&id)
+}
+
 #[command]
 pub fn pty_restart(
     app: AppHandle,
@@ -511,6 +526,7 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     }
     MASTERS.lock().unwrap().remove(&id);
     SPAWN_CWDS.lock().unwrap().remove(&id);
+    EXITED.lock().unwrap().remove(&id);
     BUFFERS.lock().unwrap().remove(&id);
     ATTACHED.lock().unwrap().remove(&id);
     // Bump the epoch so the dead child's watcher can never emit exit at this
@@ -572,6 +588,18 @@ mod tests {
     #[test]
     fn attach_rejects_unknown_session() {
         assert!(pty_attach(0xDEAD_DEAD).is_err());
+    }
+
+    #[test]
+    fn exited_session_reports_not_alive() {
+        let id = 0xA11CEu64;
+        SPAWN_CWDS.lock().unwrap().insert(id, "C:\\x".into());
+        assert!(pty_alive(id));
+        EXITED.lock().unwrap().insert(id);
+        assert!(!pty_alive(id));
+        SPAWN_CWDS.lock().unwrap().remove(&id);
+        EXITED.lock().unwrap().remove(&id);
+        assert!(!pty_alive(id));
     }
 
     #[test]

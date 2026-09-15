@@ -273,6 +273,10 @@ export function WorktreeSidebar() {
     if (!(await confirmDialog(`Remove worktree "${wt.branch}"? (branch will be deleted)`))) return;
     try {
       await invoke("worktree_remove", { repoRoot, id: wt.id, deleteBranch: !wt.is_main });
+      // Orphaned shells no longer die on unmount, so reap them explicitly.
+      for (const pid of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pid }).catch(() => {});
+      }
       await refreshList();
     } catch (e) {
       void errorDialog(`remove failed: ${e}`);

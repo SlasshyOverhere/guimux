@@ -488,12 +488,21 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     (async () => {
       if (!alive) return;
       let sessionId = sessionRef.current;
+      // Remount onto a shell that died while unmounted: attach listeners
+      // first (so Restart recovers), then surface the Restart banner.
+      // Input wiring below still runs; only the one-shot initCmd is held.
+      let deadSession = false;
       if (sessionId != null) {
-        // Layout kept an id (remount after split / worktree switch). The PTY
-        // may have been killed while unmounted: pty_attach validates, and a
-        // rejection means spawn fresh instead of a permanently blank pane.
+        // Layout kept an id (remount after split / worktree switch).
+        // pty_attach validates; rejection = spawn fresh, not blank.
         try {
           await attach(term, sessionId);
+          const live = await invoke<boolean>("pty_alive", { id: sessionId }).catch(() => true);
+          if (!live) {
+            deadSession = true;
+            markExited();
+            term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
+          }
         } catch {
           if (!alive) return;
           for (const un of unlisteners.current) un();
@@ -528,7 +537,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
       // Fire-and-forget: the pty input buffer holds the line until the shell
       // prompts. Non-blocking so a slow shell never delays keystrokes.
-      const pending = initCmdRef.current;
+      // Dead session: hold the command for Restart (its write would drop).
+      const pending = deadSession ? null : initCmdRef.current;
       if (pending) {
         const cmdText = pending;
         setTimeout(() => {
@@ -577,11 +587,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } catch {
         /* serialize may fail */
       }
-      // Splitting remounts this component while the pane stays in the
-      // layout tree. Killing the pty there orphans the live session and
-      // the remount reattaches to a dead id, which bricked every split.
-      // Only reap when the pane is really gone (close / worktree switch).
-      if (!paneAlive(useStore.getState().layout, paneId)) {
+      // Splitting remounts while the pane stays in the tree; worktree
+      // switches unmount panes whose trees stay cached in `layouts`.
+      // Only reap when the pane is gone from EVERY cached tree (close).
+      // ponytail: linear scan over cached worktrees; fine for <100 trees.
+      const st = useStore.getState();
+      const kept =
+        paneAlive(st.layout, paneId) ||
+        Object.values(st.layouts).some((n) => paneAlive(n, paneId));
+      if (!kept) {
         const sid = sessionRef.current;
         if (sid != null) invoke("pty_kill", { id: sid });
       }

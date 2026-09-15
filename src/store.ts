@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import type { Project, Worktree } from "./types";
 import { DEFAULT_SETTINGS, type Settings } from "./types";
 
@@ -189,6 +190,7 @@ interface AppState {
   closePane: (paneId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
   launchAgents: (items: { command: string; count: number }[]) => void;
+  dropWorktreeLayout: (id: string) => number[];
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
   setPaneCwd: (paneId: string, cwd: string | null) => void;
@@ -287,6 +289,17 @@ export const useStore = create<AppState>((set, get) => ({
     const s = get();
     const proj = s.projects.find((x) => x.id === id);
     if (!proj) return;
+    // Project switches reset everything (App effect reloads): reap every
+    // cached shell, otherwise keep-alive leaks a shell per switch.
+    // ponytail: layouts only ever cache the current project, so a full
+    // clear is safe; scope per-project when cross-project resume is added.
+    const reap = (n: PaneNode | null) => {
+      if (n) for (const p of collectPaneObjs(n)) {
+        if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
+      }
+    };
+    reap(s.layout);
+    Object.values(s.layouts).forEach(reap);
     // Switching projects resets worktree selection; App effect reloads it.
     set({
       activeProjectId: id,
@@ -294,20 +307,55 @@ export const useStore = create<AppState>((set, get) => ({
       worktrees: [],
       activeWorktreeId: null,
       layout: null,
+      layouts: {},
       activePaneId: null,
       maximizedPaneId: null,
         });
   },
-  setWorktrees: (wts) => set({ worktrees: wts }),
+  setWorktrees: (wts) =>
+    set((s) => {
+      // Re-list dropped worktrees (deleted externally, pruned): with
+      // switch-safe cleanup their cached shells would leak, so reap them.
+      const live = new Set(wts.map((w) => w.id));
+      for (const [id, node] of Object.entries(s.layouts)) {
+        if (!live.has(id) && id !== s.activeWorktreeId) {
+          for (const p of collectPaneObjs(node)) {
+            if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
+          }
+        }
+      }
+      const layouts = Object.fromEntries(Object.entries(s.layouts).filter(([id]) => live.has(id) || id === s.activeWorktreeId));
+      return { worktrees: wts, layouts };
+    }),
   setActiveWorktree: (id) => {
-    const { layouts } = get();
-    const layout = layouts[id] ?? { kind: "pane", id: nextId(), ptyId: null };
+    const { layouts, layout: cur, activeWorktreeId } = get();
+    // Preserve the outgoing tree: `layouts` only refreshes on layout
+    // edits, so without this a switch drops the whole agent grid.
+    const kept =
+      activeWorktreeId && cur ? { ...layouts, [activeWorktreeId]: cur } : layouts;
+    const layout = kept[id] ?? { kind: "pane", id: nextId(), ptyId: null };
     set({
       activeWorktreeId: id,
       layout,
+      layouts: kept,
       activePaneId: collectPanes(layout)[0] ?? null,
       maximizedPaneId: null,
-        });
+    });
+  },
+  // Removing a worktree orphans its shells: switch-safe unmount cleanup
+  // no longer reaps them, so the caller kills the returned pty ids.
+  dropWorktreeLayout: (id) => {
+    const { layouts, layout: cur, activeWorktreeId } = get();
+    const node = layouts[id] ?? (activeWorktreeId === id ? cur : null);
+    const ptyIds = node ? collectPaneObjs(node).map((p) => p.ptyId).filter((p): p is number => p != null) : [];
+    const next = { ...layouts };
+    delete next[id];
+    if (activeWorktreeId === id) {
+      set({ layouts: next, layout: null, activePaneId: null, maximizedPaneId: null });
+    } else {
+      set({ layouts: next });
+    }
+    return ptyIds;
   },
   setLayout: (worktreeId, node) =>
     set((s) => ({
