@@ -57,10 +57,10 @@ export function AgentLauncher() {
   useEffect(() => {
     if (!open) return;
     setCounts((prev) => {
-      // Keep edits made while open; seed newcomers (first agent starts at 1).
+      // Keep edits made while open; every agent starts at 0.
       const next: Record<string, number> = {};
-      agents.forEach((a, i) => {
-        next[a.id] = prev[a.id] ?? (i === 0 ? 1 : 0);
+      agents.forEach((a) => {
+        next[a.id] = prev[a.id] ?? 0;
       });
       return next;
     });
@@ -130,6 +130,10 @@ export function AgentLauncher() {
       });
     }
     launchAgents(items);
+    setCustomName("");
+    setCustomCmd("");
+    setCustomFlags("");
+    setCustomCount(0);
     setOpen(false);
   };
 
