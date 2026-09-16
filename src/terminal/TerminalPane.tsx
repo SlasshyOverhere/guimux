@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
+import { dragFile, quoteForShell } from "../dragFile";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -685,26 +686,59 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  // Drop acceptance: cancel BOTH dragenter and dragover — dragover alone
+  // leaves the 🚫 cursor in this webview. dropHot rings the pane so a
+  // missing ring means the drop never reaches us (stale build), not a
+  // silent handler failure.
+  const dragDepth = useRef(0);
+  const [dropHot, setDropHot] = useState(false);
+  const acceptDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const handleDragEnter = (e: React.DragEvent) => {
+    acceptDrag(e);
+    dragDepth.current += 1;
+    if (!exitedRef.current) setDropHot(true);
+  };
+  const handleDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDropHot(false);
+  };
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDropHot(false);
+    if (exitedRef.current) return;
+    // Primary channel: dragFile.path set by explorer dragstart in the same
+    // JS context (same-app dataTransfer can arrive emptied in WebView2).
+    // Fallbacks cover OS file drops and any other drag source.
+    const stash = dragFile.path;
+    dragFile.path = null;
     const dt = e.dataTransfer;
-    // ponytail: webviews may strip custom MIME types, so dragstart also
-    // sets text/plain (absolute path). OS file drops land in files[].
     const path =
+      stash ||
       dt.getData("text/plain") ||
       dt.getData("application/guimux-file-path") ||
       (dt.files?.[0] as (File & { path?: string }) | undefined)?.path ||
       "";
     const sid = sessionRef.current;
-    if (!path || sid == null || exitedRef.current) return;
-    // relative-ish: use as-is, quoted
-    invoke("pty_write", { id: sid, data: `"${path}" ` });
+    if (!path || sid == null) return;
+    // term.paste honors bracketed-paste mode; raw pty_write would not.
+    try {
+      termRef.current?.paste(quoteForShell(path));
+    } catch {
+      invoke("pty_write", { id: sid, data: quoteForShell(path) });
+    }
     termRef.current?.focus();
   };
 
   return (
     <div
       className="relative h-full w-full"
+      data-drop-hot={dropHot}
+      style={dropHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
       onMouseDown={() => {
         setActivePane(paneId);
         // Clicking pane chrome (toolbar, gutters) parks focus on a button or
@@ -716,7 +750,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         if (termRef.current?.hasSelection()) copySelection();
         else pasteClipboard();
       }}
-      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+      onDragEnter={handleDragEnter}
+      onDragOver={acceptDrag}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div
