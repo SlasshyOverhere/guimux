@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,10 @@ pub struct PtySession {
 }
 
 struct PtyEntry {
-    writer: Box<dyn Write + Send>,
+    // Arc: pty_write clones it under the map lock, then does blocking pipe
+    // I/O with the map lock released — one back-pressured PTY no longer
+    // freezes all spawn/kill/resize (H-003).
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     // Split ownership: the exit watcher owns the real Child (try_wait /
     // wait need &mut), while pty_kill drives this independent killer
     // handle (TerminateProcess on a process HANDLE — no &mut Child needed).
@@ -100,7 +103,7 @@ fn find_in_path(exe: &str) -> Option<PathBuf> {
 
 fn resolve_pwsh() -> Option<String> {
     {
-        let cache = PWSH_CACHE.lock().unwrap();
+        let cache = PWSH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = cache.clone() {
             return cached;
         }
@@ -139,7 +142,7 @@ fn resolve_pwsh() -> Option<String> {
         pwsh = find_in_path("pwsh.exe");
     }
     let out = pwsh.map(|p| p.to_string_lossy().to_string());
-    *PWSH_CACHE.lock().unwrap() = Some(out.clone());
+    *PWSH_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(out.clone());
     out
 }
 
@@ -210,7 +213,10 @@ static SPAWN_CWDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
 /// (cap 256KB, oldest dropped); live `pty:output-{id}` emits only after the
 /// frontend sends explicit `pty_attach(id)`, which replays the buffer.
 const REPLAY_CAP: usize = 256 * 1024;
-static BUFFERS: std::sync::LazyLock<Mutex<HashMap<u64, Vec<u8>>>> =
+/// H-003 caps: at most 64 live shells (24-pane UI + headroom), 1MB per write.
+const MAX_SESSIONS: usize = 64;
+const MAX_PTY_WRITE: usize = 1 << 20;
+static BUFFERS: std::sync::LazyLock<Mutex<HashMap<u64, VecDeque<u8>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static ATTACHED: std::sync::LazyLock<Mutex<HashMap<u64, bool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -218,19 +224,26 @@ static ATTACHED: std::sync::LazyLock<Mutex<HashMap<u64, bool>>> =
 /// the old child never emits `pty:exit-{id}` at the reused numeric id.
 static EPOCHS: std::sync::LazyLock<Mutex<HashMap<u64, u64>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Shells that died while their pane was unmounted (exit event fired with
+/// no listener): `pty_alive` reports them so the remount shows Restart
+/// instead of a bricked, prompt-less grid.
+static EXITED: std::sync::LazyLock<Mutex<HashSet<u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
-    (cols.max(1), rows.max(1))
+    // Lower bound (0-size wedges ConPTY rendering) + upper bound (a
+    // 65535x65535 grid otherwise passes straight to ConPTY). M-007.
+    (cols.clamp(1, 1000), rows.clamp(1, 500))
 }
 
 fn push_buffer(id: u64, bytes: &[u8]) {
-    let mut map = BUFFERS.lock().unwrap();
+    // VecDeque: dropping from the front never memmoves the retained tail
+    // (M-003: Vec::drain shifted ~256KB on every 8KB read while detached).
+    let mut map = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
     let buf = map.entry(id).or_default();
-    buf.extend_from_slice(bytes);
-    if buf.len() > REPLAY_CAP {
-        let excess = buf.len() - REPLAY_CAP;
-        buf.drain(..excess);
-    }
+    buf.extend(bytes.iter().copied());
+    let excess = buf.len().saturating_sub(REPLAY_CAP);
+    buf.drain(..excess);
 }
 
 /// Spawn-latency caches: bootstrap base64 per cwd, resolved pwsh path once.
@@ -242,13 +255,13 @@ static PWSH_CACHE: std::sync::LazyLock<Mutex<Option<Option<String>>>> =
 
 fn cached_bootstrap(cwd: &str) -> String {
     {
-        let map = BOOTSTRAP_CACHE.lock().unwrap();
+        let map = BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = map.get(cwd) {
             return s.clone();
         }
     }
     let s = base64_encode(&utf16le(&powershell_bootstrap(cwd)));
-    BOOTSTRAP_CACHE.lock().unwrap().insert(cwd.to_string(), s.clone());
+    BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.to_string(), s.clone());
     s
 }
 
@@ -257,15 +270,15 @@ fn pty_debug() -> bool {
 }
 
 pub fn register_master(id: u64, master: Box<dyn portable_pty::MasterPty + Send>) {
-    MASTERS.lock().unwrap().insert(id, master);
+    MASTERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, master);
 }
 
 fn epoch_current(id: u64, epoch: u64) -> bool {
-    EPOCHS.lock().unwrap().get(&id).copied() == Some(epoch)
+    EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied() == Some(epoch)
 }
 
 fn next_epoch(id: u64) -> u64 {
-    let mut map = EPOCHS.lock().unwrap();
+    let mut map = EPOCHS.lock().unwrap_or_else(|e| e.into_inner());
     let e = map.get(&id).copied().unwrap_or(0) + 1;
     map.insert(id, e);
     e
@@ -293,6 +306,7 @@ fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn po
             }
         };
         if epoch_current(id, epoch) {
+            EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
         }
     });
@@ -318,11 +332,12 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                         eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
                     }
                     push_buffer(id, &buf[..n]);
-                    let attached = ATTACHED.lock().unwrap().get(&id).copied().unwrap_or(false);
+                    let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
                         let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
         }
@@ -341,6 +356,10 @@ fn spawn_pair(
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
     let t_start = std::time::Instant::now();
+    // Cap live shells: each holds a 256KB replay buffer (H-003).
+    if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
+        return Err("too many pty sessions (close panes and retry)".into());
+    }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
     if pty_debug() {
@@ -399,21 +418,21 @@ fn spawn_pair(
 
     register_master(id, pair.master);
     {
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.insert(
             id,
             PtyEntry {
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
                 killer: child.clone_killer(),
             },
         );
     }
     {
-        let mut map = SPAWN_CWDS.lock().unwrap();
+        let mut map = SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id, cwd.clone());
     }
-    BUFFERS.lock().unwrap().insert(id, Vec::new());
-    ATTACHED.lock().unwrap().insert(id, live);
+    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, VecDeque::new());
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, live);
     let epoch = next_epoch(id);
 
     // Exit authority = shell process liveness (GetExitCodeProcess), never
@@ -443,11 +462,23 @@ pub fn pty_spawn(
 /// switch) and spawn fresh instead of sitting blank.
 #[command]
 pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
-    if !SPAWN_CWDS.lock().unwrap().contains_key(&id) {
+    if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
         return Err("no such pty session".into());
     }
-    ATTACHED.lock().unwrap().insert(id, true);
-    Ok(BUFFERS.lock().unwrap().remove(&id).unwrap_or_default())
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, true);
+    // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
+    // raw bytes); kept because the frontend consumes number[] — switch both
+    // to base64 together if replay size ever matters.
+    Ok(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap_or_default().into_iter().collect())
+}
+
+/// Liveness probe for remounts: false when the session is unknown OR its
+/// shell already exited (e.g. while the pane sat unmounted on another
+/// worktree). `pty_restart` still recovers such ids (cwd is retained).
+#[command]
+pub fn pty_alive(id: u64) -> bool {
+    SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id)
+        && !EXITED.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
 }
 
 #[command]
@@ -463,7 +494,7 @@ pub fn pty_restart(
     // `live=true`: listeners survive, so stream immediately; the epoch bump
     // inside spawn_pair silences the old child's watcher.
     let cwd = {
-        let map = SPAWN_CWDS.lock().unwrap();
+        let map = SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner());
         map.get(&id).cloned().unwrap_or_default()
     };
     if cwd.is_empty() {
@@ -475,13 +506,22 @@ pub fn pty_restart(
 
 #[command]
 pub fn pty_write(state: State<PtyManager>, id: u64, data: String) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
-    let entry = sessions.get_mut(&id).ok_or("no such pty session")?;
+    if data.len() > MAX_PTY_WRITE {
+        return Err(format!("pty write too large ({} bytes > 1MB)", data.len()));
+    }
+    // Clone the per-session writer under the map lock, then release it
+    // before blocking pipe I/O (H-003).
+    let writer = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.get(&id).map(|e| e.writer.clone()).ok_or("no such pty session")?
+    };
+    let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
     // Passthrough like Orca/node-pty: xterm sends \r for Enter and ConPTY
     // wants it as-is. The old \r -> \r\r\n chain double-submitted every
     // Enter, which PSReadLine read as line-continuation (the stray `>>`).
-    entry.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    entry.writer.flush().map_err(|e| e.to_string())
+    //write_all via MutexGuard deref
+    w.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    w.flush().map_err(|e| e.to_string())
 }
 
 #[command]
@@ -490,29 +530,32 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
     // A 0-size resize wedges ConPTY rendering (blank pane); clamp, never skip
     // (an early resize is still better than none for shells that query size).
     let (cols, rows) = clamp_dims(cols, rows);
-    if let Some(master) = MASTERS.lock().unwrap().get(&id) {
-        let _ = master.resize(portable_pty::PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
-    }
+    // M-007: error on unknown ids (pty_attach does) so resize-to-dead-pane
+    // bugs surface instead of silently succeeding.
+    let masters = MASTERS.lock().unwrap_or_else(|e| e.into_inner());
+    let master = masters.get(&id).ok_or("no such pty session")?;
+    let _ = master.resize(portable_pty::PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
     Ok(())
 }
 
 #[command]
 pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
+    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut entry) = sessions.remove(&id) {
         // Killer handle = TerminateProcess on the shell HANDLE. Never touches
         // the exit-watcher's owned Child, which exits its poll on its own.
         let _ = entry.killer.kill();
     }
-    MASTERS.lock().unwrap().remove(&id);
-    SPAWN_CWDS.lock().unwrap().remove(&id);
-    BUFFERS.lock().unwrap().remove(&id);
-    ATTACHED.lock().unwrap().remove(&id);
+    MASTERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     // Bump the epoch so the dead child's watcher can never emit exit at this
     // id again (matters for restart, which reuses the id right after).
     next_epoch(id);
@@ -544,15 +587,16 @@ mod tests {
         assert_eq!(clamp_dims(0, 24), (1, 24));
         assert_eq!(clamp_dims(80, 0), (80, 1));
         assert_eq!(clamp_dims(80, 24), (80, 24));
+        assert_eq!(clamp_dims(65535, 65535), (1000, 500));
     }
 
     #[test]
     fn replay_buffer_caps_oldest_first() {
         let id = 0xB0FFEBu64;
-        BUFFERS.lock().unwrap().remove(&id);
+        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         push_buffer(id, &[b'a'; 10]);
         push_buffer(id, &[b'b'; REPLAY_CAP + 100]);
-        let buf = BUFFERS.lock().unwrap().remove(&id).unwrap();
+        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
         assert_eq!(buf.len(), REPLAY_CAP);
         // oldest bytes ('a's) were dropped
         assert!(buf.iter().all(|&b| b == b'b'));
@@ -566,12 +610,24 @@ mod tests {
         let e2 = next_epoch(id);
         assert!(!epoch_current(id, e1));
         assert!(epoch_current(id, e2));
-        EPOCHS.lock().unwrap().remove(&id);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     #[test]
     fn attach_rejects_unknown_session() {
         assert!(pty_attach(0xDEAD_DEAD).is_err());
+    }
+
+    #[test]
+    fn exited_session_reports_not_alive() {
+        let id = 0xA11CEu64;
+        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, "C:\\x".into());
+        assert!(pty_alive(id));
+        EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+        assert!(!pty_alive(id));
+        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        assert!(!pty_alive(id));
     }
 
     #[test]

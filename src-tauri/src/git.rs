@@ -25,7 +25,18 @@ pub fn git_cmd() -> Command {
     cmd
 }
 
+/// Rejects flag-shaped git refs (H-005): a leading `-` would be parsed as a
+/// git flag (`git diff --output=...` silently writes to a file).
+pub fn reject_git_ref(v: &str, what: &str) -> Result<(), String> {
+    if v.starts_with('-') || v.contains('\0') {
+        return Err(format!("invalid {what}: {v}"));
+    }
+    Ok(())
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    // Every dynamic ref/path arg must be preceded by `"--"` at the call
+    // site; static flag lists here are safe by construction.
     let out = git_cmd()
         .args(args)
         .current_dir(repo)
@@ -112,6 +123,7 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
         return Err(format!("not a directory: {path}"));
     }
     let initial = branch.unwrap_or_else(|| "main".into());
+    reject_git_ref(&initial, "branch")?;
     let out = git_cmd()
         .args(["init", "-b", &initial])
         .current_dir(&p)
@@ -132,11 +144,17 @@ pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     let out = git(&repo, &["status", "--porcelain", "-z"])?;
     let mut files = vec![];
     let mut iter = out.split('\0').filter(|s| !s.is_empty());
+    // M-004: byte-slice panicked on any <3-byte entry; non-UTF8 names came
+    // back mangled and unopenable. get(3..) skips malformed entries, and
+    // lossy paths are still returned (the tree shows them, open may fail).
     while let Some(entry) = iter.next() {
         let mut chars = entry.chars();
         let ix = chars.next().unwrap_or(' ');
         let wd = chars.next().unwrap_or(' ');
-        let file_path = entry[3..].to_string();
+        let Some(file_path) = entry.get(3..) else {
+            continue;
+        };
+        let file_path = file_path.to_string();
         // rename entries: "R  new\0old" — the -z form has the orig path next
         if ix == 'R' || ix == 'C' || wd == 'R' || wd == 'C' {
             let _orig = iter.next();
@@ -158,8 +176,10 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
         "core.quotepath=false".into(),
         "diff".into(),
         "--no-color".into(),
+        "--".into(),
     ];
     if let Some(b) = &base {
+        reject_git_ref(b, "base")?;
         args.push(b.clone());
     }
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

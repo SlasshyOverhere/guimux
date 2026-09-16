@@ -15,8 +15,25 @@
 //! ponytail: if portable-pty ever drops the sideload preference, call
 //! `ensure_bundled_conpty()` + CreatePseudoConsole directly via this module.
 
+/// Vendored binary sizes, recorded from node-pty 1.1.0's assets. A copy
+/// whose size doesn't match is refused (H-006: stale/tampered DLL pinning).
+/// ponytail: sizes catch truncation/swap, not crafted same-size binaries —
+/// upgrade to sha256 (const hex, no new dep) when supply-chain review lands.
+#[cfg(windows)]
+const EXPECTED: &[(&str, u64)] = &[
+    ("conpty.dll", 109_600),
+    ("OpenConsole.exe", 1_148_448),
+];
+
+#[cfg(windows)]
+fn log_conpty(msg: &str) {
+    eprintln!("[gm-conpty] {msg}");
+}
+
 /// Copy vendored assets next to the exe at startup (dev + portable runs),
 /// so portable-pty's sideload check (`conpty.dll` beside the binary) hits.
+/// Installed runs already have them side-by-side via bundle resources
+/// (see tauri.conf.json) — nothing to do there.
 #[cfg(windows)]
 pub fn ensure_bundled_conpty() {
     let files = ["conpty.dll", "OpenConsole.exe"];
@@ -25,41 +42,62 @@ pub fn ensure_bundled_conpty() {
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let exe_dir = match exe_dir {
         Some(d) => d,
-        None => return,
-    };
-    // Tauri dev runs the exe from target/debug; bundled assets live in
-    // src-tauri/assets/conpty. Installed runs already have them side-by-side
-    // via bundle resources (see tauri.conf.json).
-    let src_dir = exe_dir.join("assets").join("conpty");
-    let src_dir = if src_dir.is_dir() {
-        src_dir
-    } else {
-        // target/debug -> src-tauri/assets/conpty
-        let mut d = exe_dir.clone();
-        let mut found = None;
-        for _ in 0..4 {
-            let cand = d.join("src-tauri").join("assets").join("conpty");
-            if cand.is_dir() {
-                found = Some(cand);
-                break;
-            }
-            if !d.pop() {
-                break;
-            }
+        None => {
+            log_conpty("cannot resolve exe dir; using system ConPTY");
+            return;
         }
-        match found {
-            Some(d) => d,
-            None => return,
+    };
+    // Release bundle: resources are staged next to the exe by the
+    // installer/updater. Never overwrite them here (the old `is_file →
+    // continue` pinned a stale DLL forever with no way to update).
+    if EXPECTED.iter().all(|(f, _)| exe_dir.join(f).is_file()) {
+        return;
+    }
+    // Tauri dev runs the exe from target/debug; bundled assets live in
+    // src-tauri/assets/conpty. Walk up at most 2 levels (target/debug →
+    // project root), never 4 — a planted dir higher up was a DLL sideload
+    // vector (H-006).
+    let mut src_dir = None;
+    let mut d = exe_dir.clone();
+    for _ in 0..2 {
+        let cand = d.join("src-tauri").join("assets").join("conpty");
+        if cand.is_dir() {
+            src_dir = Some(cand);
+            break;
+        }
+        if !d.pop() {
+            break;
+        }
+    }
+    let src_dir = match src_dir {
+        Some(d) => d,
+        None => {
+            log_conpty("vendored assets not found; using system ConPTY");
+            return;
         }
     };
     for f in files {
         let dst = exe_dir.join(f);
-        if dst.is_file() {
-            continue;
-        }
         let src = src_dir.join(f);
-        if src.is_file() {
-            let _ = std::fs::copy(&src, &dst);
+        let want = EXPECTED.iter().find(|(n, _)| *n == f).map(|(_, s)| *s);
+        match (src.metadata(), want) {
+            (Ok(m), Some(want)) if m.is_file() && m.len() == want => {}
+            (Ok(m), _) => {
+                log_conpty(&format!(
+                    "{f} size mismatch (got {} bytes, want {want:?}); using system ConPTY",
+                    m.len()
+                ));
+                continue;
+            }
+            (Err(e), _) => {
+                log_conpty(&format!("{f} unreadable: {e}; using system ConPTY"));
+                continue;
+            }
+        }
+        // Refresh unconditionally (old code never updated an existing copy).
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => log_conpty(&format!("{f} staged")),
+            Err(e) => log_conpty(&format!("{f} copy failed: {e}; using system ConPTY")),
         }
     }
 }

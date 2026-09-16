@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
+import { dragFile, quoteForShell } from "../dragFile";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -87,6 +88,35 @@ function fitSane(term: Terminal, fit: FitAddon): { cols: number; rows: number } 
     return null;
   }
   return saneDims(term);
+}
+// Resize (split drag, font zoom, maximize) reflows the buffer, which resets
+// the viewport — a long agent run jumps to the top and the user must scroll
+// back down. Snapshot the viewport across fit() and restore it: pinned to
+// the bottom when following live output, else the same line (clamped).
+function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: number } | null {
+  let y = 0;
+  let atBottom = true;
+  try {
+    const buf = term.buffer.active;
+    y = buf.viewportY;
+    atBottom = y >= buf.baseY;
+  } catch {
+    /* no buffer yet: fresh terminal */
+  }
+  try {
+    fit.fit();
+  } catch {
+    return null;
+  }
+  const dims = saneDims(term);
+  if (!dims) return null;
+  try {
+    if (atBottom) term.scrollToBottom();
+    else term.scrollToLine(Math.max(0, Math.min(y, term.buffer.active.baseY)));
+  } catch {
+    /* best-effort restore */
+  }
+  return dims;
 }
 
 // Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
@@ -338,7 +368,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
-    const dims = fitRef.current ? fitSane(term, fitRef.current) : saneDims(term);
+    const dims = fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term);
     if (!dims) return; // unmeasured container: never send 0-size
     const sid = sessionRef.current;
     if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
@@ -451,7 +481,22 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
-    // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
+    // Single paste path: xterm natively sends `paste` DOM events to the PTY
+    // (handlePasteEvent → triggerDataEvent → onData), while our Ctrl+V /
+    // right-click path ALSO sends via term.paste() → every paste lands twice.
+    // Kill the native event at capture (an ancestor capture listener fires
+    // before xterm's own textarea/element listeners, and stopPropagation on
+    // the way down never reaches the target) so the manual term.paste() in
+    // pasteClipboard() is the only sender. Keydown preventDefault is NOT
+    // enough: xterm's keydown path never cancels it on the custom-handler
+    // early-return, and the webview fires the paste event anyway.
+    // ponytail: one capture listener; drop it if xterm ever gains a "no native paste" option.
+    const killNativePaste = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    hostRef.current.addEventListener("paste", killNativePaste, true);
+     // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
     // text is selected (else the SIGINT the TUI may need), Ctrl+V paste.
     // Returning false keeps xterm from also feeding the key to the PTY.
     term.attachCustomKeyEventHandler((e) => {
@@ -465,6 +510,12 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           pasteClipboard();
           return false;
         }
+      }
+      // Shift+Insert emits a native `paste` event (xterm emits no key for it);
+      // the capture listener above eats that event, so send it ourselves.
+      if (e.type === "keydown" && e.key === "Insert" && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        pasteClipboard();
+        return false;
       }
       return true;
     });
@@ -488,12 +539,21 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     (async () => {
       if (!alive) return;
       let sessionId = sessionRef.current;
+      // Remount onto a shell that died while unmounted: attach listeners
+      // first (so Restart recovers), then surface the Restart banner.
+      // Input wiring below still runs; only the one-shot initCmd is held.
+      let deadSession = false;
       if (sessionId != null) {
-        // Layout kept an id (remount after split / worktree switch). The PTY
-        // may have been killed while unmounted: pty_attach validates, and a
-        // rejection means spawn fresh instead of a permanently blank pane.
+        // Layout kept an id (remount after split / worktree switch).
+        // pty_attach validates; rejection = spawn fresh, not blank.
         try {
           await attach(term, sessionId);
+          const live = await invoke<boolean>("pty_alive", { id: sessionId }).catch(() => true);
+          if (!live) {
+            deadSession = true;
+            markExited();
+            term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
+          }
         } catch {
           if (!alive) return;
           for (const un of unlisteners.current) un();
@@ -528,7 +588,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
       // Fire-and-forget: the pty input buffer holds the line until the shell
       // prompts. Non-blocking so a slow shell never delays keystrokes.
-      const pending = initCmdRef.current;
+      // Dead session: hold the command for Restart (its write would drop).
+      const pending = deadSession ? null : initCmdRef.current;
       if (pending) {
         const cmdText = pending;
         setTimeout(() => {
@@ -557,7 +618,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     const ro = new ResizeObserver(() => {
       if (!visible) return;
-      const dims = fitSane(term, fit);
+      const dims = fitKeepViewport(term, fit);
       if (!dims) return; // hidden/unmeasured: never send 0-size
       const sid = sessionRef.current;
       if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
@@ -567,6 +628,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       alive = false;
       ro.disconnect();
+      hostRef.current?.removeEventListener("paste", killNativePaste, true);
       for (const un of unlisteners.current) un();
       unlisteners.current = [];
       // persist scrollback
@@ -577,11 +639,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } catch {
         /* serialize may fail */
       }
-      // Splitting remounts this component while the pane stays in the
-      // layout tree. Killing the pty there orphans the live session and
-      // the remount reattaches to a dead id, which bricked every split.
-      // Only reap when the pane is really gone (close / worktree switch).
-      if (!paneAlive(useStore.getState().layout, paneId)) {
+      // Splitting remounts while the pane stays in the tree; worktree
+      // switches unmount panes whose trees stay cached in `layouts`.
+      // Only reap when the pane is gone from EVERY cached tree (close).
+      // ponytail: linear scan over cached worktrees; fine for <100 trees.
+      const st = useStore.getState();
+      const kept =
+        paneAlive(st.layout, paneId) ||
+        Object.values(st.layouts).some((n) => paneAlive(n, paneId));
+      if (!kept) {
         const sid = sessionRef.current;
         if (sid != null) invoke("pty_kill", { id: sid });
       }
@@ -603,7 +669,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     if (!term) return;
     if (visible) {
       try {
-        fitRef.current && fitSane(term, fitRef.current);
+        fitRef.current && fitKeepViewport(term, fitRef.current);
       } catch {
         /* noop */
       }
@@ -620,19 +686,59 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  // Drop acceptance: cancel BOTH dragenter and dragover — dragover alone
+  // leaves the 🚫 cursor in this webview. dropHot rings the pane so a
+  // missing ring means the drop never reaches us (stale build), not a
+  // silent handler failure.
+  const dragDepth = useRef(0);
+  const [dropHot, setDropHot] = useState(false);
+  const acceptDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const handleDragEnter = (e: React.DragEvent) => {
+    acceptDrag(e);
+    dragDepth.current += 1;
+    if (!exitedRef.current) setDropHot(true);
+  };
+  const handleDragLeave = () => {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDropHot(false);
+  };
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const path = e.dataTransfer.getData("application/guimux-file-path");
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDropHot(false);
+    if (exitedRef.current) return;
+    // Primary channel: dragFile.path set by explorer dragstart in the same
+    // JS context (same-app dataTransfer can arrive emptied in WebView2).
+    // Fallbacks cover OS file drops and any other drag source.
+    const stash = dragFile.path;
+    dragFile.path = null;
+    const dt = e.dataTransfer;
+    const path =
+      stash ||
+      dt.getData("text/plain") ||
+      dt.getData("application/guimux-file-path") ||
+      (dt.files?.[0] as (File & { path?: string }) | undefined)?.path ||
+      "";
     const sid = sessionRef.current;
-    if (!path || sid == null || exitedRef.current) return;
-    // relative-ish: use as-is, quoted
-    invoke("pty_write", { id: sid, data: `"${path}" ` });
+    if (!path || sid == null) return;
+    // term.paste honors bracketed-paste mode; raw pty_write would not.
+    try {
+      termRef.current?.paste(quoteForShell(path));
+    } catch {
+      invoke("pty_write", { id: sid, data: quoteForShell(path) });
+    }
     termRef.current?.focus();
   };
 
   return (
     <div
       className="relative h-full w-full"
+      data-drop-hot={dropHot}
+      style={dropHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
       onMouseDown={() => {
         setActivePane(paneId);
         // Clicking pane chrome (toolbar, gutters) parks focus on a button or
@@ -644,7 +750,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         if (termRef.current?.hasSelection()) copySelection();
         else pasteClipboard();
       }}
-      onDragOver={(e) => e.preventDefault()}
+      onDragEnter={handleDragEnter}
+      onDragOver={acceptDrag}
+      onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div

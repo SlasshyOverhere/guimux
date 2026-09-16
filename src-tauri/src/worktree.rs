@@ -1,7 +1,13 @@
-use crate::git::git_cmd;
+use crate::git::{git_cmd, reject_git_ref};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::command;
+
+/// Process-unique suffix (rand_id collisions failed `worktree add -b`) and a
+/// merge mutex (checkout+merge is not atomic across concurrent calls).
+static ID_CTR: AtomicU64 = AtomicU64::new(0);
+static MERGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
@@ -30,8 +36,9 @@ fn rand_id() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
+    let n = ID_CTR.fetch_add(1, Ordering::SeqCst);
     let rand: u16 = rand_id_suffix();
-    format!("{ts:x}-{:04x}", rand & 0xffff)
+    format!("{ts:x}-{:x}-{:x}-{rand:04x}", std::process::id(), n)
 }
 
 fn rand_id_suffix() -> u16 {
@@ -107,6 +114,15 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
         () => {
             if !cur_path.is_empty() {
                 let is_main = rows.is_empty();
+                // Detached HEAD has no `branch` line: show the short hash so
+                // the row never renders blank.
+                if cur_branch.is_empty() {
+                    cur_branch = if cur_head.len() >= 7 {
+                        format!("detached:{}", &cur_head[..7])
+                    } else {
+                        "detached".to_string()
+                    };
+                }
                 rows.push((cur_path.clone(), cur_branch.clone(), cur_head.clone(), is_main));
                 cur_path.clear();
                 cur_branch.clear();
@@ -186,14 +202,15 @@ pub fn worktree_create(
     let dir_name = branch
         .trim_start_matches("guimux/")
         .replace('/', "-");
-    // ponytail: project slug is the bare folder name; same-named repos in
-    // different locations share one folder — upgrade path is hash(repo_root).
-    let project: String = sanitize(
+    let slug = sanitize(
         &root
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".into()),
     );
+    // Same-named repos in different folders shared one dir: mix a hash of
+    // the canonical root into the folder name.
+    let project: String = format!("{slug}-{h:08x}", h = short_hash(&root));
     let base_dir = dirs::home_dir()
         .map(|h| h.join(".guimux").join("worktrees").join(&project))
         .unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
@@ -206,6 +223,7 @@ pub fn worktree_create(
         target = base_dir.join(format!("{}-wt-{}", dir_name, i));
     }
     let base_ref = base.unwrap_or_else(|| "HEAD".into());
+    reject_git_ref(&base_ref, "base")?;
     run_git(
         &root,
         &[
@@ -227,6 +245,46 @@ pub fn worktree_create(
         is_main: false,
         last_commit,
     })
+}
+
+/// FNV-1a over the root path: distinguishes same-named repos in the
+/// worktrees dir without a new dependency.
+fn short_hash(root: &Path) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in root.to_string_lossy().bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// C-001 guard for the `remove_dir_all` fallback (git already forgot the
+/// path): only delete inside our own `~/.guimux/worktrees` tree — never the
+/// repo root, home, or anything else. Returns the canonical target.
+fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let target = std::fs::canonicalize(path).map_err(|e| format!("cannot resolve path: {e}"))?;
+    let canon_root = std::fs::canonicalize(main_root).unwrap_or_else(|_| main_root.to_path_buf());
+    if target == canon_root {
+        return Err("refusing to delete the main worktree".into());
+    }
+    if let Some(home) = dirs::home_dir() {
+        let canon_home = std::fs::canonicalize(&home).unwrap_or(home);
+        if target == canon_home {
+            return Err("refusing to delete the home directory".into());
+        }
+        let wt_base = canon_home.join(".guimux").join("worktrees");
+        if target != wt_base && target.starts_with(&wt_base) {
+            return Ok(target);
+        }
+    }
+    Err("worktree is not registered with git and is outside ~/.guimux/worktrees — delete it manually".into())
+}
+
+fn delete_branch_guarded(root: &Path, b: &str) {
+    if b.is_empty() || b.starts_with('-') || b.contains('\0') {
+        return;
+    }
+    let _ = run_git(root, &["branch", "-D", "--", b]);
 }
 
 fn sanitize(name: &str) -> String {
@@ -259,6 +317,7 @@ pub fn worktree_remove(
     id: String,
     delete_branch: bool,
 ) -> Result<(), String> {
+    reject_git_ref(&id, "worktree id")?;
     let path = PathBuf::from(&id);
     // Run git from the MAIN worktree (a linked worktree reports itself as
     // toplevel, and removing a worktree from inside itself fails on Windows).
@@ -279,7 +338,7 @@ pub fn worktree_remove(
     // the manual cleanup below instead of retrying.
     let mut last_err = String::new();
     for attempt in 0..5 {
-        match run_git(&root, &["worktree", "remove", "--force", id.as_str()]) {
+        match run_git(&root, &["worktree", "remove", "--force", "--", id.as_str()]) {
             Ok(_) => {
                 last_err = String::new();
                 break;
@@ -295,8 +354,10 @@ pub fn worktree_remove(
     }
     if last_err.contains("is not a working tree") {
         // Git already forgot this path (stale lock/metadata, half-removed dir):
-        // delete the folder ourselves, prune, and drop the branch.
-        if let Err(e) = std::fs::remove_dir_all(&path) {
+        // delete the folder ourselves, prune, and drop the branch — but only
+        // inside our own worktrees dir (C-001).
+        let target = safe_manual_remove_target(&root, &path)?;
+        if let Err(e) = std::fs::remove_dir_all(&target) {
             return Err(format!(
                 "worktree is not registered with git and folder cleanup failed (close terminals using it and retry): {e}"
             ));
@@ -304,7 +365,7 @@ pub fn worktree_remove(
         let _ = run_git(&root, &["worktree", "prune"]);
         if delete_branch {
             if let Some(b) = branch {
-                let _ = run_git(&root, &["branch", "-D", &b]);
+                delete_branch_guarded(&root, &b);
             }
         }
         return Ok(());
@@ -314,7 +375,7 @@ pub fn worktree_remove(
     }
     if delete_branch {
         if let Some(b) = branch {
-            let _ = run_git(&root, &["branch", "-D", &b]);
+            delete_branch_guarded(&root, &b);
         }
         return Ok(());
     }
@@ -323,17 +384,46 @@ pub fn worktree_remove(
 
 #[command]
 pub fn worktree_merge(id: String) -> Result<String, String> {
+    // Serialize merges: checkout+merge is not atomic across concurrent calls.
+    let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Merge the worktree's branch into its base branch, in the MAIN worktree.
     let path = PathBuf::from(&id);
     let main_wt = find_main_worktree(&path).ok_or("could not find main worktree")?;
     let branch = current_branch(&path)?;
+    reject_git_ref(&branch, "branch")?;
     let base = find_base_branch(&main_wt, &branch)?;
+    // Refuse with a dirty main worktree: a conflicted merge leaves MERGE_HEAD
+    // behind (recover with `worktree_merge_abort`).
+    let dirty = git_cmd()
+        .args(["diff", "--quiet"])
+        .current_dir(&main_wt)
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+        || git_cmd()
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&main_wt)
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true);
+    if dirty {
+        return Err("main worktree has uncommitted changes — commit or stash first".into());
+    }
     // Ensure main worktree is on the base branch
     let cur = current_branch(&main_wt).unwrap_or_default();
     if cur != base {
         run_git(&main_wt, &["checkout", &base])?;
     }
-    run_git(&main_wt, &["merge", "--no-ff", "--no-edit", &branch])
+    run_git(&main_wt, &["merge", "--no-ff", "--no-edit", "--", &branch])
+}
+
+#[command]
+pub fn worktree_merge_abort(id: String) -> Result<String, String> {
+    // Recovery for a conflicted `worktree_merge` (MERGE_HEAD left behind).
+    let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = PathBuf::from(&id);
+    let main_wt = find_main_worktree(&path).ok_or("could not find main worktree")?;
+    run_git(&main_wt, &["merge", "--abort"])
 }
 
 fn find_main_worktree(path: &Path) -> Option<PathBuf> {
@@ -356,7 +446,7 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     // Heuristic: merge-base with main/master; fallback to current HEAD of main worktree.
     for cand in ["main", "master"] {
         let ok = git_cmd()
-            .args(["merge-base", "--is-ancestor", branch, cand])
+            .args(["merge-base", "--is-ancestor", cand, branch])
             .current_dir(main_wt)
             .output();
         if let Ok(o) = ok {
@@ -379,7 +469,11 @@ mod tests {
     use std::process::Command;
 
     fn fixture_repo() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("guimux-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "guimux-test-{}-{}",
+            std::process::id(),
+            ID_CTR.fetch_add(1, Ordering::SeqCst)
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Command::new("git").args(["init", "-b", "main"]).current_dir(&dir).output().unwrap();

@@ -10,7 +10,7 @@ pub fn run() {
     conpty_dll::ensure_bundled_conpty();
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "debug-mcp"))]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
     }
@@ -24,6 +24,7 @@ pub fn run() {
             worktree::worktree_create,
             worktree::worktree_remove,
             worktree::worktree_merge,
+            worktree::worktree_merge_abort,
             git::project_detect,
             git::git_init,
             git::git_status,
@@ -35,6 +36,7 @@ pub fn run() {
             fs::fs_rename,
             pty::pty_spawn,
             pty::pty_attach,
+            pty::pty_alive,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_restart,

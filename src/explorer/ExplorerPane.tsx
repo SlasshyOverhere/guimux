@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
+import { dragFile } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
@@ -33,6 +34,8 @@ function TreeNode({
   setRenameDraft,
   onRenameCommit,
   onRenameCancel,
+  bulkOpen,
+  bulkN,
 }: {
   node: FsNode;
   depth: number;
@@ -44,8 +47,16 @@ function TreeNode({
   setRenameDraft: (v: string) => void;
   onRenameCommit: () => void;
   onRenameCancel: () => void;
+  bulkOpen: boolean;
+  bulkN: number;
 }) {
   const [open, setOpen] = useState(depth < 1);
+  // ponytail: one counter drives collapse/expand-all; it also runs on mount
+  // so expand-all reaches nested dirs that mount after their parent opens.
+  useEffect(() => {
+    if (bulkN > 0) setOpen(bulkOpen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkN]);
   const isDir = node.is_dir;
   const rel = node.path.slice(root.length + 1);
   const isRenaming = renaming === node.path;
@@ -77,9 +88,28 @@ function TreeNode({
         }}
         draggable={!isRenaming}
         onDragStart={(e) => {
+          // Module stash is the primary channel: same-app drops can arrive
+          // with an emptied dataTransfer in WebView2.
+          dragFile.path = node.path;
+          // Custom ghost: the default row snapshot renders cut in half
+          // inside the scroll container; a floating chip renders whole.
+          // The image is captured synchronously, so removal is safe.
+          const ghost = document.createElement("div");
+          ghost.textContent = node.name;
+          ghost.style.cssText = "position:fixed;top:8px;left:8px;z-index:9999;pointer-events:none;padding:4px 10px;border-radius:6px;font-size:12px;background:var(--gm-overlay);color:var(--gm-ink);border:1px solid var(--gm-hairline);";
+          document.body.appendChild(ghost);
+          try {
+            e.dataTransfer.setDragImage(ghost, 10, 10);
+          } catch {
+            /* keep default ghost */
+          }
+          setTimeout(() => ghost.remove(), 0);
           e.dataTransfer.setData("application/guimux-file-path", rel);
+          // text/plain fallback: some webviews strip custom MIME types on drop
+          e.dataTransfer.setData("text/plain", node.path);
           e.dataTransfer.effectAllowed = "copy";
         }}
+        onDragEnd={() => { dragFile.path = null; }}
         title={`${node.path}\nRight-click to rename`}
       >
         {isDir ? (
@@ -123,8 +153,13 @@ function TreeNode({
       </div>
       {isDir && open &&
         node.children?.map((c) => (
-          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} />
+          <TreeNode key={c.path} node={c} depth={depth + 1} onOpen={onOpen} root={root} onMenu={onMenu} renaming={renaming} renameDraft={renameDraft} setRenameDraft={setRenameDraft} onRenameCommit={onRenameCommit} onRenameCancel={onRenameCancel} bulkOpen={bulkOpen} bulkN={bulkN} />
         ))}
+      {isDir && open && node.truncated && (
+        <div className="gm-meta pl-5 py-0.5 text-[11px]" title="Directory listing capped at 2000 entries">
+          … truncated
+        </div>
+      )}
     </div>
   );
 }
@@ -144,6 +179,7 @@ export function ExplorerPane({ root }: { root: string }) {
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [bulk, setBulk] = useState({ open: true, n: 0 });
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -408,6 +444,12 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
           <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">Explorer</span>
           <span className="flex gap-0.5">
+            <button title="Collapse all folders" aria-label="Collapse all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))}>
+              <ChevronRight size={14} strokeWidth={2} />
+            </button>
+            <button title="Expand all folders" aria-label="Expand all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))}>
+              <ChevronDown size={14} strokeWidth={2} />
+            </button>
             <button title="New file" aria-label="New file" className="gm-icon-btn gm-icon-btn--sm" onClick={() => void newFile()}>
               <FilePlus2 size={14} strokeWidth={2} />
             </button>
@@ -422,7 +464,7 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {tree?.children?.length ? (
             tree.children.map((c) => (
-              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} />
+              <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} bulkOpen={bulk.open} bulkN={bulk.n} />
             ))
           ) : (
             <div className="px-2.5 py-2 text-[12px] text-ink-400">No files</div>

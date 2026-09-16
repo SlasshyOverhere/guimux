@@ -135,6 +135,11 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       >
         guimux
       </span>
+      {import.meta.env.DEV && (
+        <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+          dev
+        </span>
+      )}
 
       <button
         title={leftVisible ? "Collapse left sidebar (Ctrl+B)" : "Expand left sidebar (Ctrl+B)"}
@@ -693,6 +698,11 @@ export default function App() {
           <span className="text-[13px] font-semibold tracking-tight text-ink-100">
             guimux
           </span>
+          {import.meta.env.DEV && (
+            <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+              dev
+            </span>
+          )}
           <div className="flex-1" />
           <button
             className="gm-icon-btn text-[12px]"
