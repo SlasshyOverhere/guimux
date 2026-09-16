@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
-import { dragFile } from "../dragFile";
+import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
@@ -58,7 +58,6 @@ function TreeNode({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkN]);
   const isDir = node.is_dir;
-  const rel = node.path.slice(root.length + 1);
   const isRenaming = renaming === node.path;
 
   return (
@@ -87,29 +86,28 @@ function TreeNode({
           onMenu(node.path, e.clientX, e.clientY);
         }}
         draggable={!isRenaming}
-        onDragStart={(e) => {
-          // Module stash is the primary channel: same-app drops can arrive
-          // with an emptied dataTransfer in WebView2.
+        onDragStart={() => {
+          // HTML5 DnD never dispatches dragover in this webview (see logs:
+          // dragstart -> dragend with dropEffect none, nothing between), so
+          // track the pointer manually and paste on release over a terminal.
+          // ponytail: pointer-based, no dataTransfer; drop if DnD ever works.
+          (window as unknown as { __gmLastDrag?: string }).__gmLastDrag = node.path;
           dragFile.path = node.path;
-          // Custom ghost: the default row snapshot renders cut in half
-          // inside the scroll container; a floating chip renders whole.
-          // The image is captured synchronously, so removal is safe.
-          const ghost = document.createElement("div");
-          ghost.textContent = node.name;
-          ghost.style.cssText = "position:fixed;top:8px;left:8px;z-index:9999;pointer-events:none;padding:4px 10px;border-radius:6px;font-size:12px;background:var(--gm-overlay);color:var(--gm-ink);border:1px solid var(--gm-hairline);";
-          document.body.appendChild(ghost);
-          try {
-            e.dataTransfer.setDragImage(ghost, 10, 10);
-          } catch {
-            /* keep default ghost */
-          }
-          setTimeout(() => ghost.remove(), 0);
-          e.dataTransfer.setData("application/guimux-file-path", rel);
-          // text/plain fallback: some webviews strip custom MIME types on drop
-          e.dataTransfer.setData("text/plain", node.path);
-          e.dataTransfer.effectAllowed = "copy";
         }}
-        onDragEnd={() => { dragFile.path = null; }}
+        onDragEnd={(e) => {
+          // Pointer fallback: HTML5 drop never fires here, so paste on
+          // release when the pointer is over a terminal pane. Same JS
+          // context, so write straight to the pane's PTY.
+          try {
+            const cx = (e as React.DragEvent).clientX;
+            const cy = (e as React.DragEvent).clientY;
+            const el = document.elementFromPoint(cx, cy);
+            const host = el?.closest?.("[data-pane-drop]") as HTMLElement | null;
+            const path = dragFile.path ?? (window as unknown as { __gmLastDrag?: string }).__gmLastDrag ?? null;
+            if (path && host) notifyFileDrop(path, cx, cy);
+          } catch { /* best-effort paste */ }
+          dragFile.path = null;
+          (window as unknown as { __gmLastDrag?: string }).__gmLastDrag = undefined; }}
         title={`${node.path}\nRight-click to rename`}
       >
         {isDir ? (

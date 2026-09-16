@@ -10,7 +10,16 @@
 //
 // Lifecycle: dragstart sets `.path`, drop consumes it, dragend clears it
 // (drop always fires before dragend, so a missed drop never leaks a stale path).
-export const dragFile: { path: string | null } = { path: null };
+export const dragFile: { path: string | null } =
+  typeof window !== "undefined" &&
+  (window as unknown as { __gmDragFile?: { path: string | null } }).__gmDragFile
+    ? (window as unknown as { __gmDragFile: { path: string | null } }).__gmDragFile
+    : { path: null };
+
+if (typeof window !== "undefined") {
+  const w = window as unknown as { __gmDragFile?: { path: string | null } };
+  w.__gmDragFile = dragFile;
+}
 
 // Quote a Windows path for pasting at a PowerShell/cmd prompt. `"` is an
 // illegal file-name character on Windows, so no inner-quote escaping is
@@ -19,4 +28,12 @@ export const dragFile: { path: string | null } = { path: null };
 export function quoteForShell(path: string): string {
   const safe = path.endsWith("\\") ? `${path}\\` : path;
   return `"${safe}" `;
+}
+
+// Release-to-paste bus: HTML5 drop never fires in this webview (logs show
+// dragstart -> dragend with dropEffect none and zero dragover/drop events),
+// so the explorer announces the release point and the pane under it pastes
+// via its own live terminal + session (no stale ids passed through the DOM).
+export function notifyFileDrop(path: string, x: number, y: number) {
+  window.dispatchEvent(new CustomEvent("gm-file-drop", { detail: { path, x, y } }));
 }

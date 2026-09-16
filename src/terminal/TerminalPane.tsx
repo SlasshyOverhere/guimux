@@ -157,6 +157,7 @@ function extractLiveCwd(buf: string): string | null {
 
 export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const webglRef = useRef<WebglAddon | null>(null);
@@ -686,12 +687,33 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  // Drop acceptance: cancel BOTH dragenter and dragover — dragover alone
-  // leaves the 🚫 cursor in this webview. dropHot rings the pane so a
-  // missing ring means the drop never reaches us (stale build), not a
-  // silent handler failure.
+  // Release-to-paste: HTML5 drop never fires in this webview, so the
+  // explorer announces the release point and the pane under it feeds the
+  // quoted path through its own live terminal input (same path typed keys
+  // use). The acceptDrag/handleDrop handlers below stay as the fallback
+  // for OS file drops if the webview ever dispatches real drop events.
   const dragDepth = useRef(0);
   const [dropHot, setDropHot] = useState(false);
+  useEffect(() => {
+    const onFileDrop = (ev: Event) => {
+      const { path, x, y } = (ev as CustomEvent<{ path: string; x: number; y: number }>).detail ?? {};
+      if (!path) return;
+      const el = paneRef.current ? document.elementFromPoint(x, y) : null;
+      const inside = !!el && !!paneRef.current?.contains(el);
+      if (!inside || exitedRef.current) return;
+      if (sessionRef.current == null) return;
+      termRef.current?.focus();
+      setActivePane(paneId);
+      // term.paste() is lossy here: this pane's capture `paste` listener
+      // (single-paste-path fix) eats the synthetic event before xterm's
+      // handler, and clipboard permission is unreliable. term.input() feeds
+      // the same keystroke path typed text uses (core input -> onData ->
+      // pty_write) without touching the DOM paste pipeline at all.
+      termRef.current?.input(quoteForShell(path), true);
+    };
+    window.addEventListener("gm-file-drop", onFileDrop);
+    return () => window.removeEventListener("gm-file-drop", onFileDrop);
+  }, [paneId]);
   const acceptDrag = (e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
@@ -727,7 +749,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     if (!path || sid == null) return;
     // term.paste honors bracketed-paste mode; raw pty_write would not.
     try {
-      termRef.current?.paste(quoteForShell(path));
+      termRef.current?.input(quoteForShell(path), true);
     } catch {
       invoke("pty_write", { id: sid, data: quoteForShell(path) });
     }
@@ -736,8 +758,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   return (
     <div
+      ref={paneRef}
       className="relative h-full w-full"
       data-drop-hot={dropHot}
+      data-pane-drop
+      data-pty-id={sessionRef.current ?? undefined}
       style={dropHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
       onMouseDown={() => {
         setActivePane(paneId);
