@@ -1,0 +1,286 @@
+@import "@xterm/xterm/css/xterm.css";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Forced Inter: loaded via @fontsource/inter in main.tsx (self-hosted, offline).
+   User requirement overrides the default-font caution: Inter carries all UI. */
+
+/* Graphite workbench. Grays carry the chrome; color is reserved for state
+   (git status, destructive, success). Never hardcode a hex in components
+   when a --gm-* variable covers the role. */
+:root {
+  --gm-canvas: #0a0a0a;
+  --gm-panel: #171717;
+  --gm-raised: #262626;
+  --gm-overlay: #171717;
+  --gm-hairline: rgba(255, 255, 255, 0.07);
+  --gm-hairline-soft: rgba(255, 255, 255, 0.055);
+  --gm-ink: #fafafa;
+  --gm-ink-dim: #e5e5e5;
+  --gm-ink-mute: #a1a1a1;
+  --gm-ink-faint: #737373;
+  --gm-accent: #e5e5e5;
+  --gm-accent-hover: #fafafa;
+  --gm-accent-ink: #171717;
+  --gm-accent-wash: rgba(229, 229, 229, 0.12);
+  --gm-green: #81b88b;
+  --gm-red: #c74e39;
+  --gm-red-strong: #c42b1c;
+  --gm-amber: #e2c08d;
+
+  /* Interaction surfaces. One scale, every control: hover < selected <
+     pressed. Never hardcode a white/* opacity in components for these. */
+  --gm-hover: rgba(255, 255, 255, 0.05);
+  --gm-selected: rgba(255, 255, 255, 0.07);
+  --gm-pressed: rgba(255, 255, 255, 0.09);
+
+  /* Radius system. Rows 6 / controls + menus 8 / dialogs + cards 12.
+     Nothing else; this is a developer tool, not a phone app. */
+  --gm-r-row: 6px;
+  --gm-r-ctl: 8px;
+  --gm-r-pop: 10px;
+  --gm-r-card: 12px;
+}
+
+/* Shared chrome primitives. Components use these instead of one-off
+   rounded/hover combos so hover, size, and radius stay uniform. */
+.gm-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
+  border-radius: var(--gm-r-ctl);
+  color: var(--gm-ink-mute);
+  flex-shrink: 0;
+}
+.gm-icon-btn:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
+}
+.gm-icon-btn[data-active="true"] {
+  background: var(--gm-selected);
+  color: var(--gm-ink);
+}
+.gm-icon-btn--sm {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+}
+
+/* Sidebar tabs: active reads through type weight + color only. No pills,
+   no underline bars, no extra hairlines. */
+.gm-tab {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--gm-ink-faint);
+  padding: 2px 0;
+}
+.gm-tab:hover {
+  color: var(--gm-ink-dim);
+}
+.gm-tab[data-active="true"] {
+  font-weight: 600;
+  color: var(--gm-ink);
+}
+
+/* Secondary metadata: paths, counts, hints. Always faint, never bold. */
+.gm-meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--gm-ink-faint);
+}
+
+/* Dropdown / context menus: one surface, one radius, one row treatment. */
+.gm-menu {
+  background: var(--gm-overlay);
+  border: 1px solid var(--gm-hairline);
+  border-radius: var(--gm-r-pop);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px 0;
+  overflow: hidden;
+}
+.gm-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--gm-ink-dim);
+  text-align: left;
+}
+.gm-menu-item:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
+}
+
+/* Terminal pane tools: one pill carrying borderless buttons, not three
+   individually boxed buttons. */
+.gm-pane-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--gm-overlay);
+  border: 1px solid var(--gm-hairline);
+  border-radius: var(--gm-r-ctl);
+  padding: 2px;
+}
+.gm-pane-tools > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--gm-ink-mute);
+}
+.gm-pane-tools > button:hover {
+  background: var(--gm-hover);
+  color: var(--gm-ink);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--gm-canvas);
+  color: var(--gm-ink);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv01", "cv02", "cv11", "ss03", "calt", "kern";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.006em;
+}
+
+::selection {
+  background: rgba(229, 229, 229, 0.28);
+  color: #fafafa;
+}
+
+/* Numeric / meta text that benefits from tabular figures */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "cv01", "ss03", "tnum";
+}
+
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-feature-settings: "calt", "kern";
+}
+
+/* thin scrollbars, tonal */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* body is app-chrome (no text selection), but terminals, editors, and
+   inputs carry real text: re-enable selection there or copy breaks. */
+input,
+textarea,
+.xterm,
+.xterm *,
+.monaco-editor,
+.monaco-editor * {
+  user-select: text;
+}
+
+/* Selectable rows (sidebar, tree, menus, palette). One hover, one
+   selected. Components use .gm-row + data-selected, never one-off
+   ad-hoc background utilities. */
+.gm-row {
+  border-radius: var(--gm-r-row);
+}
+.gm-row:hover {
+  background: var(--gm-hover);
+}
+.gm-row[data-selected="true"] {
+  background: var(--gm-selected);
+}
+.gm-row[data-selected="true"]:hover {
+  background: var(--gm-pressed);
+}
+
+/* xterm tuning */
+.xterm {
+  padding: 8px 8px 8px 12px;
+  font-feature-settings: "calt", "kern";
+}
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* pane fade-in: transform only, content already visible (no opacity gate) */
+@keyframes gm-pane-in {
+  from {
+    transform: translateY(2px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.gm-pane-in {
+  animation: gm-pane-in 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gm-pane-in {
+    animation: none;
+  }
+}
+
+/* visible keyboard focus, neutral ring on every control */
+:focus-visible {
+  outline: 2px solid #737373;
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+/* kbd chip */
+.gm-kbd {
+  font-family: "Inter", sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--gm-ink-mute);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--gm-hairline);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 0 5px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* window close button: Windows-standard red on hover */
+.gm-close-btn:hover {
+  background: var(--gm-red-strong);
+  color: #ffffff;
+}
