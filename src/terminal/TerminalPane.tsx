@@ -480,7 +480,22 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
-    // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
+    // Single paste path: xterm natively sends `paste` DOM events to the PTY
+    // (handlePasteEvent → triggerDataEvent → onData), while our Ctrl+V /
+    // right-click path ALSO sends via term.paste() → every paste lands twice.
+    // Kill the native event at capture (an ancestor capture listener fires
+    // before xterm's own textarea/element listeners, and stopPropagation on
+    // the way down never reaches the target) so the manual term.paste() in
+    // pasteClipboard() is the only sender. Keydown preventDefault is NOT
+    // enough: xterm's keydown path never cancels it on the custom-handler
+    // early-return, and the webview fires the paste event anyway.
+    // ponytail: one capture listener; drop it if xterm ever gains a "no native paste" option.
+    const killNativePaste = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    hostRef.current.addEventListener("paste", killNativePaste, true);
+     // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
     // text is selected (else the SIGINT the TUI may need), Ctrl+V paste.
     // Returning false keeps xterm from also feeding the key to the PTY.
     term.attachCustomKeyEventHandler((e) => {
@@ -494,6 +509,12 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           pasteClipboard();
           return false;
         }
+      }
+      // Shift+Insert emits a native `paste` event (xterm emits no key for it);
+      // the capture listener above eats that event, so send it ourselves.
+      if (e.type === "keydown" && e.key === "Insert" && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        pasteClipboard();
+        return false;
       }
       return true;
     });
@@ -606,6 +627,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       alive = false;
       ro.disconnect();
+      hostRef.current?.removeEventListener("paste", killNativePaste, true);
       for (const un of unlisteners.current) un();
       unlisteners.current = [];
       // persist scrollback
