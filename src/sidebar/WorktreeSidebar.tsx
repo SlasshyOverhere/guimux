@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Search, ChevronRight, X } from "lucide-react";
+import { Search, ChevronRight, X, GitBranch, Check } from "lucide-react";
 // Ledger sidebar: typographic rows only. No status dots, no row icons, no
 // hover icon buttons — status reads as words ("3 changed", "clean"), actions
 // live in the right-click menu. Re-add inline affordances only if the menu
@@ -55,6 +55,7 @@ export function WorktreeSidebar() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [base, setBase] = useState("");
+  const [baseOpen, setBaseOpen] = useState(false);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, FileStatus[]>>({});
@@ -331,6 +332,8 @@ export function WorktreeSidebar() {
     nowS - wt.last_commit > SETTLE_AFTER_S;
   const gitRows = worktrees.filter((wt) => (isGit ? !wt.id.startsWith("plain:") : true));
   const q = query.trim().toLowerCase();
+  const bq = base.trim().toLowerCase();
+  const baseOptions = (bq ? branches.filter((b) => b.toLowerCase().includes(bq)) : branches).slice(0, 40);
   const matches = (wt: Worktree) =>
     !q || wt.branch.toLowerCase().includes(q) || wt.path.toLowerCase().includes(q);
   const settled = gitRows.filter(isStale).filter(matches);
@@ -581,12 +584,30 @@ export function WorktreeSidebar() {
       {tab === "worktrees" && isGit && (
         <div className="px-4 pb-3">
           {creating ? (
-            <div className="pt-1">
+            <div
+              className="rounded-lg p-3"
+              style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--gm-hairline-soft)" }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] font-semibold text-ink-100">New worktree</span>
+                <button
+                  className="rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
+                  onClick={() => setCreating(false)}
+                  title="Close"
+                  aria-label="Close"
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </div>
+              <label htmlFor="gm-wt-name" className="gm-meta mt-2 block text-[11px]">
+                Branch name
+              </label>
               <input
+                id="gm-wt-name"
                 autoFocus
-                className="mono w-full border-b bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
-                style={{ borderColor: "var(--gm-hairline)" }}
-                placeholder="branch name (optional)"
+                className="mono mt-1 w-full rounded-md bg-ink-950 px-2.5 py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+                style={{ border: "1px solid var(--gm-hairline)" }}
+                placeholder="feature/my-change (optional)"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => {
@@ -594,32 +615,86 @@ export function WorktreeSidebar() {
                   if (e.key === "Escape") setCreating(false);
                 }}
               />
-              <input
-                className="mono w-full border-b bg-transparent py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-400"
-                style={{ borderColor: "var(--gm-hairline)" }}
-                placeholder="start from (blank = current HEAD)"
-                value={base}
-                list="gm-base-branches"
-                onChange={(e) => setBase(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") create();
-                  if (e.key === "Escape") setCreating(false);
-                }}
-              />
-              <datalist id="gm-base-branches">
-                {branches.map((b) => (
-                  <option key={b} value={b} />
-                ))}
-              </datalist>
-              <div className="flex items-center gap-4 pt-2">
+              <label htmlFor="gm-wt-base" className="gm-meta mt-2.5 block text-[11px]">
+                Start from
+              </label>
+              <div className="relative mt-1">
+                <GitBranch size={13} strokeWidth={2} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-500" />
+                <input
+                  id="gm-wt-base"
+                  className="mono w-full rounded-md bg-ink-950 py-1.5 pl-8 pr-7 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+                  style={{ border: "1px solid var(--gm-hairline)" }}
+                  placeholder="Current HEAD"
+                  value={base}
+                  autoComplete="off"
+                  role="combobox"
+                  aria-expanded={baseOpen}
+                  aria-controls="gm-base-menu"
+                  onChange={(e) => { setBase(e.target.value); setBaseOpen(true); }}
+                  onFocus={() => setBaseOpen(true)}
+                  onBlur={() => setTimeout(() => setBaseOpen(false), 120)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") create();
+                    if (e.key === "Escape") {
+                      if (baseOpen) setBaseOpen(false);
+                      else setCreating(false);
+                    }
+                    if (e.key === "ArrowDown" && !baseOpen) setBaseOpen(true);
+                  }}
+                />
+                {base && (
+                  <button
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => setBase("")}
+                    title="Use current HEAD"
+                    aria-label="Clear start point"
+                  >
+                    <X size={12} strokeWidth={2} />
+                  </button>
+                )}
+                {baseOpen && (
+                  <div id="gm-base-menu" role="listbox" className="gm-menu absolute bottom-full left-0 right-0 z-30 mb-1 max-h-48 overflow-y-auto">
+                    <button
+                      role="option"
+                      aria-selected={!base.trim()}
+                      className="gm-menu-item mono gap-2 text-[12px]"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => { setBase(""); setBaseOpen(false); }}
+                    >
+                      <span className="flex-1 text-left">Current HEAD</span>
+                      {!base.trim() && <Check size={12} strokeWidth={2} className="shrink-0 text-ink-400" />}
+                    </button>
+                    {baseOptions.map((b) => (
+                      <button
+                        key={b}
+                        role="option"
+                        aria-selected={base === b}
+                        className="gm-menu-item mono gap-2 text-[12px]"
+                        title={b}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => { setBase(b); setBaseOpen(false); }}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-left">{b}</span>
+                        {base === b && <Check size={12} strokeWidth={2} className="shrink-0 text-ink-400" />}
+                      </button>
+                    ))}
+                    {base.trim() && baseOptions.length === 0 && (
+                      <div className="px-3 py-2 text-[11.5px] text-ink-400">No match — Enter uses it as-is.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="mt-3 flex items-center gap-2">
                 <button
-                  className="text-[12px] font-semibold text-ink-100 hover:underline"
+                  className="flex-1 rounded-md px-3 py-1.5 text-[12px] font-semibold"
+                  style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
                   onClick={create}
                 >
                   Create worktree
                 </button>
                 <button
-                  className="text-[12px] font-medium text-ink-400 hover:text-ink-200"
+                  className="rounded-md px-2 py-1.5 text-[12px] font-medium text-ink-400 hover:text-ink-200"
                   onClick={() => setCreating(false)}
                 >
                   Cancel
