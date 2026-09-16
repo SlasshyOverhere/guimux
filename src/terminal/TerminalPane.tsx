@@ -88,6 +88,35 @@ function fitSane(term: Terminal, fit: FitAddon): { cols: number; rows: number } 
   }
   return saneDims(term);
 }
+// Resize (split drag, font zoom, maximize) reflows the buffer, which resets
+// the viewport — a long agent run jumps to the top and the user must scroll
+// back down. Snapshot the viewport across fit() and restore it: pinned to
+// the bottom when following live output, else the same line (clamped).
+function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: number } | null {
+  let y = 0;
+  let atBottom = true;
+  try {
+    const buf = term.buffer.active;
+    y = buf.viewportY;
+    atBottom = y >= buf.baseY;
+  } catch {
+    /* no buffer yet: fresh terminal */
+  }
+  try {
+    fit.fit();
+  } catch {
+    return null;
+  }
+  const dims = saneDims(term);
+  if (!dims) return null;
+  try {
+    if (atBottom) term.scrollToBottom();
+    else term.scrollToLine(Math.max(0, Math.min(y, term.buffer.active.baseY)));
+  } catch {
+    /* best-effort restore */
+  }
+  return dims;
+}
 
 // Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
 // (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
@@ -338,7 +367,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
-    const dims = fitRef.current ? fitSane(term, fitRef.current) : saneDims(term);
+    const dims = fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term);
     if (!dims) return; // unmeasured container: never send 0-size
     const sid = sessionRef.current;
     if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
@@ -567,7 +596,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     const ro = new ResizeObserver(() => {
       if (!visible) return;
-      const dims = fitSane(term, fit);
+      const dims = fitKeepViewport(term, fit);
       if (!dims) return; // hidden/unmeasured: never send 0-size
       const sid = sessionRef.current;
       if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
@@ -617,7 +646,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     if (!term) return;
     if (visible) {
       try {
-        fitRef.current && fitSane(term, fitRef.current);
+        fitRef.current && fitKeepViewport(term, fitRef.current);
       } catch {
         /* noop */
       }
