@@ -36,9 +36,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // Same panel tile both states so selection never shifts text.
-  // Idle edge is a touch stronger than app hairlines so tiles read
-  // against the gutters; active reads through a brighter edge only.
+  // Same black tile both states so selection never shifts text.
+  // Edges alone separate the cards; active reads brighter.
   return (
     <div
       className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px]"
@@ -47,8 +46,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.32)" }
-            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
+            ? { background: "#000000", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.32)" }
+            : { background: "#000000", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
       }
     >
       <TerminalPane
