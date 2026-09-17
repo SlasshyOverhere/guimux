@@ -30,9 +30,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // Native tile: no border, no window-in-window. The canvas itself is
-  // the surface; the active pane reads through a soft inset tint + faint
-  // edge, an inactive pane is bare canvas. Zero splits = zero seams.
+  // One surface for every pane: active reads only through a faint inset
+  // edge, never a background shift, so selecting a pane changes no colors.
   return (
     <div
       className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-lg"
@@ -41,7 +40,7 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
+            ? { background: "var(--gm-canvas)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
             : { background: "var(--gm-canvas)" }
       }
     >
