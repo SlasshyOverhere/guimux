@@ -7,7 +7,12 @@ function containsPane(node: PaneNode, paneId: string): boolean {
   return containsPane(node.first, paneId) || containsPane(node.second, paneId);
 }
 
-export function SplitView({ node, cwd, maximizedId }: { node: PaneNode; cwd: string; maximizedId?: string | null }) {
+function countPanes(node: PaneNode): number {
+  if (node.kind === "pane") return 1;
+  return countPanes(node.first) + countPanes(node.second);
+}
+
+export function SplitView({ node, cwd, maximizedId, start = 1 }: { node: PaneNode; cwd: string; maximizedId?: string | null; start?: number }) {
   // Root reads the store (stale id restores the full grid); nested levels
   // inherit the prop so hidden siblings still compute hidden=true.
   const stored = useStore((s) => s.maximizedPaneId);
@@ -20,44 +25,110 @@ export function SplitView({ node, cwd, maximizedId }: { node: PaneNode; cwd: str
   if (node.kind === "pane") {
     // Key by pane id: without this, splitting elsewhere in the tree remounts
     // surviving panes (new xterm + new PTY listeners mid-stream → blank pane).
-    return <PaneWrap key={node.id} pane={node} cwd={cwd} maximizedId={maxId} />;
+    return <PaneWrap key={node.id} pane={node} num={start} cwd={cwd} maximizedId={maxId} />;
   }
-  return <SplitNode key={node.id} split={node} cwd={cwd} maximizedId={maxId} />;
+  return <SplitNode key={node.id} split={node} cwd={cwd} maximizedId={maxId} start={start} />;
 }
 
-function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximizedId: string | null }) {
-  const { activePaneId, closePane } = useStore();
+function PaneWrap({ pane, num, cwd, maximizedId }: { pane: Pane; num: number; cwd: string; maximizedId: string | null }) {
+  const { activePaneId, setActivePane, closePane, splitPane, toggleMaximizePane } = useStore();
   const active = activePaneId === pane.id;
+  const maxed = maximizedId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // Reference cards: same near-black tile both states so selection never
-  // shifts text; split reads via black gutters + 1px edges (grey idle,
-  // red active). 8px radius matches the reference tiles.
   return (
     <div
-      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px]"
+      className="gm-pane-in group/pane flex h-full w-full flex-col overflow-hidden rounded-[10px]"
       data-active={active}
+      onMouseDown={() => setActivePane(pane.id)}
       style={
         hidden
           ? { display: "none" }
-          : active
-            ? { background: "#101010", boxShadow: "inset 0 0 0 1px #e5484d" }
-            : { background: "#101010", boxShadow: "inset 0 0 0 1px #2b2b2b" }
+          : {
+              background: "#101010",
+              // Active pane gets the brighter edge, idle gets a dim one. Same
+              // tile color both states so selection never shifts text.
+              boxShadow: active
+                ? "inset 0 0 0 1px rgba(255,255,255,0.22)"
+                : "inset 0 0 0 1px rgba(255,255,255,0.10)",
+            }
       }
     >
-      <TerminalPane
-        paneId={pane.id}
-        ptyId={pane.ptyId}
-        cwd={pane.cwd ?? cwd}
-        visible={!hidden}
-        initCmd={pane.initCmd ?? null}
-        onClose={() => closePane(pane.id)}
-      />
+      <div
+        className="flex h-8 shrink-0 select-none items-center gap-2 px-2.5"
+        style={{
+          background: active ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.025)",
+          borderBottom: "1px solid rgba(255,255,255,0.08)",
+          borderTopLeftRadius: 10,
+          borderTopRightRadius: 10,
+        }}
+      >
+        {/* traffic dots: red closes, yellow maximizes, green splits right */}
+        <span className="flex items-center gap-1.5">
+          <button
+            title="Close pane"
+            aria-label="Close pane"
+            tabIndex={-1}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              closePane(pane.id);
+            }}
+            className="h-2.5 w-2.5 rounded-full transition-transform hover:scale-110"
+            style={{ background: "#ff5f57" }}
+          />
+          <button
+            title={maxed ? "Restore panes" : "Maximize pane"}
+            aria-label={maxed ? "Restore panes" : "Maximize pane"}
+            tabIndex={-1}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setActivePane(pane.id);
+              toggleMaximizePane(pane.id);
+            }}
+            className="h-2.5 w-2.5 rounded-full transition-transform hover:scale-110"
+            style={{ background: "#febc2e" }}
+          />
+          <button
+            title="Split right"
+            aria-label="Split pane right"
+            tabIndex={-1}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setActivePane(pane.id);
+              splitPane(pane.id, "h");
+            }}
+            className="h-2.5 w-2.5 rounded-full transition-transform hover:scale-110"
+            style={{ background: "#28c840" }}
+          />
+        </span>
+        <span
+          className="tnum min-w-0 flex-1 truncate text-center text-[11px] font-medium"
+          style={{ color: active ? "var(--gm-ink-dim)" : "var(--gm-ink-faint)" }}
+        >
+          Terminal {num}
+        </span>
+        {/* spacer balances the dots so the title stays centered */}
+        <span className="w-[46px] shrink-0" aria-hidden />
+      </div>
+      <div className="min-h-0 min-w-0 flex-1">
+        <TerminalPane
+          paneId={pane.id}
+          ptyId={pane.ptyId}
+          cwd={pane.cwd ?? cwd}
+          visible={!hidden}
+          initCmd={pane.initCmd ?? null}
+          onClose={() => closePane(pane.id)}
+        />
+      </div>
     </div>
   );
 }
 
-function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; maximizedId: string | null }) {
+function SplitNode({ split, cwd, maximizedId, start = 1 }: { split: Split; cwd: string; maximizedId: string | null; start?: number }) {
+  const firstCount = countPanes(split.first);
   const containerRef = useRef<HTMLDivElement>(null);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
@@ -90,9 +161,8 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
     window.addEventListener("mouseup", up);
   }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
-  // Reference gutters: 8px black channels, cards never touch. The split
-  // stays visible even when the hover knob fades. The knob only marks the
-  // drag handle. Maximized hides gutters so the pane owns the frame.
+  // Black 8px channels, cards never touch. The knob only marks the drag
+  // handle on hover. Maximized hides gutters so the pane owns the frame.
   return (
     <div
       ref={containerRef}
@@ -103,7 +173,7 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
         style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
+        <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} start={start} />
       </div>
       <div
         role="separator"
@@ -112,7 +182,7 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
         aria-hidden={maxed}
         aria-label="Split resize handle"
         style={maxed ? { display: "none" } : undefined}
-        className={`group/sep flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
+        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
           split.direction === "h" ? "w-[9px] cursor-col-resize" : "h-[9px] cursor-row-resize"
         }`}
         onMouseDown={onDown}
@@ -129,16 +199,17 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
           setSplitRatio(activeWorktreeId, split.id, split.ratio + step);
         }}
       >
-        {/* Reference red bar: always visible in the black gutter. */}
+        {/* Faint bar inside a 9px hit target; gutter stays black. */}
         <div
-          className={`rounded-[3px] bg-[#e5484d] ${split.direction === "h" ? "h-[calc(100%-8px)] w-[4px]" : "h-[4px] w-[calc(100%-8px)]"}`}
+          style={{ background: "rgba(255,255,255,0.09)" }}
+          className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
         />
       </div>
       <div
         style={secondHas ? { flex: 1 } : firstHas ? { display: "none" } : { flexBasis: `calc(${(1 - split.ratio) * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
+        <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} start={start + firstCount} />
       </div>
     </div>
   );
