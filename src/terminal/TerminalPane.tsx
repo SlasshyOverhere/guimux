@@ -434,6 +434,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       cursorBlink: true,
       cursorStyle: "block",
       drawBoldTextInBrightColors: true,
+      minimumContrastRatio: 4.5,
       macOptionClickForcesSelection: true,
       // Transparent: the tile div owns the surface (canvas vs panel) so
       // active/inactive reads without a window-inside-window seam.
@@ -463,6 +464,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         brightWhite: "#ffffff",
       },
       allowProposedApi: true,
+      // Required for theme background rgba(0,0,0,0): without it WebGL
+      // ignores the alpha channel and paints opaque black over the tile.
+      allowTransparency: true,
     });
     const fit = new FitAddon();
     // Unicode 11 width tables BEFORE any
