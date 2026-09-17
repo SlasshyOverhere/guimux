@@ -7,7 +7,7 @@ function containsPane(node: PaneNode, paneId: string): boolean {
   return containsPane(node.first, paneId) || containsPane(node.second, paneId);
 }
 
-export function SplitView({ node, cwd, maximizedId }: { node: PaneNode; cwd: string; maximizedId?: string | null }) {
+export function SplitView({ node, cwd, maximizedId, depth = 0 }: { node: PaneNode; cwd: string; maximizedId?: string | null; depth?: number }) {
   // Root reads the store (stale id restores the full grid); nested levels
   // inherit the prop so hidden siblings still compute hidden=true.
   const stored = useStore((s) => s.maximizedPaneId);
@@ -20,9 +20,15 @@ export function SplitView({ node, cwd, maximizedId }: { node: PaneNode; cwd: str
   if (node.kind === "pane") {
     // Key by pane id: without this, splitting elsewhere in the tree remounts
     // surviving panes (new xterm + new PTY listeners mid-stream → blank pane).
-    return <PaneWrap key={node.id} pane={node} cwd={cwd} maximizedId={maxId} />;
+    // A lone pane still gets the black frame so it matches split tiles.
+    const wrap = <PaneWrap key={node.id} pane={node} cwd={cwd} maximizedId={maxId} />;
+    return depth === 0 && maxId == null ? (
+      <div className="h-full w-full p-2" style={{ background: "#000000" }}>{wrap}</div>
+    ) : (
+      wrap
+    );
   }
-  return <SplitNode key={node.id} split={node} cwd={cwd} maximizedId={maxId} />;
+  return <SplitNode key={node.id} split={node} cwd={cwd} maximizedId={maxId} depth={depth} />;
 }
 
 function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximizedId: string | null }) {
@@ -31,7 +37,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
   // Same panel tile both states so selection never shifts text.
-  // Active reads through a stronger hairline edge only, no color fill.
+  // Idle edge is a touch stronger than app hairlines so tiles read
+  // against the gutters; active reads through a brighter edge only.
   return (
     <div
       className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px]"
@@ -40,8 +47,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.22)" }
-            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
+            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.32)" }
+            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
       }
     >
       <TerminalPane
@@ -56,7 +63,7 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   );
 }
 
-function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; maximizedId: string | null }) {
+function SplitNode({ split, cwd, maximizedId, depth }: { split: Split; cwd: string; maximizedId: string | null; depth: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
@@ -89,19 +96,22 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
     window.addEventListener("mouseup", up);
   }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
-  // Canvas 8px channels, cards never touch. The knob only marks the drag
+  // Black 8px channels + 8px outer frame at the root only; nested
+  // levels stay transparent with just the gap so channels never double
+  // up. Cards never touch the app canvas. The knob only marks the drag
   // handle on hover. Maximized hides gutters so the pane owns the frame.
+  const root = depth === 0;
   return (
     <div
       ref={containerRef}
-      className={`flex h-full w-full ${maxed ? "" : "gap-2"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
-      style={{ background: "transparent" }}
+      className={`flex h-full w-full ${maxed ? "" : root ? "gap-2 p-2" : "gap-2"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
+      style={{ background: maxed || !root ? "transparent" : "#000000" }}
     >
       <div
         style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
+        <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} depth={depth + 1} />
       </div>
       <div
         role="separator"
@@ -137,7 +147,7 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
         style={secondHas ? { flex: 1 } : firstHas ? { display: "none" } : { flexBasis: `calc(${(1 - split.ratio) * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
-        <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
+        <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} depth={depth + 1} />
       </div>
     </div>
   );
