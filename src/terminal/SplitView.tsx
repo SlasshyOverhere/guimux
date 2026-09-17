@@ -40,8 +40,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "#101010", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
-            : { background: "#101010", boxShadow: "inset 0 0 0 1px #2b2b2b" }
+            ? { background: "#101010", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)" }
+            : { background: "#101010", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
       }
     >
       <TerminalPane
