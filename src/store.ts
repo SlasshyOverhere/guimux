@@ -288,18 +288,14 @@ export const useStore = create<AppState>((set, get) => ({
   setActiveProject: (id) => {
     const s = get();
     const proj = s.projects.find((x) => x.id === id);
-    if (!proj) return;
-    // Project switches reset everything (App effect reloads): reap every
-    // cached shell, otherwise keep-alive leaks a shell per switch.
-    // ponytail: layouts only ever cache the current project, so a full
-    // clear is safe; scope per-project when cross-project resume is added.
-    const reap = (n: PaneNode | null) => {
-      if (n) for (const p of collectPaneObjs(n)) {
-        if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
-      }
-    };
-    reap(s.layout);
-    Object.values(s.layouts).forEach(reap);
+    if (!proj || id === s.activeProjectId) return;
+    // Project switches keep every PTY alive: stash the outgoing tree in the
+    // shared layouts cache (keyed by worktree id, unique per repo path) so
+    // switching back remounts the same panes onto the same live shells.
+    // Unmounted panes stay in the cache, so TerminalPane's switch-safe
+    // cleanup never reaps them while another project is on screen.
+    const kept =
+      s.activeWorktreeId && s.layout ? { ...s.layouts, [s.activeWorktreeId]: s.layout } : s.layouts;
     // Switching projects resets worktree selection; App effect reloads it.
     set({
       activeProjectId: id,
@@ -307,7 +303,7 @@ export const useStore = create<AppState>((set, get) => ({
       worktrees: [],
       activeWorktreeId: null,
       layout: null,
-      layouts: {},
+      layouts: kept,
       activePaneId: null,
       maximizedPaneId: null,
         });
@@ -316,15 +312,20 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       // Re-list dropped worktrees (deleted externally, pruned): with
       // switch-safe cleanup their cached shells would leak, so reap them.
+      // Only touch trees from THIS project's previous list: other projects'
+      // cached trees share this map and must survive while hidden.
       const live = new Set(wts.map((w) => w.id));
+      const old = new Set(s.worktrees.map((w) => w.id));
       for (const [id, node] of Object.entries(s.layouts)) {
-        if (!live.has(id) && id !== s.activeWorktreeId) {
+        if (old.has(id) && !live.has(id) && id !== s.activeWorktreeId) {
           for (const p of collectPaneObjs(node)) {
             if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
           }
         }
       }
-      const layouts = Object.fromEntries(Object.entries(s.layouts).filter(([id]) => live.has(id) || id === s.activeWorktreeId));
+      const layouts = Object.fromEntries(
+        Object.entries(s.layouts).filter(([id]) => !old.has(id) || live.has(id) || id === s.activeWorktreeId),
+      );
       return { worktrees: wts, layouts };
     }),
   setActiveWorktree: (id) => {
