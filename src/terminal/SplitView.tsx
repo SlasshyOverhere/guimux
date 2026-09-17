@@ -30,18 +30,19 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // Separate cards on canvas: both panes share --gm-panel so selection
-  // never shifts text color; canvas gutters between cards do the split.
+  // Reference cards: same near-black tile both states so selection never
+  // shifts text; split reads via black gutters + 1px edges (grey idle,
+  // red active). 8px radius matches the reference tiles.
   return (
     <div
-      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-lg"
+      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px]"
       data-active={active}
       style={
         hidden
           ? { display: "none" }
           : active
-            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
-            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
+            ? { background: "#101010", boxShadow: "inset 0 0 0 1px #e5484d" }
+            : { background: "#101010", boxShadow: "inset 0 0 0 1px #2b2b2b" }
       }
     >
       <TerminalPane
@@ -89,17 +90,17 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
     window.addEventListener("mouseup", up);
   }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
-  // Gutters carry the canvas color so splits read as carved channels,
-  // not glowing bars. Rounded caps, stable through drag. Maximized hides
-  // gutters so the pane owns the frame.
+  // Reference gutters: 8px black channels, cards never touch. The split
+  // stays visible even when the hover knob fades. The knob only marks the
+  // drag handle. Maximized hides gutters so the pane owns the frame.
   return (
     <div
       ref={containerRef}
-      className={`flex h-full w-full ${maxed ? "" : "gap-1 p-1"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
-      style={{ background: "var(--gm-canvas)" }}
+      className={`flex h-full w-full ${maxed ? "" : "gap-2"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
+      style={{ background: "#000000" }}
     >
       <div
-        style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 7.5px)` }}
+        style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
         <SplitView key={split.first.id} node={split.first} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
@@ -111,7 +112,7 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
         aria-hidden={maxed}
         aria-label="Split resize handle"
         style={maxed ? { display: "none" } : undefined}
-        className={`flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
+        className={`group/sep flex shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--gm-hover)] focus-visible:bg-[var(--gm-hover)] ${
           split.direction === "h" ? "w-[9px] cursor-col-resize" : "h-[9px] cursor-row-resize"
         }`}
         onMouseDown={onDown}
@@ -128,14 +129,13 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
           setSplitRatio(activeWorktreeId, split.id, split.ratio + step);
         }}
       >
-        {/* visible 3px bar inside a 9px hit target */}
+        {/* Reference red bar: always visible in the black gutter. */}
         <div
-          style={{ background: "rgba(255,255,255,0.09)" }}
-          className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
+          className={`rounded-[3px] bg-[#e5484d] ${split.direction === "h" ? "h-[calc(100%-8px)] w-[4px]" : "h-[4px] w-[calc(100%-8px)]"}`}
         />
       </div>
       <div
-        style={secondHas ? { flex: 1 } : firstHas ? { display: "none" } : { flexBasis: `calc(${(1 - split.ratio) * 100}% - 7.5px)` }}
+        style={secondHas ? { flex: 1 } : firstHas ? { display: "none" } : { flexBasis: `calc(${(1 - split.ratio) * 100}% - 4px)` }}
         className="min-h-0 min-w-0"
       >
         <SplitView key={split.second.id} node={split.second} cwd={cwd} maximizedId={maxed ? maximizedId : null} />
