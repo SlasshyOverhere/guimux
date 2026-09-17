@@ -30,7 +30,7 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // Same near-black tile both states so selection never shifts text.
+  // Same panel tile both states so selection never shifts text.
   // Active reads through a stronger hairline edge only, no color fill.
   return (
     <div
@@ -40,8 +40,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "#101010", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.18)" }
-            : { background: "#101010", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
+            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.22)" }
+            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
       }
     >
       <TerminalPane
@@ -89,13 +89,13 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
     window.addEventListener("mouseup", up);
   }, [split.direction, split.id, activeWorktreeId, setSplitRatio]);
 
-  // Black 8px channels, cards never touch. The knob only marks the drag
+  // Canvas 8px channels, cards never touch. The knob only marks the drag
   // handle on hover. Maximized hides gutters so the pane owns the frame.
   return (
     <div
       ref={containerRef}
       className={`flex h-full w-full ${maxed ? "" : "gap-2"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
-      style={{ background: "#000000" }}
+      style={{ background: "transparent" }}
     >
       <div
         style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 4px)` }}
@@ -127,7 +127,7 @@ function SplitNode({ split, cwd, maximizedId }: { split: Split; cwd: string; max
           setSplitRatio(activeWorktreeId, split.id, split.ratio + step);
         }}
       >
-        {/* Faint bar inside a 9px hit target; gutter stays black. */}
+        {/* Faint bar inside a 9px hit target. */}
         <div
           style={{ background: "rgba(255,255,255,0.09)" }}
           className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
