@@ -30,8 +30,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;
-  // One surface for every pane: active reads only through a faint inset
-  // edge, never a background shift, so selecting a pane changes no colors.
+  // Separate cards on canvas: both panes share --gm-panel so selection
+  // never shifts text color; canvas gutters between cards do the split.
   return (
     <div
       className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-lg"
@@ -40,8 +40,8 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         hidden
           ? { display: "none" }
           : active
-            ? { background: "var(--gm-canvas)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
-            : { background: "var(--gm-canvas)" }
+            ? { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline)" }
+            : { background: "var(--gm-panel)", boxShadow: "inset 0 0 0 1px var(--gm-hairline-soft)" }
       }
     >
       <TerminalPane
