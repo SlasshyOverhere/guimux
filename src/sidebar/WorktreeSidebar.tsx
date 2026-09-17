@@ -46,12 +46,45 @@ export function WorktreeSidebar() {
     activeProjectId,
     repoRoot,
     worktrees,
+    worktreesByProject,
     activeWorktreeId,
     setActiveWorktree,
+    openProjectWorktree,
     setWorktrees,
     updateProject,
     openEditor,
   } = useStore();
+  // Unvisited projects have no cached list yet: fill them in once per repo
+  // root so every project shows rows (your screenshot's always-on panel).
+  // Writes go through setProjectWorktrees (cache only), never the live list.
+  const [listedRoots, setListedRoots] = useState<Record<string, true>>({});
+  const cacheKeys = Object.keys(worktreesByProject).length;
+  useEffect(() => {
+    let cancelled = false;
+    const missing = projects.filter(
+      (p) => p.isGit && (p.gitRoot ?? p.path) && !worktreesByProject[p.id] && !listedRoots[p.gitRoot ?? p.path],
+    );
+    if (missing.length === 0) return;
+    (async () => {
+      for (const p of missing) {
+        const root = p.gitRoot ?? p.path;
+        try {
+          const wts: Worktree[] = await invoke("worktree_list", { repoRoot: root });
+          if (cancelled || !wts.length) continue;
+          const st = useStore.getState();
+          if (st.activeProjectId === p.id) st.setWorktrees(wts);
+          else st.setProjectWorktrees(p.id, wts);
+        } catch {
+          /* offline/locked: App's loader surfaces errors for the active project */
+        }
+        if (!cancelled) setListedRoots((r) => ({ ...r, [root]: true as const }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects.length, cacheKeys]);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [base, setBase] = useState("");
@@ -62,7 +95,7 @@ export function WorktreeSidebar() {
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string; projectId: string } | null>(null);
   const [pinned, setPinned] = useState<Record<string, true>>(() => {
     try {
       return JSON.parse(localStorage.getItem("guimux-pinned-worktrees") ?? "{}");
@@ -270,34 +303,52 @@ export function WorktreeSidebar() {
     }
   };
 
-  const remove = async (wt: Worktree) => {
+  // pid scopes the git call to the row's own project (other-project rows
+  // carry their projectId; active rows default to the current repo root).
+  const remove = async (wt: Worktree, pid?: string) => {
     if (!(await confirmDialog(`Remove worktree "${wt.branch}"? (branch will be deleted)`))) return;
+    const root = pid ? rootOf(pid) : repoRoot;
+    if (!root) return;
     try {
-      await invoke("worktree_remove", { repoRoot, id: wt.id, deleteBranch: !wt.is_main });
+      await invoke("worktree_remove", { repoRoot: root, id: wt.id, deleteBranch: !wt.is_main });
       // Orphaned shells no longer die on unmount, so reap them explicitly.
-      for (const pid of useStore.getState().dropWorktreeLayout(wt.id)) {
-        invoke("pty_kill", { id: pid }).catch(() => {});
+      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pty }).catch(() => {});
       }
-      await refreshList();
+      if (pid && pid !== useStore.getState().activeProjectId) {
+        await refreshProjectList(pid, root);
+      } else {
+        await refreshList();
+      }
     } catch (e) {
       void errorDialog(`remove failed: ${e}`);
     }
   };
 
-  const merge = async (wt: Worktree) => {
+  const merge = async (wt: Worktree, pid?: string) => {
     if (!(await confirmDialog(`Merge "${wt.branch}" into base branch?`))) return;
     try {
       await invoke("worktree_merge", { id: wt.id });
-      await refreshList();
+      const root = pid ? rootOf(pid) : repoRoot;
+      if (pid && root && pid !== useStore.getState().activeProjectId) {
+        await refreshProjectList(pid, root);
+      } else {
+        await refreshList();
+      }
     } catch (e) {
       void errorDialog(`merge failed: ${e}`);
     }
   };
 
-  const abortMerge = async (wt: Worktree) => {
+  const abortMerge = async (wt: Worktree, pid?: string) => {
     try {
       await invoke("worktree_merge_abort", { id: wt.id });
-      await refreshList();
+      const root = pid ? rootOf(pid) : repoRoot;
+      if (pid && root && pid !== useStore.getState().activeProjectId) {
+        await refreshProjectList(pid, root);
+      } else {
+        await refreshList();
+      }
     } catch (e) {
       void errorDialog(`abort failed: ${e}`);
     }
@@ -311,10 +362,32 @@ export function WorktreeSidebar() {
     }
   };
 
-  const openMenu = (e: React.MouseEvent, id: string) => {
+  const openMenu = (e: React.MouseEvent, id: string, projectId?: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setMenu({ x: e.clientX, y: e.clientY, id });
+    setMenu({ x: e.clientX, y: e.clientY, id, projectId: projectId ?? activeProjectId ?? "" });
+  };
+  // Other-project rows act on their own repo root, not the active one.
+  const rootOf = (pid: string) => {
+    const p = useStore.getState().projects.find((x) => x.id === pid);
+    return p && p.isGit ? (p.gitRoot ?? p.path) : null;
+  };
+  const refreshProjectList = async (pid: string, root: string) => {
+    try {
+      const wts: Worktree[] = await invoke("worktree_list", { repoRoot: root });
+      if (wts.length === 0) return;
+      const st = useStore.getState();
+      if (st.activeProjectId === pid) {
+        st.setWorktrees(wts);
+        if (!wts.find((w) => w.id === st.activeWorktreeId)) {
+          st.setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
+        }
+      } else {
+        st.setProjectWorktrees(pid, wts);
+      }
+    } catch {
+      /* active-project errors surface via App's loader; others stay quiet */
+    }
   };
 
   const activeWt = worktrees.find((w) => w.id === activeWorktreeId);
@@ -342,7 +415,18 @@ export function WorktreeSidebar() {
     .filter(matches)
     // Pinned worktrees stay at the top of the project.
     .sort((a, b) => Number(!!pinned[b.id]) - Number(!!pinned[a.id]));
-  const menuWt = menu ? worktrees.find((w) => w.id === menu.id) ?? null : null;
+  const menuWt = menu
+    ? worktrees.find((w) => w.id === menu.id)
+      ?? Object.values(worktreesByProject).flat().find((w) => w.id === menu.id)
+      ?? null
+    : null;
+  // Every other project, below the active one: project name, then its cached
+  // worktrees. Plain folders have no worktrees, so they show one shell row.
+  const otherProjects = projects.filter((p) => p.id !== activeProjectId);
+  const otherRows = (p: Project) => {
+    if (!p.isGit) return [{ id: `plain:${p.id}`, path: p.path, branch: p.name, is_main: true } as Worktree];
+    return worktreesByProject[p.id] ?? [];
+  };
 
   return (
     <div
@@ -496,6 +580,61 @@ export function WorktreeSidebar() {
               No worktrees match.
             </div>
           )}
+
+          {/* Other projects: their live sessions, one click away. Rows jump
+              straight to that project's worktree, no topbar picker needed. */}
+          {!q && otherProjects.map((p) => {
+            const rows = otherRows(p).filter(matches);
+            if (rows.length === 0) return null;
+            return (
+              <div key={p.id} className="mt-1">
+                <button
+                  className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
+                  data-active={false}
+                  onClick={() => useStore.getState().setActiveProject(p.id)}
+                  onKeyDown={rowKey(() => useStore.getState().setActiveProject(p.id))}
+                  title={`${p.path}\nSwitch to ${p.name}.`}
+                >
+                  <span className="truncate text-[12px] font-semibold text-ink-100">{p.name}</span>
+                  <span className="tnum text-[11px] text-ink-500">{rows.length}</span>
+                </button>
+                {rows.map((wt) => {
+                  const selected = wt.id === activeWorktreeId;
+                  const plainRow = wt.id.startsWith("plain:");
+                  return (
+                    <div
+                      key={wt.id}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selected}
+                      data-selected={selected}
+                      className="gm-row cursor-pointer px-2.5 py-2"
+                      style={selected ? { boxShadow: "inset 2px 0 0 var(--gm-ink-mute)" } : undefined}
+                      onClick={() => openProjectWorktree(p.id, wt.id)}
+                      onKeyDown={rowKey(() => openProjectWorktree(p.id, wt.id))}
+                      onContextMenu={(e) => openMenu(e, wt.id, p.id)}
+                      title={plainRow ? wt.path : `${wt.branch}\n${wt.path}\nRight-click for open, pin, copy, merge, remove.`}
+                    >
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink-200">
+                          {wt.branch}
+                          {!plainRow && wt.is_main && (
+                            <span className="font-normal text-ink-500"> · main</span>
+                          )}
+                          {pinned[wt.id] && (
+                            <span className="font-normal text-ink-500"> · pinned</span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="gm-meta mono mt-0.5 truncate" title={wt.path}>
+                        {shortPath(wt.path, wt.is_main)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
 
           {settled.length > 0 && (
             <div className="mt-1">
@@ -726,7 +865,12 @@ export function WorktreeSidebar() {
           <button
             className="gm-menu-item"
             onClick={() => {
-              setActiveWorktree(menuWt.id);
+              const st = useStore.getState();
+              if (menu.projectId && menu.projectId !== st.activeProjectId) {
+                st.openProjectWorktree(menu.projectId, menuWt.id);
+              } else {
+                st.setActiveWorktree(menuWt.id);
+              }
               setMenu(null);
             }}
             role="menuitem"
@@ -758,8 +902,9 @@ export function WorktreeSidebar() {
               <button
                 className="gm-menu-item"
                 onClick={() => {
+                  const pid = menu.projectId;
                   setMenu(null);
-                  merge(menuWt);
+                  merge(menuWt, pid);
                 }}
                 role="menuitem"
               >
@@ -768,8 +913,9 @@ export function WorktreeSidebar() {
               <button
                 className="gm-menu-item"
                 onClick={() => {
+                  const pid = menu.projectId;
                   setMenu(null);
-                  abortMerge(menuWt);
+                  abortMerge(menuWt, pid);
                 }}
                 role="menuitem"
               >
@@ -778,8 +924,9 @@ export function WorktreeSidebar() {
               <button
                 className="gm-menu-item"
                 onClick={() => {
+                  const pid = menu.projectId;
                   setMenu(null);
-                  remove(menuWt);
+                  remove(menuWt, pid);
                 }}
                 role="menuitem"
               >

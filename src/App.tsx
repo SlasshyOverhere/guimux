@@ -442,7 +442,7 @@ export default function App() {
         // seeded shell mounts at once; re-detect + loader correct it after.
         const seedWts = saved.worktrees ?? [];
         const seedActive = saved.activeWorktreeId ?? null;
-        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive });
+        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject });
         // Re-detect refreshes branch/gitRoot and drops deleted folders.
         const settled = await Promise.all(
           saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
@@ -474,10 +474,11 @@ export default function App() {
   }, []);
 
   const settings = useStore((s) => s.settings);
+  const worktreesByProject = useStore((s) => s.worktreesByProject);
   useEffect(() => {
     if (!hydrated) return;
-    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, settings });
-  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, settings]);
+    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings });
+  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings]);
 
   // App-wide zoom: CSS `zoom` on <html> scales all chrome (topbar, sidebar,
   // explorer, dialogs). Terminals refit through their ResizeObserver.
