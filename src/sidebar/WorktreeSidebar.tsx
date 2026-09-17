@@ -47,6 +47,7 @@ export function WorktreeSidebar() {
     repoRoot,
     worktrees,
     worktreesByProject,
+    layouts,
     activeWorktreeId,
     setActiveWorktree,
     openProjectWorktree,
@@ -409,12 +410,39 @@ export function WorktreeSidebar() {
   const baseOptions = (bq ? branches.filter((b) => b.toLowerCase().includes(bq)) : branches).slice(0, 40);
   const matches = (wt: Worktree) =>
     !q || wt.branch.toLowerCase().includes(q) || wt.path.toLowerCase().includes(q);
+  // Discovered rows are worktrees git knows that guimux never created: no
+  // layout (never opened as a session), no guimux/ branch, not main.
+  // Those hide behind a collapsed "show all discovered" toggle per project,
+  // so the list stays readable when git knows dozens of local worktrees.
+  const isDiscovered = (wt: Worktree) =>
+    !wt.is_main && !wt.id.startsWith("plain:") && !layouts[wt.id] && !wt.branch.startsWith("guimux/");
+  const [showAll, setShowAll] = useState<Record<string, true>>({});
+  const toggleShowAll = (pid: string) =>
+    setShowAll((s) => {
+      const next = { ...s };
+      if (next[pid]) delete next[pid];
+      else next[pid] = true as const;
+      return next;
+    });
+  const visibleRows = (rows: Worktree[], pid: string) => {
+    // Filtering searches everything, discovered included: a collapsed toggle
+    // must never hide a match. Idle view shows sessions + guimux branches.
+    if (q) return rows.filter(matches);
+    const open = !!showAll[pid];
+    return rows.filter((wt) => open || !isDiscovered(wt));
+  };
+  // Collapsed toggle label: discovered rows hidden in the idle view.
+  const hiddenCount = (rows: Worktree[], pid: string) =>
+    showAll[pid] || q ? 0 : rows.filter((wt) => isDiscovered(wt)).length;
   const settled = gitRows.filter(isStale).filter(matches);
   const live = gitRows
     .filter((wt) => !isStale(wt))
     .filter(matches)
     // Pinned worktrees stay at the top of the project.
     .sort((a, b) => Number(!!pinned[b.id]) - Number(!!pinned[a.id]));
+  const activePid = activeProjectId ?? "";
+  const shownLive = visibleRows(live, activePid);
+  const shownSettled = visibleRows(settled, activePid);
   const menuWt = menu
     ? worktrees.find((w) => w.id === menu.id)
       ?? Object.values(worktreesByProject).flat().find((w) => w.id === menu.id)
@@ -528,7 +556,7 @@ export function WorktreeSidebar() {
             </div>
           )}
 
-          {live.map((wt) => {
+          {shownLive.map((wt) => {
             const dirty = (statuses[wt.id] ?? []).length;
             const plainRow = wt.id.startsWith("plain:");
             const selected = wt.id === activeWorktreeId;
@@ -575,7 +603,26 @@ export function WorktreeSidebar() {
             );
           })}
 
-          {live.length === 0 && settled.length === 0 && q && (
+          {hiddenCount(gitRows, activePid) > 0 && (
+            <button
+              className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
+              data-active={false}
+              onClick={() => toggleShowAll(activePid)}
+              aria-expanded={!!showAll[activePid]}
+              title="Worktrees git knows that were never opened here"
+            >
+              <ChevronRight
+                size={12}
+                strokeWidth={2}
+                className={`shrink-0 transition-transform ${showAll[activePid] ? "rotate-90" : ""}`}
+              />
+              <span className="tnum">
+                {showAll[activePid] ? "Hide" : "Show"} {hiddenCount(gitRows, activePid)} discovered
+              </span>
+            </button>
+          )}
+
+          {shownLive.length === 0 && shownSettled.length === 0 && q && (
             <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">
               No worktrees match.
             </div>
@@ -584,8 +631,9 @@ export function WorktreeSidebar() {
           {/* Other projects: their live sessions, one click away. Rows jump
               straight to that project's worktree, no topbar picker needed. */}
           {!q && otherProjects.map((p) => {
-            const rows = otherRows(p).filter(matches);
-            if (rows.length === 0) return null;
+            const all = otherRows(p);
+            const rows = visibleRows(all, p.id);
+            if (all.length === 0) return null;
             return (
               <div key={p.id} className="mt-1">
                 <button
@@ -632,11 +680,29 @@ export function WorktreeSidebar() {
                     </div>
                   );
                 })}
+                {hiddenCount(all, p.id) > 0 && (
+                  <button
+                    className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
+                    data-active={false}
+                    onClick={() => toggleShowAll(p.id)}
+                    aria-expanded={!!showAll[p.id]}
+                    title="Worktrees git knows that were never opened here"
+                  >
+                    <ChevronRight
+                      size={12}
+                      strokeWidth={2}
+                      className={`shrink-0 transition-transform ${showAll[p.id] ? "rotate-90" : ""}`}
+                    />
+                    <span className="tnum">
+                      {showAll[p.id] ? "Hide" : "Show"} {hiddenCount(all, p.id)} discovered
+                    </span>
+                  </button>
+                )}
               </div>
             );
           })}
 
-          {settled.length > 0 && (
+          {shownSettled.length > 0 && (
             <div className="mt-1">
               <button
                 className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
@@ -651,11 +717,11 @@ export function WorktreeSidebar() {
                   className={`shrink-0 transition-transform ${settledOpen ? "rotate-90" : ""}`}
                 />
                 <span className="tnum">
-                  Sleeping · {settled.length}
+                  Sleeping · {shownSettled.length}
                 </span>
               </button>
               {settledOpen &&
-                settled.map((wt) => (
+                shownSettled.map((wt) => (
                   <div
                     key={wt.id}
                     role="button"
