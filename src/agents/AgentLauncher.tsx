@@ -157,7 +157,7 @@ export function AgentLauncher() {
           <div>
             <div className="text-[13px] font-semibold text-ink-100">Launch agents</div>
             <div className="gm-meta mt-0.5 text-[11.5px]">
-              Mix agents per launch. New tiles append, open work is kept.
+              Empty terminals are reused in place; busy ones split. Open work is kept.
             </div>
           </div>
           <button

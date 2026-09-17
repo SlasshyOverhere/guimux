@@ -169,12 +169,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const exitedRef = useRef(false);
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
-  const {
-    splitPane,
-    setActivePane,
-    setPtyId,
-    toggleMaximizePane,
-  } = useStore();
+  const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
   const maximized = useStore((s) => s.maximizedPaneId === paneId);
   const paneCount = useStore((s) => allPaneIds(s.layout).length);
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
@@ -282,6 +277,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const restart = async () => {
     const term = termRef.current;
     if (!term) return;
+    useStore.getState().markPaneClean(paneId);
     const sid = sessionRef.current;
     const dims = saneDims(term) ?? { cols: 80, rows: 24 };
     // Same-id restart keeps the existing listeners alive: the backend
@@ -315,7 +311,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // ^V lets PSReadLine/conhost paste from the system clipboard themselves.
   const sendRaw = (data: string) => {
     const sid = sessionRef.current;
-    if (sid != null && !exitedRef.current) invoke("pty_write", { id: sid, data }).catch(() => {});
+    if (sid != null && !exitedRef.current) {
+      useStore.getState().markPaneDirty(paneId);
+      invoke("pty_write", { id: sid, data }).catch(() => {});
+    }
   };
 
   const copySelection = () => {
@@ -618,6 +617,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       }
 
       term.onData((data) => {
+        useStore.getState().markPaneDirty(paneId);
         if (exitedRef.current) return;
         const sid = sessionRef.current;
         if (sid != null) {
@@ -674,6 +674,26 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId]); // ptyId tracked via sessionRef; prop changes handled explicitly
+
+  // Agent launch into an already-mounted clean pane: the mount path above
+  // only fires initCmd once, so a command assigned later (reuse, no split)
+  // is typed here. Fresh panes skip this (no session yet; mount handles it).
+  useEffect(() => {
+    if (!initCmd) return;
+    if (!termRef.current || sessionRef.current == null || exitedRef.current) return;
+    const cmdText = initCmd;
+    const t = setTimeout(() => {
+      const sid = sessionRef.current;
+      if (sid == null || exitedRef.current) return;
+      invoke("pty_write", { id: sid, data: `${cmdText}\r` })
+        .then(() => useStore.getState().clearInitCmd(paneId))
+        .catch(() => {
+          /* session died: keep initCmd for the next remount */
+        });
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initCmd]);
 
   // Pause rendering when hidden: dispose webgl, keep PTY alive.
   useEffect(() => {

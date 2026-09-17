@@ -12,6 +12,7 @@ export interface Pane {
   ptyId: number | null;
   cwd?: string | null; // last known shell cwd (OSC 7); splits inherit it
   initCmd?: string | null; // typed once into a freshly spawned shell (agent launch)
+  dirty?: boolean; // first user keystroke or agent assignment; clean = fresh shell, safe to reuse
 }
 
 export interface Split {
@@ -198,6 +199,8 @@ interface AppState {
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
   setPaneCwd: (paneId: string, cwd: string | null) => void;
+  markPaneDirty: (paneId: string) => void;
+  markPaneClean: (paneId: string) => void;
   clearInitCmd: (paneId: string) => void;
   setAgentOpen: (open: boolean) => void;
   toggleLeft: () => void;
@@ -508,32 +511,55 @@ export const useStore = create<AppState>((set, get) => ({
     const existing = cur ? collectPaneObjs(cur) : [];
     const room = Math.max(0, 12 - existing.length);
     if (room <= 0) return;
-    const panes: Pane[] = [];
+    const cmds: string[] = [];
     for (const item of items) {
       const cmd = item.command.trim();
       if (!cmd) continue;
       const n = Math.min(6, Math.max(1, Math.floor(item.count) || 1));
-      for (let i = 0; i < n; i++) panes.push({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd });
+      for (let i = 0; i < n; i++) cmds.push(cmd);
     }
-    if (panes.length === 0) return;
-    panes.length = Math.min(panes.length, room);
-    const fresh = tileAgents(panes);
-    // No live tiles yet: plain retile keeps the old single-pane behaviour.
-    if (existing.length <= 1 && existing.every((p) => p.ptyId == null && !p.initCmd)) {
-      const node = fresh;
+    if (cmds.length === 0) return;
+    // Clean panes (fresh shell: never typed into, no pending agent) are
+    // reused in place, so a launch into an empty terminal never splits.
+    const reusable = existing.filter((p) => !p.dirty && !p.initCmd);
+    const reuseCount = Math.min(reusable.length, cmds.length);
+    const reuseIds = new Set(reusable.slice(0, reuseCount).map((p) => p.id));
+    let cmdIdx = 0;
+    const assign = (node: PaneNode): PaneNode => {
+      if (node.kind === "pane") {
+        return reuseIds.has(node.id) ? { ...node, initCmd: cmds[cmdIdx++], dirty: true } : node;
+      }
+      return { ...node, first: assign(node.first), second: assign(node.second) };
+    };
+    const patched = cur ? assign(cur) : null;
+    const freshCmds = cmds.slice(reuseCount, reuseCount + room);
+    if (freshCmds.length === 0) {
+      // Everything fit into clean panes: no split at all.
+      if (!patched) return;
       set({
-        layout: node,
-        layouts: { ...layouts, [activeWorktreeId]: node },
-        activePaneId: panes[0].id,
+        layout: patched,
+        layouts: { ...layouts, [activeWorktreeId]: patched },
+        activePaneId: reusable[0].id,
         maximizedPaneId: null,
-            });
+      });
       return;
     }
-    const live: Pane[] = existing.length > 0 ? existing : [{ kind: "pane", id: nextId(), ptyId: null }];
+    const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
+    const fresh = tileAgents(panes);
+    if (!patched) {
+      set({
+        layout: fresh,
+        layouts: { ...layouts, [activeWorktreeId]: fresh },
+        activePaneId: panes[0].id,
+        maximizedPaneId: null,
+      });
+      return;
+    }
+    const live = collectPaneObjs(patched);
     const node: PaneNode = {
       kind: "split",
       id: nextId(),
-      direction: cur?.kind === "split" && cur.direction === "h" ? "v" : "h",
+      direction: patched.kind === "split" && patched.direction === "h" ? "v" : "h",
       ratio: Math.max(0.2, Math.min(0.8, live.length / (live.length + panes.length))),
       first: tileGrid(live),
       second: fresh,
@@ -541,10 +567,47 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       layout: node,
       layouts: { ...layouts, [activeWorktreeId]: node },
-      activePaneId: panes[0].id,
+      activePaneId: reuseCount > 0 ? reusable[0].id : panes[0].id,
       maximizedPaneId: null,
         });
   },
+  markPaneDirty: (paneId) => {
+    // Fires on every keystroke: skip the tree rebuild when already dirty so
+    // typing never re-renders the layout.
+    const cur = get().layout;
+    if (!cur || collectPaneObjs(cur).some((p) => p.id === paneId && p.dirty)) return;
+    set((s) => {
+      if (!s.layout) return {};
+      const patch = (node: PaneNode): PaneNode => {
+        if (node.kind === "pane") {
+          return node.id === paneId ? { ...node, dirty: true } : node;
+        }
+        return { ...node, first: patch(node.first), second: patch(node.second) };
+      };
+      const layout = patch(s.layout);
+      return {
+        layout,
+        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
+      };
+    });
+  },
+  markPaneClean: (paneId) =>
+    set((s) => {
+      if (!s.layout) return {};
+      const patch = (node: PaneNode): PaneNode => {
+        if (node.kind === "pane") {
+          // Fresh shell after restart: reusable. Keeps a queued initCmd so a
+          // held agent launch still fires instead of being dropped.
+          return node.id === paneId ? { ...node, dirty: false } : node;
+        }
+        return { ...node, first: patch(node.first), second: patch(node.second) };
+      };
+      const layout = patch(s.layout);
+      return {
+        layout,
+        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
+      };
+    }),
   clearInitCmd: (paneId) =>
     set((s) => {
       if (!s.layout) return {};
