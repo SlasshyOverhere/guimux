@@ -412,28 +412,82 @@ export function WorktreeSidebar() {
     !q || wt.branch.toLowerCase().includes(q) || wt.path.toLowerCase().includes(q);
   // Discovered rows are worktrees git knows that guimux never created: no
   // layout (never opened as a session), no guimux/ branch, not main.
-  // Those hide behind a collapsed "show all discovered" toggle per project,
-  // so the list stays readable when git knows dozens of local worktrees.
+  // Orca pattern: one collapsed line per project, "Hiding N discovered
+  // worktrees", expanding to a preview grouped by parent path. A persisted
+  // dismiss baseline keeps them hidden until new ones appear; the filter
+  // still searches everything, and opening a hidden row adopts it.
   const isDiscovered = (wt: Worktree) =>
     !wt.is_main && !wt.id.startsWith("plain:") && !layouts[wt.id] && !wt.branch.startsWith("guimux/");
   const [showAll, setShowAll] = useState<Record<string, true>>({});
-  const toggleShowAll = (pid: string) =>
-    setShowAll((s) => {
-      const next = { ...s };
-      if (next[pid]) delete next[pid];
-      else next[pid] = true as const;
-      return next;
-    });
+  const [disExpanded, setDisExpanded] = useState<Record<string, true>>({});
+  const [disGroups, setDisGroups] = useState<Record<string, true>>({});
+  const [disBaseline, setDisBaseline] = useState<Record<string, string[]>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("guimux-discovered-baseline") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  const saveBaseline = (next: Record<string, string[]>) => {
+    setDisBaseline(next);
+    try {
+      localStorage.setItem("guimux-discovered-baseline", JSON.stringify(next));
+    } catch {
+      /* private mode */
+    }
+  };
+  const parentPath = (p: string) => {
+    // Shared dirname: keeps case + Windows separators, never re-joins.
+    const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+    return i <= 0 ? p : p.slice(0, i);
+  };
+  const discoveredGroups = (rows: Worktree[]) => {
+    const groups: { path: string; rows: Worktree[] }[] = [];
+    const byPath = new Map<string, { path: string; rows: Worktree[] }>();
+    for (const wt of rows) {
+      const path = parentPath(wt.path);
+      const g = byPath.get(path.toLowerCase());
+      if (g) {
+        g.rows.push(wt);
+        continue;
+      }
+      const next = { path, rows: [wt] };
+      byPath.set(path.toLowerCase(), next);
+      groups.push(next);
+    }
+    return groups;
+  };
+  const delKey = (s: Record<string, true>, pid: string) => {
+    const next = { ...s };
+    delete next[pid];
+    return next;
+  };
+  const baseSet = (pid: string) => new Set(disBaseline[pid] ?? []);
+  // New since last dismiss: all the line counts and previews.
+  const freshDiscovered = (rows: Worktree[], pid: string) => {
+    const base = baseSet(pid);
+    return rows.filter((wt) => isDiscovered(wt) && !base.has(wt.id));
+  };
+  const dismissDiscovered = (pid: string, rows: Worktree[]) => {
+    const base = baseSet(pid);
+    for (const wt of rows) if (isDiscovered(wt)) base.add(wt.id);
+    saveBaseline({ ...disBaseline, [pid]: [...base] });
+    setDisExpanded((s) => delKey(s, pid));
+  };
+  const showDiscovered = (pid: string) => {
+    const next = { ...disBaseline };
+    delete next[pid];
+    saveBaseline(next);
+    setShowAll((s) => ({ ...s, [pid]: true as const }));
+    setDisExpanded((s) => delKey(s, pid));
+  };
   const visibleRows = (rows: Worktree[], pid: string) => {
-    // Filtering searches everything, discovered included: a collapsed toggle
+    // Filtering searches everything, discovered included: a collapsed line
     // must never hide a match. Idle view shows sessions + guimux branches.
     if (q) return rows.filter(matches);
-    const open = !!showAll[pid];
-    return rows.filter((wt) => open || !isDiscovered(wt));
+    if (showAll[pid]) return rows;
+    return rows.filter((wt) => !isDiscovered(wt));
   };
-  // Collapsed toggle label: discovered rows hidden in the idle view.
-  const hiddenCount = (rows: Worktree[], pid: string) =>
-    showAll[pid] || q ? 0 : rows.filter((wt) => isDiscovered(wt)).length;
   const settled = gitRows.filter(isStale).filter(matches);
   const live = gitRows
     .filter((wt) => !isStale(wt))
@@ -603,24 +657,104 @@ export function WorktreeSidebar() {
             );
           })}
 
-          {hiddenCount(gitRows, activePid) > 0 && (
-            <button
-              className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
-              data-active={false}
-              onClick={() => toggleShowAll(activePid)}
-              aria-expanded={!!showAll[activePid]}
-              title="Worktrees git knows that were never opened here"
-            >
-              <ChevronRight
-                size={12}
-                strokeWidth={2}
-                className={`shrink-0 transition-transform ${showAll[activePid] ? "rotate-90" : ""}`}
-              />
-              <span className="tnum">
-                {showAll[activePid] ? "Hide" : "Show"} {hiddenCount(gitRows, activePid)} discovered
-              </span>
-            </button>
-          )}
+          {(() => {
+            const fresh = freshDiscovered(gitRows, activePid);
+            if (fresh.length === 0 || q) return null;
+            const expanded = !!disExpanded[activePid];
+            const noun = fresh.length === 1 ? "worktree" : "worktrees";
+            const groups = discoveredGroups(fresh).slice(0, 5);
+            const extra = Math.max(0, discoveredGroups(fresh).length - groups.length);
+            return (
+              <div className="mt-0.5 px-2.5 py-1">
+                <div className="flex items-center gap-1">
+                  <button
+                    className="gm-tab flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
+                    data-active={false}
+                    onClick={() => setDisExpanded((s) => (expanded ? delKey(s, activePid) : { ...s, [activePid]: true as const }))}
+                    aria-expanded={expanded}
+                    aria-label={`${expanded ? "Collapse" : "Expand"} ${fresh.length} discovered ${noun}`}
+                    title="Worktrees git knows that were never opened here"
+                  >
+                    <ChevronRight
+                      size={12}
+                      strokeWidth={2}
+                      className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+                    />
+                    <span className="tnum truncate">
+                      Hiding {fresh.length} discovered {noun}
+                    </span>
+                  </button>
+                  <button
+                    className="shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
+                    onClick={() => dismissDiscovered(activePid, gitRows)}
+                    title="Keep hidden"
+                    aria-label={`Keep ${fresh.length} discovered ${noun} hidden`}
+                  >
+                    <X size={12} strokeWidth={2} />
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="mt-1">
+                    {groups.map((g) => {
+                      const gkey = `${activePid}::${g.path.toLowerCase()}`;
+                      const gopen = !!disGroups[gkey];
+                      const shown = gopen ? g.rows : g.rows.slice(0, 3);
+                      return (
+                        <div key={gkey} className="mt-1">
+                          <div className="gm-meta mono truncate" title={g.path}>
+                            {g.path} · {g.rows.length}
+                          </div>
+                          {shown.map((wt) => (
+                            <div
+                              key={wt.id}
+                              role="button"
+                              tabIndex={0}
+                              className="gm-row cursor-pointer px-2 py-1.5"
+                              onClick={() => setActiveWorktree(wt.id)}
+                              onKeyDown={rowKey(() => setActiveWorktree(wt.id))}
+                              onContextMenu={(e) => openMenu(e, wt.id)}
+                              title={`${wt.branch}\n${wt.path}`}
+                            >
+                              <div className="truncate text-[12px] font-medium text-ink-300">
+                                {wt.branch}
+                              </div>
+                            </div>
+                          ))}
+                          {g.rows.length > 3 && (
+                            <button
+                              className="gm-tab px-2 py-1"
+                              data-active={false}
+                              onClick={() => setDisGroups((s) => (gopen ? delKey(s, gkey) : { ...s, [gkey]: true as const }))}
+                            >
+                              {gopen ? "Show fewer" : `Show ${g.rows.length - 3} more`}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {extra > 0 && (
+                      <div className="gm-meta px-2 py-1">+ {extra} more locations</div>
+                    )}
+                    <div className="mt-1 flex items-center gap-2 px-2 py-1">
+                      <button
+                        className="font-semibold text-ink-100 hover:underline text-[12px]"
+                        onClick={() => showDiscovered(activePid)}
+                      >
+                        Show in worktree list
+                      </button>
+                      <button
+                        className="text-ink-400 hover:text-ink-200 text-[12px]"
+                        onClick={() => dismissDiscovered(activePid, gitRows)}
+                      >
+                        Keep hidden
+                      </button>
+                    </div>
+                    <div className="gm-meta px-2 pb-1">Change this later from the project menu.</div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {shownLive.length === 0 && shownSettled.length === 0 && q && (
             <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">
@@ -680,24 +814,104 @@ export function WorktreeSidebar() {
                     </div>
                   );
                 })}
-                {hiddenCount(all, p.id) > 0 && (
-                  <button
-                    className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
-                    data-active={false}
-                    onClick={() => toggleShowAll(p.id)}
-                    aria-expanded={!!showAll[p.id]}
-                    title="Worktrees git knows that were never opened here"
-                  >
-                    <ChevronRight
-                      size={12}
-                      strokeWidth={2}
-                      className={`shrink-0 transition-transform ${showAll[p.id] ? "rotate-90" : ""}`}
-                    />
-                    <span className="tnum">
-                      {showAll[p.id] ? "Hide" : "Show"} {hiddenCount(all, p.id)} discovered
-                    </span>
-                  </button>
-                )}
+                {(() => {
+                  const fresh = freshDiscovered(all, p.id);
+                  if (fresh.length === 0) return null;
+                  const expanded = !!disExpanded[p.id];
+                  const noun = fresh.length === 1 ? "worktree" : "worktrees";
+                  const groups = discoveredGroups(fresh).slice(0, 5);
+                  const extra = Math.max(0, discoveredGroups(fresh).length - groups.length);
+                  return (
+                    <div className="mt-0.5 px-2.5 py-1">
+                      <div className="flex items-center gap-1">
+                        <button
+                          className="gm-tab flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left"
+                          data-active={false}
+                          onClick={() => setDisExpanded((s) => (expanded ? delKey(s, p.id) : { ...s, [p.id]: true as const }))}
+                          aria-expanded={expanded}
+                          aria-label={`${expanded ? "Collapse" : "Expand"} ${fresh.length} discovered ${noun}`}
+                          title="Worktrees git knows that were never opened here"
+                        >
+                          <ChevronRight
+                            size={12}
+                            strokeWidth={2}
+                            className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+                          />
+                          <span className="tnum truncate">
+                            Hiding {fresh.length} discovered {noun}
+                          </span>
+                        </button>
+                        <button
+                          className="shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
+                          onClick={() => dismissDiscovered(p.id, all)}
+                          title="Keep hidden"
+                          aria-label={`Keep ${fresh.length} discovered ${noun} hidden`}
+                        >
+                          <X size={12} strokeWidth={2} />
+                        </button>
+                      </div>
+                      {expanded && (
+                        <div className="mt-1">
+                          {groups.map((g) => {
+                            const gkey = `${p.id}::${g.path.toLowerCase()}`;
+                            const gopen = !!disGroups[gkey];
+                            const shown = gopen ? g.rows : g.rows.slice(0, 3);
+                            return (
+                              <div key={gkey} className="mt-1">
+                                <div className="gm-meta mono truncate" title={g.path}>
+                                  {g.path} · {g.rows.length}
+                                </div>
+                                {shown.map((wt) => (
+                                  <div
+                                    key={wt.id}
+                                    role="button"
+                                    tabIndex={0}
+                                    className="gm-row cursor-pointer px-2 py-1.5"
+                                    onClick={() => openProjectWorktree(p.id, wt.id)}
+                                    onKeyDown={rowKey(() => openProjectWorktree(p.id, wt.id))}
+                                    onContextMenu={(e) => openMenu(e, wt.id, p.id)}
+                                    title={`${wt.branch}\n${wt.path}`}
+                                  >
+                                    <div className="truncate text-[12px] font-medium text-ink-300">
+                                      {wt.branch}
+                                    </div>
+                                  </div>
+                                ))}
+                                {g.rows.length > 3 && (
+                                  <button
+                                    className="gm-tab px-2 py-1"
+                                    data-active={false}
+                                    onClick={() => setDisGroups((s) => (gopen ? delKey(s, gkey) : { ...s, [gkey]: true as const }))}
+                                  >
+                                    {gopen ? "Show fewer" : `Show ${g.rows.length - 3} more`}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {extra > 0 && (
+                            <div className="gm-meta px-2 py-1">+ {extra} more locations</div>
+                          )}
+                          <div className="mt-1 flex items-center gap-2 px-2 py-1">
+                            <button
+                              className="font-semibold text-ink-100 hover:underline text-[12px]"
+                              onClick={() => showDiscovered(p.id)}
+                            >
+                              Show in worktree list
+                            </button>
+                            <button
+                              className="text-ink-400 hover:text-ink-200 text-[12px]"
+                              onClick={() => dismissDiscovered(p.id, all)}
+                            >
+                              Keep hidden
+                            </button>
+                          </div>
+                          <div className="gm-meta px-2 pb-1">Change this later from the project menu.</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
@@ -923,7 +1137,7 @@ export function WorktreeSidebar() {
           className="gm-menu tnum fixed z-50 w-48"
           style={{
             left: Math.min(menu.x, window.innerWidth - 200),
-            top: Math.min(menu.y, window.innerHeight - 220),
+            top: Math.min(menu.y, window.innerHeight - 260),
           }}
           onClick={(e) => e.stopPropagation()}
           role="menu"
