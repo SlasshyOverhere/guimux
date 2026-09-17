@@ -180,6 +180,17 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
+  const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
+  // only forward when cols/rows actually changed.
+  const maybeResize = (dims: { cols: number; rows: number } | null) => {
+    if (!dims) return;
+    const last = lastDimsRef.current;
+    if (last && last.cols === dims.cols && last.rows === dims.rows) return;
+    lastDimsRef.current = dims;
+    const sid = sessionRef.current;
+    if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+  };
   const snoopTailRef = useRef("");
   const snoopLiveCwd = (bytes: Uint8Array) => {
     let text: string;
@@ -369,10 +380,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
-    const dims = fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term);
-    if (!dims) return; // unmeasured container: never send 0-size
-    const sid = sessionRef.current;
-    if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+    maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term));
   }, [fontSize]);
 
   // Ctrl+wheel / Ctrl+= / Ctrl+- zooms this pane; Ctrl+0 resets.
@@ -436,10 +444,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       drawBoldTextInBrightColors: true,
       minimumContrastRatio: 4.5,
       macOptionClickForcesSelection: true,
-      // Transparent: the tile div owns the surface (canvas vs panel) so
-      // active/inactive reads without a window-inside-window seam.
+      // Opaque: WebGL + transparent background flickers (compositor
+      // blends every frame). Tile div is the same #000000, so no seam.
       theme: {
-        background: "rgba(0,0,0,0)",
+        background: "#000000",
         foreground: "#e5e5e5",
         cursor: "#e5e5e5",
         cursorAccent: "#171717",
@@ -464,9 +472,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         brightWhite: "#ffffff",
       },
       allowProposedApi: true,
-      // Required for theme background rgba(0,0,0,0): without it WebGL
-      // ignores the alpha channel and paints opaque black over the tile.
-      allowTransparency: true,
+      // Opaque background: no alpha blending, no per-frame composite.
+      allowTransparency: false,
     });
     const fit = new FitAddon();
     // Unicode 11 width tables BEFORE any
@@ -621,10 +628,12 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     const ro = new ResizeObserver(() => {
       if (!visible) return;
-      const dims = fitKeepViewport(term, fit);
-      if (!dims) return; // hidden/unmeasured: never send 0-size
-      const sid = sessionRef.current;
-      if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+      // One fit+resize per frame tops: the observer can fire multiple times
+      // per layout change, and fit() itself mutates layout (echo loop).
+      requestAnimationFrame(() => {
+        if (!alive || !visible) return;
+        maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : null);
+      });
     });
     ro.observe(hostRef.current);
 
@@ -672,7 +681,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     if (!term) return;
     if (visible) {
       try {
-        fitRef.current && fitKeepViewport(term, fitRef.current);
+        maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : null);
       } catch {
         /* noop */
       }
