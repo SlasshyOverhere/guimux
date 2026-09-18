@@ -527,11 +527,22 @@ export const useStore = create<AppState>((set, get) => ({
     // that are dirty from a previous launch or a remount. Live check first:
     // unmounted panes (switching worktrees) have no buffer yet, so they fall
     // back to the dirty flag instead of scanning a stale/empty registry.
+    // eslint-disable-next-line no-console
+    console.log(`[gm-launch-debug] launchAgents cmds=${cmds.length} panes=${existing.length} liveTerms checked below`);
     const reusable = existing.filter((p) => {
-      if (p.initCmd || p.dirty) return false;
+      if (p.initCmd || p.dirty) {
+        // eslint-disable-next-line no-console
+        console.log(`[gm-launch-debug] pane=${p.id} skipped by flags initCmd=${p.initCmd} dirty=${p.dirty}`);
+        return false;
+      }
       const e = paneEmptiness(p.id);
-      return e.live ? e.empty : true;
+      const ok = e.live ? e.empty : true;
+      // eslint-disable-next-line no-console
+      console.log(`[gm-launch-debug] pane=${p.id} verdict reusable=${ok}`);
+      return ok;
     });
+    // eslint-disable-next-line no-console
+    console.log(`[gm-launch-debug] reusable=${reusable.length}/${existing.length} => ${reusable.length > 0 ? "REUSE in place" : "SPLIT"}`);
     const reuseCount = Math.min(reusable.length, cmds.length);
     const reuseIds = new Set(reusable.slice(0, reuseCount).map((p) => p.id));
     let cmdIdx = 0;
