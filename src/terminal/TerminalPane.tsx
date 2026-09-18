@@ -452,14 +452,19 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = new Terminal({
       scrollback,
       fontSize,
-      // Line height 1: TUIs assume compact cells.
-      lineHeight: 1,
-      // Ubuntu Mono forced: self-hosted via fontsource, no OS lookup miss.
-      fontFamily: '"Ubuntu Mono", "Cascadia Mono", Consolas, "DejaVu Sans Mono", Menlo, Monaco, ui-monospace, SFMono-Regular, "Symbols Nerd Font Mono", monospace',
+      // 1.2 like Windows Terminal: 1.0 leaves zero leading so ascenders
+      // and descenders touch/clip on neighboring rows (the cramped look).
+      lineHeight: 1.2,
+      // Cascadia Mono first: native on Windows, drawn for ConPTY box/powerline
+      // glyphs at the same advance so TUIs stay aligned; JetBrains next.
+      fontFamily: '"Cascadia Mono", "JetBrains Mono", "Ubuntu Mono", Consolas, "DejaVu Sans Mono", Menlo, Monaco, ui-monospace, SFMono-Regular, "Symbols Nerd Font Mono", monospace',
+      letterSpacing: 0,
       cursorBlink: true,
       cursorStyle: "block",
       drawBoldTextInBrightColors: true,
-      minimumContrastRatio: 4.5,
+      // 1 (off): 4.5 recolors dim TUI grays to pass contrast, washing out
+      // palettes that native terminals pass through untouched.
+      minimumContrastRatio: 1,
       macOptionClickForcesSelection: true,
       // Opaque: WebGL + transparent background flickers (compositor
       // blends every frame). Tile div is the same #000000, so no seam.

@@ -229,10 +229,17 @@ textarea,
   background: var(--gm-pressed);
 }
 
-/* xterm tuning */
+/* xterm tuning: fixed cell grid, so no kerning/ligatures/legibility
+   shaping that shuffles monospace advances (the "weird font" look).
+   Body sets Inter stylistic sets + antialiased smoothing: reset all of it
+   here or the terminal inherits proportional shaping. */
 .xterm {
   padding: 8px 8px 8px 12px;
-  font-feature-settings: "calt", "kern";
+  font-kerning: none;
+  font-feature-settings: normal;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+  -webkit-font-smoothing: auto;
 }
 .xterm .xterm-viewport {
   background-color: transparent !important;
