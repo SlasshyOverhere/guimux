@@ -22,13 +22,23 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://github.com https://*.githubusercontent.com https://objects.githubusercontent.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"],
     "resources": ["assets/conpty/conpty.dll", "assets/conpty/OpenConsole.exe"]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJGRkNBNjFBMDkwRUFBQzkKUldUSnFnNEpHcWI4TDhlazAvendNN3Bkcit2bUJYOEtnNElNQlROZ2pNcGZqaTZ3ZkptejM2VU4K",
+      "endpoints": ["https://github.com/SlasshyOverhere/guimux/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

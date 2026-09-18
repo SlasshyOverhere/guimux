@@ -46,6 +46,7 @@ export interface Settings {
   editorFontSize: number;
   scrollback: number;
   uiZoom: number;
+  autoCheckForUpdates: boolean;
   agents: AgentDef[];
 }
 
@@ -54,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontSize: 13,
   scrollback: 10_000,
   uiZoom: 1,
+  autoCheckForUpdates: true,
   agents: [
     { id: "claude", name: "Claude", command: "claude", flags: "" },
     { id: "codex", name: "Codex", command: "codex", flags: "" },

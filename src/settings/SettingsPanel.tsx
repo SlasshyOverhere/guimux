@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { X } from "lucide-react";
 import { useStore } from "../store";
 import { DEFAULT_SETTINGS } from "../types";
+import { UpdatesSection } from "./UpdatesSection";
 
 function Row({
   label,
@@ -202,6 +203,7 @@ export function SettingsPanel() {
             )}
           </div>
         </div>
+        <UpdatesSection />
 
         <div className="flex items-center justify-between px-4 py-3">
           <button
