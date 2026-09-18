@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell } from "../dragFile";
+import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -309,6 +310,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   // Raw fallback when the Web Clipboard API is denied (focus/permission):
   // ^V lets PSReadLine/conhost paste from the system clipboard themselves.
+  // Bypasses xterm (no onData), so mark dirty here too. Kept next to the
+  // main onData marker so both write paths stay in sync.
   const sendRaw = (data: string) => {
     const sid = sessionRef.current;
     if (sid != null && !exitedRef.current) {
@@ -490,6 +493,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
+    registerLiveTerm(paneId, term);
     // Single paste path: xterm natively sends `paste` DOM events to the PTY
     // (handlePasteEvent → triggerDataEvent → onData), while our Ctrl+V /
     // right-click path ALSO sends via term.paste() → every paste lands twice.
@@ -531,13 +535,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
-    // break the mount or suppress the live prompt).
+    // break the mount or suppress the live prompt). Restored history counts
+    // as prior work: agent launches split rather than reuse this pane.
     try {
       const saved = readScrollback(paneId);
       if (saved) {
         const ser = new SerializeAddon();
         term.loadAddon(ser);
         term.write(saved);
+        useStore.getState().markPaneDirty(paneId);
       }
     } catch {
       /* fall through to live shell */
@@ -639,6 +645,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     return () => {
       alive = false;
+      unregisterLiveTerm(paneId);
       ro.disconnect();
       hostRef.current?.removeEventListener("paste", killNativePaste, true);
       for (const un of unlisteners.current) un();
