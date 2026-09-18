@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell } from "../dragFile";
+import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -169,17 +170,23 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const exitedRef = useRef(false);
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
-  const {
-    splitPane,
-    setActivePane,
-    setPtyId,
-    toggleMaximizePane,
-  } = useStore();
+  const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
   const maximized = useStore((s) => s.maximizedPaneId === paneId);
   const paneCount = useStore((s) => allPaneIds(s.layout).length);
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
+  const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
+  // only forward when cols/rows actually changed.
+  const maybeResize = (dims: { cols: number; rows: number } | null) => {
+    if (!dims) return;
+    const last = lastDimsRef.current;
+    if (last && last.cols === dims.cols && last.rows === dims.rows) return;
+    lastDimsRef.current = dims;
+    const sid = sessionRef.current;
+    if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+  };
   const snoopTailRef = useRef("");
   const snoopLiveCwd = (bytes: Uint8Array) => {
     let text: string;
@@ -206,6 +213,21 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     exitedRef.current = true;
     setExited(true);
   };
+
+  // Listeners first, THEN pty_attach: the backend buffers everything since
+  // spawn and replays it, so the spawn→listen window drops nothing.
+  // Paste is the only input path that bypasses onData (native `paste` DOM
+  // event -> xterm handles it internally). Mark dirty there; typed keys and
+  // drops go through onData below. ponytail: keystrokes alone never decide
+  // reuse — the launch-time buffer scan does — so a stray mark here only
+  // costs a split, never work.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onPasteCapture = () => useStore.getState().markPaneDirty(paneId);
+    el.addEventListener("paste", onPasteCapture, true);
+    return () => el.removeEventListener("paste", onPasteCapture, true);
+  }, [paneId]);
 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
@@ -271,6 +293,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const restart = async () => {
     const term = termRef.current;
     if (!term) return;
+    useStore.getState().markPaneClean(paneId);
     const sid = sessionRef.current;
     const dims = saneDims(term) ?? { cols: 80, rows: 24 };
     // Same-id restart keeps the existing listeners alive: the backend
@@ -302,9 +325,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   // Raw fallback when the Web Clipboard API is denied (focus/permission):
   // ^V lets PSReadLine/conhost paste from the system clipboard themselves.
+  // Bypasses xterm (no onData), so mark dirty here too. Kept next to the
+  // main onData marker so both write paths stay in sync.
   const sendRaw = (data: string) => {
     const sid = sessionRef.current;
-    if (sid != null && !exitedRef.current) invoke("pty_write", { id: sid, data }).catch(() => {});
+    if (sid != null && !exitedRef.current) {
+      useStore.getState().markPaneDirty(paneId);
+      invoke("pty_write", { id: sid, data }).catch(() => {});
+    }
   };
 
   const copySelection = () => {
@@ -369,10 +397,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
-    const dims = fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term);
-    if (!dims) return; // unmeasured container: never send 0-size
-    const sid = sessionRef.current;
-    if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+    maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term));
   }, [fontSize]);
 
   // Ctrl+wheel / Ctrl+= / Ctrl+- zooms this pane; Ctrl+0 resets.
@@ -427,18 +452,24 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = new Terminal({
       scrollback,
       fontSize,
-      // Line height 1: TUIs assume compact cells.
-      lineHeight: 1,
-      // Ubuntu Mono forced: self-hosted via fontsource, no OS lookup miss.
-      fontFamily: '"Ubuntu Mono", "Cascadia Mono", Consolas, "DejaVu Sans Mono", Menlo, Monaco, ui-monospace, SFMono-Regular, "Symbols Nerd Font Mono", monospace',
+      // 1.2 like Windows Terminal: 1.0 leaves zero leading so ascenders
+      // and descenders touch/clip on neighboring rows (the cramped look).
+      lineHeight: 1.2,
+      // Cascadia Mono first: native on Windows, drawn for ConPTY box/powerline
+      // glyphs at the same advance so TUIs stay aligned; JetBrains next.
+      fontFamily: '"Cascadia Mono", "JetBrains Mono", "Ubuntu Mono", Consolas, "DejaVu Sans Mono", Menlo, Monaco, ui-monospace, SFMono-Regular, "Symbols Nerd Font Mono", monospace',
+      letterSpacing: 0,
       cursorBlink: true,
       cursorStyle: "block",
       drawBoldTextInBrightColors: true,
+      // 1 (off): 4.5 recolors dim TUI grays to pass contrast, washing out
+      // palettes that native terminals pass through untouched.
+      minimumContrastRatio: 1,
       macOptionClickForcesSelection: true,
-      // Transparent: the tile div owns the surface (canvas vs panel) so
-      // active/inactive reads without a window-inside-window seam.
+      // Opaque: WebGL + transparent background flickers (compositor
+      // blends every frame). Tile div is the same #000000, so no seam.
       theme: {
-        background: "rgba(0,0,0,0)",
+        background: "#000000",
         foreground: "#e5e5e5",
         cursor: "#e5e5e5",
         cursorAccent: "#171717",
@@ -463,6 +494,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         brightWhite: "#ffffff",
       },
       allowProposedApi: true,
+      // Opaque background: no alpha blending, no per-frame composite.
+      allowTransparency: false,
     });
     const fit = new FitAddon();
     // Unicode 11 width tables BEFORE any
@@ -480,6 +513,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     termRef.current = term;
     fitRef.current = fit;
     term.open(hostRef.current);
+    registerLiveTerm(paneId, term);
     // Single paste path: xterm natively sends `paste` DOM events to the PTY
     // (handlePasteEvent → triggerDataEvent → onData), while our Ctrl+V /
     // right-click path ALSO sends via term.paste() → every paste lands twice.
@@ -521,7 +555,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
-    // break the mount or suppress the live prompt).
+    // break the mount or suppress the live prompt). Never marks dirty here:
+    // remounts (worktree switch, HMR) restore on every return, and the live
+    // buffer scan already vetoes panes whose history is real output.
     try {
       const saved = readScrollback(paneId);
       if (saved) {
@@ -607,6 +643,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       }
 
       term.onData((data) => {
+        useStore.getState().markPaneDirty(paneId);
         if (exitedRef.current) return;
         const sid = sessionRef.current;
         if (sid != null) {
@@ -617,15 +654,18 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     const ro = new ResizeObserver(() => {
       if (!visible) return;
-      const dims = fitKeepViewport(term, fit);
-      if (!dims) return; // hidden/unmeasured: never send 0-size
-      const sid = sessionRef.current;
-      if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+      // One fit+resize per frame tops: the observer can fire multiple times
+      // per layout change, and fit() itself mutates layout (echo loop).
+      requestAnimationFrame(() => {
+        if (!alive || !visible) return;
+        maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : null);
+      });
     });
     ro.observe(hostRef.current);
 
     return () => {
       alive = false;
+      unregisterLiveTerm(paneId);
       ro.disconnect();
       hostRef.current?.removeEventListener("paste", killNativePaste, true);
       for (const un of unlisteners.current) un();
@@ -662,13 +702,33 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paneId]); // ptyId tracked via sessionRef; prop changes handled explicitly
 
+  // Agent launch into an already-mounted clean pane: the mount path above
+  // only fires initCmd once, so a command assigned later (reuse, no split)
+  // is typed here. Fresh panes skip this (no session yet; mount handles it).
+  useEffect(() => {
+    if (!initCmd) return;
+    if (!termRef.current || sessionRef.current == null || exitedRef.current) return;
+    const cmdText = initCmd;
+    const t = setTimeout(() => {
+      const sid = sessionRef.current;
+      if (sid == null || exitedRef.current) return;
+      invoke("pty_write", { id: sid, data: `${cmdText}\r` })
+        .then(() => useStore.getState().clearInitCmd(paneId))
+        .catch(() => {
+          /* session died: keep initCmd for the next remount */
+        });
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initCmd]);
+
   // Pause rendering when hidden: dispose webgl, keep PTY alive.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
     if (visible) {
       try {
-        fitRef.current && fitKeepViewport(term, fitRef.current);
+        maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : null);
       } catch {
         /* noop */
       }

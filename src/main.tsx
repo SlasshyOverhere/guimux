@@ -5,10 +5,15 @@ import "@fontsource/inter/latin-400.css";
 import "@fontsource/inter/latin-500.css";
 import "@fontsource/inter/latin-600.css";
 import "@fontsource/inter/latin-700.css";
-import "@fontsource/jetbrains-mono/latin-400.css";
-import "@fontsource/jetbrains-mono/latin-500.css";
-import "@fontsource/ubuntu-mono/latin-400.css";
-import "@fontsource/ubuntu-mono/latin-700.css";
+// Full mono subsets (not latin-only): TUI box-drawing/block glyphs live
+// outside latin's unicode-range; latin-only leaves them to a mismatched
+// system fallback at a different advance (gappy borders/logos). Inter stays
+// latin-only: UI text never needs those glyphs.
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/700.css";
+import "@fontsource/ubuntu-mono/400.css";
+import "@fontsource/ubuntu-mono/700.css";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";

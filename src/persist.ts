@@ -8,6 +8,7 @@ export interface PersistedState {
   // shell mounts before git finishes. Revalidated in background.
   worktrees?: Worktree[];
   activeWorktreeId?: string | null;
+  worktreesByProject?: Record<string, Worktree[]>;
   settings?: Settings;
 }
 
@@ -88,7 +89,17 @@ function sanitize(s: PersistedState | null | undefined): PersistedState | null {
   const wtIds = worktrees ? new Set(worktrees.map((w) => w.id)) : null;
   const activeWorktreeId =
     s.activeWorktreeId && wtIds?.has(s.activeWorktreeId) ? s.activeWorktreeId : undefined;
-  return { projects, activeProjectId, worktrees, activeWorktreeId, settings: cleanSettings(s.settings) };
+  let worktreesByProject: Record<string, Worktree[]> | undefined;
+  if (s.worktreesByProject && typeof s.worktreesByProject === "object") {
+    worktreesByProject = {};
+    for (const [pid, list] of Object.entries(s.worktreesByProject)) {
+      if (!ids.has(pid)) continue;
+      const clean = sanitizeWorktrees(list);
+      if (clean) worktreesByProject[pid] = clean;
+    }
+    if (Object.keys(worktreesByProject).length === 0) worktreesByProject = undefined;
+  }
+  return { projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings: cleanSettings(s.settings) };
 }
 
 export async function loadPersisted(): Promise<PersistedState | null> {

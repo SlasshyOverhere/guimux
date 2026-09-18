@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { paneEmptiness } from "./terminal/paneEmpty";
 import type { Project, Worktree } from "./types";
 import { DEFAULT_SETTINGS, type Settings } from "./types";
 
@@ -12,6 +13,7 @@ export interface Pane {
   ptyId: number | null;
   cwd?: string | null; // last known shell cwd (OSC 7); splits inherit it
   initCmd?: string | null; // typed once into a freshly spawned shell (agent launch)
+  dirty?: boolean; // first user keystroke or agent assignment; clean = fresh shell, safe to reuse
 }
 
 export interface Split {
@@ -148,7 +150,8 @@ interface AppState {
 
   // worktrees (per git project; empty for plain folders)
   repoRoot: string | null;
-  worktrees: Worktree[];
+  worktrees: Worktree[]; // active project's list; the mirror below keeps every visited project
+  worktreesByProject: Record<string, Worktree[]>;
   activeWorktreeId: string | null;
   worktreeLoading: boolean;
 
@@ -176,14 +179,17 @@ interface AppState {
   settingsOpen: boolean;
 
   // actions
-  hydrate: (projects: Project[], activeProjectId: string | null, seed?: { worktrees: Worktree[]; activeWorktreeId: string | null }) => void;
+  hydrate: (projects: Project[], activeProjectId: string | null, seed?: { worktrees: Worktree[]; activeWorktreeId: string | null; worktreesByProject?: Record<string, Worktree[]> }) => void;
   addProject: (p: Project) => void;
   updateProject: (id: string, patch: Partial<Project>) => void;
   removeProject: (id: string) => void;
   setActiveProject: (id: string) => void;
   setRepoRoot: (root: string) => void;
   setWorktrees: (wts: Worktree[]) => void;
+  setProjectWorktrees: (projectId: string, wts: Worktree[]) => void;
   setActiveWorktree: (id: string) => void;
+  // Jump to any project's worktree in one step (sidebar lists every project).
+  openProjectWorktree: (projectId: string, worktreeId: string) => void;
   setLayout: (worktreeId: string, node: PaneNode) => void;
   setSplitRatio: (worktreeId: string, splitId: string, ratio: number) => void;
   splitPane: (paneId: string, direction: "h" | "v") => void;
@@ -194,6 +200,8 @@ interface AppState {
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
   setPaneCwd: (paneId: string, cwd: string | null) => void;
+  markPaneDirty: (paneId: string) => void;
+  markPaneClean: (paneId: string) => void;
   clearInitCmd: (paneId: string) => void;
   setAgentOpen: (open: boolean) => void;
   toggleLeft: () => void;
@@ -214,6 +222,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   repoRoot: null,
   worktrees: [],
+  worktreesByProject: {},
   activeWorktreeId: null,
   worktreeLoading: false,
 
@@ -246,15 +255,30 @@ export const useStore = create<AppState>((set, get) => ({
     const ids = new Set(projects.map((p) => p.id));
     const active = activeProjectId && ids.has(activeProjectId) ? activeProjectId : (projects[0]?.id ?? null);
     const proj = projects.find((p) => p.id === active) ?? null;
+    const rootOf = (p: Project | null) =>
+      p ? (p.isGit ? (p.gitRoot ?? p.path) : p.path) : null;
     const seedWts = seed?.worktrees.filter((w) => {
       // Seed must belong to the active project or the shell spawns elsewhere.
-      const root = proj?.isGit ? (proj.gitRoot ?? proj.path) : proj?.path;
+      const root = rootOf(proj);
       return !!root && (w.path === root || w.path.startsWith(root));
     }) ?? [];
     const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
       ? seed.activeWorktreeId
       : (seedWts.find((w) => w.is_main) ?? seedWts[0])?.id ?? null;
     const seedLayout = seedActive ? { kind: "pane", id: nextId(), ptyId: null } as PaneNode : null;
+    // Per-project seeds so the sidebar lists every project at boot, not just
+    // the active one. Each list is filtered to its own project root.
+    const seedCache: Record<string, Worktree[]> = {};
+    if (seed?.worktreesByProject) {
+      for (const p of projects) {
+        const list = seed.worktreesByProject[p.id];
+        if (!list) continue;
+        const root = rootOf(p);
+        const kept = list.filter((w) => !!root && (w.path === root || w.path.startsWith(root)));
+        if (kept.length > 0) seedCache[p.id] = kept.slice(0, 50);
+      }
+    }
+    if (active && seedWts.length > 0) seedCache[active] = seedWts;
     set((s) => ({
       projects,
       activeProjectId: active,
@@ -262,6 +286,7 @@ export const useStore = create<AppState>((set, get) => ({
       projectsEpoch: s.projectsEpoch + 1,
       repoRoot: proj ? (proj.isGit ? (proj.gitRoot ?? proj.path) : proj.path) : null,
       worktrees: seedWts,
+      worktreesByProject: seedCache,
       activeWorktreeId: seedActive,
       layout: seedLayout,
       layouts: seedActive && seedLayout ? { ...s.layouts, [seedActive]: seedLayout } : s.layouts,
@@ -281,51 +306,109 @@ export const useStore = create<AppState>((set, get) => ({
   removeProject: (id) =>
     set((s) => {
       const projects = s.projects.filter((x) => x.id !== id);
-      const activeProjectId =
-        s.activeProjectId === id ? (projects[0]?.id ?? null) : s.activeProjectId;
-      return { projects, activeProjectId };
+      const removingActive = s.activeProjectId === id;
+      const nextActive = removingActive ? (projects[0]?.id ?? null) : s.activeProjectId;
+      // Drop the removed project's cached list + layouts, killing its shells.
+      const dead = new Set(
+        (removingActive ? s.worktrees : (s.worktreesByProject[id] ?? [])).map((w) => w.id),
+      );
+      for (const [lid, node] of Object.entries(s.layouts)) {
+        if (!dead.has(lid)) continue;
+        for (const p of collectPaneObjs(node)) {
+          if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
+        }
+      }
+      const layouts = Object.fromEntries(Object.entries(s.layouts).filter(([lid]) => !dead.has(lid)));
+      const worktreesByProject = { ...s.worktreesByProject };
+      delete worktreesByProject[id];
+      if (!removingActive) return { projects, layouts, worktreesByProject };
+      // Warm-start the next project from cache so removal never strands the
+      // shell on "Starting terminal…"; the loader revalidates after.
+      const cached = (nextActive ? worktreesByProject[nextActive] : null) ?? [];
+      const nextProj = projects.find((p) => p.id === nextActive) ?? null;
+      const layout = (cached.length > 0
+        ? layouts[cached.find((w) => w.is_main)?.id ?? cached[0].id]
+        : null) ?? { kind: "pane", id: nextId(), ptyId: null };
+      const activeWorktreeId = cached.length > 0
+        ? (cached.find((w) => w.is_main)?.id ?? cached[0].id)
+        : null;
+      return {
+        projects,
+        activeProjectId: nextActive,
+        repoRoot: nextProj ? (nextProj.isGit ? (nextProj.gitRoot ?? nextProj.path) : nextProj.path) : null,
+        worktrees: cached,
+        worktreesByProject,
+        activeWorktreeId,
+        layout: cached.length > 0 ? layout : null,
+        layouts: activeWorktreeId ? { ...layouts, [activeWorktreeId]: layout } : layouts,
+        activePaneId: layout.kind === "pane" ? layout.id : collectPanes(layout)[0] ?? null,
+        maximizedPaneId: null,
+      };
     }),
   setActiveProject: (id) => {
     const s = get();
     const proj = s.projects.find((x) => x.id === id);
-    if (!proj) return;
-    // Project switches reset everything (App effect reloads): reap every
-    // cached shell, otherwise keep-alive leaks a shell per switch.
-    // ponytail: layouts only ever cache the current project, so a full
-    // clear is safe; scope per-project when cross-project resume is added.
-    const reap = (n: PaneNode | null) => {
-      if (n) for (const p of collectPaneObjs(n)) {
-        if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
-      }
-    };
-    reap(s.layout);
-    Object.values(s.layouts).forEach(reap);
-    // Switching projects resets worktree selection; App effect reloads it.
+    if (!proj || id === s.activeProjectId) return;
+    // Project switches keep every PTY alive: stash the outgoing tree AND
+    // list in the per-project caches so switching back restores both.
+    // Unmounted panes stay in the layouts cache, so TerminalPane's
+    // switch-safe cleanup never reaps them while another project is on
+    // screen.
+    const kept =
+      s.activeWorktreeId && s.layout ? { ...s.layouts, [s.activeWorktreeId]: s.layout } : s.layouts;
+    const cache = s.activeProjectId
+      ? { ...s.worktreesByProject, [s.activeProjectId]: s.worktrees }
+      : s.worktreesByProject;
+    const cached = cache[id] ?? [];
+    // Warm-start from cache: instant list while git revalidates, and the
+    // active worktree restores without falling back to main.
+    const root = proj.isGit ? (proj.gitRoot ?? proj.path) : proj.path;
+    const layout = (cached.length > 0 ? kept[cached.find((w) => w.is_main)?.id ?? cached[0].id] : null)
+      ?? { kind: "pane", id: nextId(), ptyId: null };
+    const activeWorktreeId = cached.length > 0
+      ? (cached.find((w) => w.is_main)?.id ?? cached[0].id)
+      : null;
     set({
       activeProjectId: id,
-      repoRoot: proj.path,
-      worktrees: [],
-      activeWorktreeId: null,
-      layout: null,
-      layouts: {},
-      activePaneId: null,
+      repoRoot: root,
+      worktrees: cached,
+      worktreesByProject: cache,
+      activeWorktreeId,
+      layout: cached.length > 0 ? layout : null,
+      layouts: activeWorktreeId ? { ...kept, [activeWorktreeId]: layout } : kept,
+      activePaneId: layout.kind === "pane" ? layout.id : collectPanes(layout)[0] ?? null,
       maximizedPaneId: null,
         });
   },
+  // Background lists for projects not on screen: cached only, never touch
+  // the live list or prune anything (the list belongs to another project).
+  setProjectWorktrees: (projectId, wts) =>
+    set((s) => ({ worktreesByProject: { ...s.worktreesByProject, [projectId]: wts } })),
   setWorktrees: (wts) =>
     set((s) => {
       // Re-list dropped worktrees (deleted externally, pruned): with
       // switch-safe cleanup their cached shells would leak, so reap them.
+      // Active project's previous list is the only prune reference: other
+      // projects' cached trees share this map and must survive while hidden.
       const live = new Set(wts.map((w) => w.id));
+      const old = new Set(s.worktrees.map((w) => w.id));
       for (const [id, node] of Object.entries(s.layouts)) {
-        if (!live.has(id) && id !== s.activeWorktreeId) {
+        if (old.has(id) && !live.has(id) && id !== s.activeWorktreeId) {
           for (const p of collectPaneObjs(node)) {
             if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
           }
         }
       }
-      const layouts = Object.fromEntries(Object.entries(s.layouts).filter(([id]) => live.has(id) || id === s.activeWorktreeId));
-      return { worktrees: wts, layouts };
+      const layouts = Object.fromEntries(
+        Object.entries(s.layouts).filter(([id]) => !old.has(id) || live.has(id) || id === s.activeWorktreeId),
+      );
+      return {
+        worktrees: wts,
+        worktreesByProject: s.activeProjectId
+          ? { ...s.worktreesByProject, [s.activeProjectId]: wts }
+          : s.worktreesByProject,
+        layouts,
+      };
     }),
   setActiveWorktree: (id) => {
     const { layouts, layout: cur, activeWorktreeId } = get();
@@ -341,6 +424,18 @@ export const useStore = create<AppState>((set, get) => ({
       activePaneId: collectPanes(layout)[0] ?? null,
       maximizedPaneId: null,
     });
+  },
+  openProjectWorktree: (projectId, worktreeId) => {
+    const s = get();
+    if (projectId !== s.activeProjectId) {
+      get().setActiveProject(projectId);
+      // setActiveProject warm-started the cache but picked main: override to
+      // the exact row clicked; the layout cache already holds its panes.
+      const cur = get();
+      const cached = cur.activeProjectId ? cur.worktreesByProject[cur.activeProjectId] ?? [] : [];
+      if (!cached.some((w) => w.id === worktreeId)) return;
+    }
+    get().setActiveWorktree(worktreeId);
   },
   // Removing a worktree orphans its shells: switch-safe unmount cleanup
   // no longer reaps them, so the caller kills the returned pty ids.
@@ -417,32 +512,68 @@ export const useStore = create<AppState>((set, get) => ({
     const existing = cur ? collectPaneObjs(cur) : [];
     const room = Math.max(0, 12 - existing.length);
     if (room <= 0) return;
-    const panes: Pane[] = [];
+    const cmds: string[] = [];
     for (const item of items) {
       const cmd = item.command.trim();
       if (!cmd) continue;
       const n = Math.min(6, Math.max(1, Math.floor(item.count) || 1));
-      for (let i = 0; i < n; i++) panes.push({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd });
+      for (let i = 0; i < n; i++) cmds.push(cmd);
     }
-    if (panes.length === 0) return;
-    panes.length = Math.min(panes.length, room);
-    const fresh = tileAgents(panes);
-    // No live tiles yet: plain retile keeps the old single-pane behaviour.
-    if (existing.length <= 1 && existing.every((p) => p.ptyId == null && !p.initCmd)) {
-      const node = fresh;
+    if (cmds.length === 0) return;
+    // Empty panes (prompt line only, e.g. fresh `PS D:\x>`) are reused in
+    // place, so a launch into an empty terminal never splits. Anything else
+    // (typed input, command output, a running agent) forces a split. The
+    // buffer scan is the authority: keystroke tracking alone misses shells
+    // that are dirty from a previous launch or a remount. For panes with a
+    // live terminal the buffer scan is the SOLE authority: the dirty flag
+    // also trips on xterm's automatic replies to shell queries (cursor
+    // reports etc. fire through onData), so trusting it vetoes reuse on a
+    // pristine `PS D:\x>` prompt. Only unmounted panes (worktree switches,
+    // no live buffer) fall back to the dirty flag. A queued initCmd always
+    // vetoes: something is already about to run there.
+    const reusable = existing.filter((p) => {
+      if (p.initCmd) return false;
+      const e = paneEmptiness(p.id);
+      return e.live ? e.empty : !p.dirty;
+    });
+    const reuseCount = Math.min(reusable.length, cmds.length);
+    const reuseIds = new Set(reusable.slice(0, reuseCount).map((p) => p.id));
+    let cmdIdx = 0;
+    const assign = (node: PaneNode): PaneNode => {
+      if (node.kind === "pane") {
+        return reuseIds.has(node.id) ? { ...node, initCmd: cmds[cmdIdx++], dirty: true } : node;
+      }
+      return { ...node, first: assign(node.first), second: assign(node.second) };
+    };
+    const patched = cur ? assign(cur) : null;
+    const freshCmds = cmds.slice(reuseCount, reuseCount + room);
+    if (freshCmds.length === 0) {
+      // Everything fit into clean panes: no split at all.
+      if (!patched) return;
       set({
-        layout: node,
-        layouts: { ...layouts, [activeWorktreeId]: node },
-        activePaneId: panes[0].id,
+        layout: patched,
+        layouts: { ...layouts, [activeWorktreeId]: patched },
+        activePaneId: reusable[0].id,
         maximizedPaneId: null,
-            });
+      });
       return;
     }
-    const live: Pane[] = existing.length > 0 ? existing : [{ kind: "pane", id: nextId(), ptyId: null }];
+    const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
+    const fresh = tileAgents(panes);
+    if (!patched) {
+      set({
+        layout: fresh,
+        layouts: { ...layouts, [activeWorktreeId]: fresh },
+        activePaneId: panes[0].id,
+        maximizedPaneId: null,
+      });
+      return;
+    }
+    const live = collectPaneObjs(patched);
     const node: PaneNode = {
       kind: "split",
       id: nextId(),
-      direction: cur?.kind === "split" && cur.direction === "h" ? "v" : "h",
+      direction: patched.kind === "split" && patched.direction === "h" ? "v" : "h",
       ratio: Math.max(0.2, Math.min(0.8, live.length / (live.length + panes.length))),
       first: tileGrid(live),
       second: fresh,
@@ -450,10 +581,47 @@ export const useStore = create<AppState>((set, get) => ({
     set({
       layout: node,
       layouts: { ...layouts, [activeWorktreeId]: node },
-      activePaneId: panes[0].id,
+      activePaneId: reuseCount > 0 ? reusable[0].id : panes[0].id,
       maximizedPaneId: null,
         });
   },
+  markPaneDirty: (paneId) => {
+    // Fires on every keystroke: skip the tree rebuild when already dirty so
+    // typing never re-renders the layout.
+    const cur = get().layout;
+    if (!cur || collectPaneObjs(cur).some((p) => p.id === paneId && p.dirty)) return;
+    set((s) => {
+      if (!s.layout) return {};
+      const patch = (node: PaneNode): PaneNode => {
+        if (node.kind === "pane") {
+          return node.id === paneId ? { ...node, dirty: true } : node;
+        }
+        return { ...node, first: patch(node.first), second: patch(node.second) };
+      };
+      const layout = patch(s.layout);
+      return {
+        layout,
+        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
+      };
+    });
+  },
+  markPaneClean: (paneId) =>
+    set((s) => {
+      if (!s.layout) return {};
+      const patch = (node: PaneNode): PaneNode => {
+        if (node.kind === "pane") {
+          // Fresh shell after restart: reusable. Keeps a queued initCmd so a
+          // held agent launch still fires instead of being dropped.
+          return node.id === paneId ? { ...node, dirty: false } : node;
+        }
+        return { ...node, first: patch(node.first), second: patch(node.second) };
+      };
+      const layout = patch(s.layout);
+      return {
+        layout,
+        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
+      };
+    }),
   clearInitCmd: (paneId) =>
     set((s) => {
       if (!s.layout) return {};

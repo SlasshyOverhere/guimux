@@ -166,6 +166,25 @@ pub fn fs_rename(old: String, new: String) -> Result<(), String> {
 }
 
 #[command]
+pub fn fs_reveal(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    reject_special_path(&p, "path")?;
+    if !p.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    // No shell: argv only, so paths can't inject flags/commands.
+    // Explorer needs backslashes: worktree ids use `/` (norm_sep) and
+    // Explorer silently falls back to Documents on forward slashes.
+    #[cfg(target_os = "windows")]
+    let mut cmd = { let mut c = std::process::Command::new("explorer"); c.arg(p.to_string_lossy().replace('/', "\\")); c };
+    #[cfg(target_os = "macos")]
+    let mut cmd = { let mut c = std::process::Command::new("open"); c.arg(&p); c };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut cmd = { let mut c = std::process::Command::new("xdg-open"); c.arg(&p); c };
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[command]
 pub fn fs_read(path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
@@ -211,6 +230,12 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_rejects_non_dirs() {
+        assert!(fs_reveal("C:/no/such/dir-xyz".into()).is_err());
+        assert!(reject_special_path(Path::new("\\\\.\\C:"), "path").is_err());
+    }
 
     #[test]
     fn reserved_names_rejected() {

@@ -53,22 +53,14 @@ pub fn ensure_bundled_conpty() {
     if EXPECTED.iter().all(|(f, _)| exe_dir.join(f).is_file()) {
         return;
     }
-    // Tauri dev runs the exe from target/debug; bundled assets live in
-    // src-tauri/assets/conpty. Walk up at most 2 levels (target/debug →
-    // project root), never 4 — a planted dir higher up was a DLL sideload
-    // vector (H-006).
-    let mut src_dir = None;
-    let mut d = exe_dir.clone();
-    for _ in 0..2 {
-        let cand = d.join("src-tauri").join("assets").join("conpty");
-        if cand.is_dir() {
-            src_dir = Some(cand);
-            break;
-        }
-        if !d.pop() {
-            break;
-        }
-    }
+    // Dev layout: exe at <root>/src-tauri/target/{debug,release} → vendored
+    // assets at <root>/src-tauri/assets/conpty (fixed relative path, two
+    // levels up — no directory walk, so no planted-dir sideload vector).
+    let src_dir = exe_dir
+        .parent()
+        .and_then(|t| t.parent())
+        .map(|s| s.join("assets").join("conpty"))
+        .filter(|c| c.is_dir());
     let src_dir = match src_dir {
         Some(d) => d,
         None => {
