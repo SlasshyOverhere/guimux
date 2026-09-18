@@ -216,6 +216,21 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
+  // Paste is the only input path that bypasses onData (native `paste` DOM
+  // event -> xterm handles it internally). Mark dirty there; typed keys and
+  // drops go through onData below. ponytail: keystrokes alone never decide
+  // reuse — the launch-time buffer scan does — so a stray mark here only
+  // costs a split, never work.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onPasteCapture = () => useStore.getState().markPaneDirty(paneId);
+    el.addEventListener("paste", onPasteCapture, true);
+    return () => el.removeEventListener("paste", onPasteCapture, true);
+  }, [paneId]);
+
+  // Listeners first, THEN pty_attach: the backend buffers everything since
+  // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
     const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
       const bytes = new Uint8Array(ev.payload);

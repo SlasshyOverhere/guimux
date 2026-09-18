@@ -524,25 +524,18 @@ export const useStore = create<AppState>((set, get) => ({
     // place, so a launch into an empty terminal never splits. Anything else
     // (typed input, command output, a running agent) forces a split. The
     // buffer scan is the authority: keystroke tracking alone misses shells
-    // that are dirty from a previous launch or a remount. Live check first:
-    // unmounted panes (switching worktrees) have no buffer yet, so they fall
-    // back to the dirty flag instead of scanning a stale/empty registry.
-    // eslint-disable-next-line no-console
-    console.log(`[gm-launch-debug] launchAgents cmds=${cmds.length} panes=${existing.length} liveTerms checked below`);
+    // that are dirty from a previous launch or a remount. For panes with a
+    // live terminal the buffer scan is the SOLE authority: the dirty flag
+    // also trips on xterm's automatic replies to shell queries (cursor
+    // reports etc. fire through onData), so trusting it vetoes reuse on a
+    // pristine `PS D:\x>` prompt. Only unmounted panes (worktree switches,
+    // no live buffer) fall back to the dirty flag. A queued initCmd always
+    // vetoes: something is already about to run there.
     const reusable = existing.filter((p) => {
-      if (p.initCmd || p.dirty) {
-        // eslint-disable-next-line no-console
-        console.log(`[gm-launch-debug] pane=${p.id} skipped by flags initCmd=${p.initCmd} dirty=${p.dirty}`);
-        return false;
-      }
+      if (p.initCmd) return false;
       const e = paneEmptiness(p.id);
-      const ok = e.live ? e.empty : true;
-      // eslint-disable-next-line no-console
-      console.log(`[gm-launch-debug] pane=${p.id} verdict reusable=${ok}`);
-      return ok;
+      return e.live ? e.empty : !p.dirty;
     });
-    // eslint-disable-next-line no-console
-    console.log(`[gm-launch-debug] reusable=${reusable.length}/${existing.length} => ${reusable.length > 0 ? "REUSE in place" : "SPLIT"}`);
     const reuseCount = Math.min(reusable.length, cmds.length);
     const reuseIds = new Set(reusable.slice(0, reuseCount).map((p) => p.id));
     let cmdIdx = 0;
