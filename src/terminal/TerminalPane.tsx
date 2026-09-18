@@ -535,15 +535,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
-    // break the mount or suppress the live prompt). Restored history counts
-    // as prior work: agent launches split rather than reuse this pane.
+    // break the mount or suppress the live prompt). Never marks dirty here:
+    // remounts (worktree switch, HMR) restore on every return, and the live
+    // buffer scan already vetoes panes whose history is real output.
     try {
       const saved = readScrollback(paneId);
       if (saved) {
         const ser = new SerializeAddon();
         term.loadAddon(ser);
         term.write(saved);
-        useStore.getState().markPaneDirty(paneId);
       }
     } catch {
       /* fall through to live shell */

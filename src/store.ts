@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { isPaneVisuallyEmpty } from "./terminal/paneEmpty";
+import { paneEmptiness } from "./terminal/paneEmpty";
 import type { Project, Worktree } from "./types";
 import { DEFAULT_SETTINGS, type Settings } from "./types";
 
@@ -524,10 +524,14 @@ export const useStore = create<AppState>((set, get) => ({
     // place, so a launch into an empty terminal never splits. Anything else
     // (typed input, command output, a running agent) forces a split. The
     // buffer scan is the authority: keystroke tracking alone misses shells
-    // that are dirty from a previous launch or a remount.
-    const reusable = existing.filter(
-      (p) => !p.initCmd && !p.dirty && isPaneVisuallyEmpty(p.id),
-    );
+    // that are dirty from a previous launch or a remount. Live check first:
+    // unmounted panes (switching worktrees) have no buffer yet, so they fall
+    // back to the dirty flag instead of scanning a stale/empty registry.
+    const reusable = existing.filter((p) => {
+      if (p.initCmd || p.dirty) return false;
+      const e = paneEmptiness(p.id);
+      return e.live ? e.empty : true;
+    });
     const reuseCount = Math.min(reusable.length, cmds.length);
     const reuseIds = new Set(reusable.slice(0, reuseCount).map((p) => p.id));
     let cmdIdx = 0;
