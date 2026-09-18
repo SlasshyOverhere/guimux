@@ -141,7 +141,10 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
 #[command]
 pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     let repo = PathBuf::from(&path);
-    let out = git(&repo, &["status", "--porcelain", "-z"])?;
+    // core.quotepath=false (same as git_diff): without it non-ASCII paths
+    // come back quoted + octal-escaped ("na\303\257ve.txt") and can't be
+    // opened from the tree.
+    let out = git(&repo, &["-c", "core.quotepath=false", "status", "--porcelain", "-z"])?;
     let mut files = vec![];
     let mut iter = out.split('\0').filter(|s| !s.is_empty());
     // M-004: byte-slice panicked on any <3-byte entry; non-UTF8 names came

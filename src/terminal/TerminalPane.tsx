@@ -95,6 +95,18 @@ function fitSane(term: Terminal, fit: FitAddon): { cols: number; rows: number } 
 // back down. Snapshot the viewport across fit() and restore it: pinned to
 // the bottom when following live output, else the same line (clamped).
 function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: number } | null {
+  const dbg =
+    typeof localStorage !== "undefined" && localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1";
+  const pre = dbg
+    ? (() => {
+        try {
+          const b = term.buffer.active;
+          return `pre: vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length}`;
+        } catch {
+          return "pre: (no buffer)";
+        }
+      })()
+    : "";
   let y = 0;
   let atBottom = true;
   try {
@@ -116,6 +128,16 @@ function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: n
     else term.scrollToLine(Math.max(0, Math.min(y, term.buffer.active.baseY)));
   } catch {
     /* best-effort restore */
+  }
+  if (dbg) {
+    try {
+      const b = term.buffer.active;
+      console.log(
+        `[gm-resize] fitKeepViewport ${dims.cols}x${dims.rows} atBottom=${atBottom} savedY=${y} ${pre} | post: vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length}`,
+      );
+    } catch {
+      /* best-effort */
+    }
   }
   return dims;
 }
@@ -178,14 +200,81 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const liveCwdRef = useRef<string | null>(null);
   const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
   // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
-  // only forward when cols/rows actually changed.
+  // only forward when cols/rows actually changed — AND coalesce to one
+  // backend resize ~120ms after the last change. xterm still fits on every
+  // tick (the display tracks the window), but a window drag/maximize that
+  // used to fire dozens of pty_resize calls now delivers ONE clean size to
+  // ConPTY. Full-screen TUIs (Claude Code/Ink) repaint per resize event;
+  // a rapid sequence interleaves ConPTY's screen repaint with the TUI's
+  // own repaint and shoves the UI down, leaving blank rows above it.
+  const resizeTimerRef = useRef<number | null>(null);
+  const pendingDimsRef = useRef<{ cols: number; rows: number } | null>(null);
+  // Post-resize output trace: ConPTY's repaint AFTER a resize is the
+  // remaining suspect (fit-time buffer was verified clean). For 2s after a
+  // debounced resize fires, log buffer state per output chunk.
+  const traceOutputUntilRef = useRef(0);
+  // GUIMUX_RESIZE_DEBUG=1 (localStorage) traces the whole resize pipeline:
+  // host px -> fit() grid -> debounce -> pty_resize, plus buffer state
+  // (viewport/baseY) so a "blank rows at top" bug can be located to the
+  // exact stage — px math (devicePixelRatio/scaling), grid change, or
+  // buffer drift between xterm and ConPTY.
+  const resizeDebug =
+    typeof localStorage !== "undefined" && localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1";
+  const dbg = (msg: string) => {
+    if (resizeDebug) console.log(`[gm-resize pane=${paneId}] ${msg}`);
+  };
+  const bufferState = (t: Terminal) => {
+    try {
+      const b = t.buffer.active;
+      return `vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length} rows=${t.rows} cols=${t.cols}`;
+    } catch {
+      return "(no buffer)";
+    }
+  };
   const maybeResize = (dims: { cols: number; rows: number } | null) => {
     if (!dims) return;
     const last = lastDimsRef.current;
+    dbg(`fit result ${dims.cols}x${dims.rows} (last ${last ? `${last.cols}x${last.rows}` : "none"}) ${bufferState(termRef.current!)}`);
     if (last && last.cols === dims.cols && last.rows === dims.rows) return;
     lastDimsRef.current = dims;
-    const sid = sessionRef.current;
-    if (sid != null) invoke("pty_resize", { id: sid, cols: dims.cols, rows: dims.rows });
+    pendingDimsRef.current = dims;
+    if (resizeTimerRef.current != null) clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = null;
+      const d = pendingDimsRef.current;
+      pendingDimsRef.current = null;
+      const sid = sessionRef.current;
+      traceOutputUntilRef.current = Date.now() + 2000;
+      dbg(`pty_resize -> ${d ? `${d.cols}x${d.rows}` : "?"} (debounced, sid=${sid})`);
+      if (d && sid != null)
+        invoke("pty_resize", { id: sid, cols: d.cols, rows: d.rows })
+          .then(() => {
+            dbg(`pty_resize ${d.cols}x${d.rows} ok`);
+            // Render-layer audit: buffer state was verified clean by the
+            // fit trace; if the prompt still renders displaced, the canvas
+            // or viewport must be offset inside the host. Measure exactly
+            // where the rendered screen sits vs the pane box.
+            setTimeout(() => {
+              const t = termRef.current;
+              if (!t) return;
+              try {
+                const host = hostRef.current;
+                const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
+                const viewport = host?.querySelector(".xterm-viewport") as HTMLElement | null;
+                const canvas = screen?.querySelector("canvas") as HTMLCanvasElement | null;
+                const hr = host?.getBoundingClientRect();
+                const sr = screen?.getBoundingClientRect();
+                const vr = viewport?.getBoundingClientRect();
+                dbg(
+                  `render-audit: hostTop=${hr?.top.toFixed(1)} screenTop=${sr?.top.toFixed(1)} gapPx=${hr && sr ? (sr.top - hr.top).toFixed(1) : "?"} viewportScrollTop=${viewport?.scrollTop ?? "?"} viewportH=${vr?.height.toFixed(1)} screenH=${sr?.height.toFixed(1)} canvas=${canvas ? `${canvas.width}x${canvas.height} cssH=${canvas.getBoundingClientRect().height.toFixed(1)}` : "none"} rows=${t.rows} cols=${t.cols} vp=${t.buffer.active.viewportY} base=${t.buffer.active.baseY} len=${t.buffer.active.length} cursorY=${t.buffer.active.cursorY}`,
+                );
+              } catch (e) {
+                dbg(`render-audit failed: ${e}`);
+              }
+            }, 150);
+          })
+          .catch((e) => dbg(`pty_resize FAILED: ${e}`));
+    }, 120);
   };
   const snoopTailRef = useRef("");
   const snoopLiveCwd = (bytes: Uint8Array) => {
@@ -235,6 +324,19 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
       const bytes = new Uint8Array(ev.payload);
       snoopLiveCwd(bytes);
+      if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
+        const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
+        console.log(
+          `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${(() => {
+            try {
+              const b = term.buffer.active;
+              return `vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length}`;
+            } catch {
+              return "(no buffer)";
+            }
+          })()}`,
+        );
+      }
       try {
         term.write(bytes);
       } catch (e) {
@@ -285,6 +387,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       cols: dims.cols,
       rows: dims.rows,
     });
+    // The PTY was born at this size: a post-spawn maybeResize with the same
+    // dims must not re-send it (they'd no-op anyway, but keep the ledger true).
+    lastDimsRef.current = dims;
     sessionRef.current = session.id;
     setPtyId(paneId, session.id);
     return session.id;
@@ -296,6 +401,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     useStore.getState().markPaneClean(paneId);
     const sid = sessionRef.current;
     const dims = saneDims(term) ?? { cols: 80, rows: 24 };
+    lastDimsRef.current = dims;
     // Same-id restart keeps the existing listeners alive: the backend
     // respawns the child and the reader thread re-emits on the same
     // `pty:output-{id}` channel, so output flows with no re-subscribe.
@@ -452,6 +558,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = new Terminal({
       scrollback,
       fontSize,
+      // Hosted on ConPTY (Windows): tells xterm its reflow must match
+      // ConPTY's buffer behavior. Without this, growing the window drops
+      // reflowed lines into scrollback while ConPTY reprints in place —
+      // the buffers drift and blank rows pile up above the prompt (the
+      // "wasted space at top" after window resize). buildNumber 21376+
+      // keeps reflow ON (native wrapping is correct there); the key thing
+      // is backend !== undefined, which activates the viewport-compensation
+      // heuristic for rows added to scrollback on growth.
+      windowsPty: { backend: "conpty", buildNumber: 21376 },
       // 1.2 like Windows Terminal: 1.0 leaves zero leading so ascenders
       // and descenders touch/clip on neighboring rows (the cramped look).
       lineHeight: 1.2,
@@ -658,6 +773,13 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       // per layout change, and fit() itself mutates layout (echo loop).
       requestAnimationFrame(() => {
         if (!alive || !visible) return;
+        const hostPx =
+          hostRef.current?.getBoundingClientRect();
+        if (resizeDebug && hostPx) {
+          console.log(
+            `[gm-resize pane=${paneId}] observer: host=${hostPx.width.toFixed(1)}x${hostPx.height.toFixed(1)}px dpr=${window.devicePixelRatio}`,
+          );
+        }
         maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : null);
       });
     });
@@ -665,6 +787,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     return () => {
       alive = false;
+      if (resizeTimerRef.current != null) {
+        clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = null;
+      }
       unregisterLiveTerm(paneId);
       ro.disconnect();
       hostRef.current?.removeEventListener("paste", killNativePaste, true);

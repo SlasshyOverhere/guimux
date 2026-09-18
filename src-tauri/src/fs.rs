@@ -155,6 +155,9 @@ pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     if from.parent() != to.parent() {
         return Err("can only rename within the same folder".into());
     }
+    // Same reserved-name/device-path guard as fs_read/fs_write: renaming a
+    // file to `NUL`, `COM1.txt`, etc. bricks it (undeletable via Explorer).
+    reject_special_path(&to, "rename target")?;
     match to.file_name().and_then(|s| s.to_str()) {
         Some(n) if !n.is_empty() && !n.contains(['/', '\\']) => {}
         _ => return Err("invalid file name".into()),

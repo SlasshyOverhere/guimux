@@ -411,10 +411,26 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     }
     // Ensure main worktree is on the base branch
     let cur = current_branch(&main_wt).unwrap_or_default();
-    if cur != base {
+    let switched = cur != base;
+    if switched {
         run_git(&main_wt, &["checkout", &base])?;
     }
-    run_git(&main_wt, &["merge", "--no-ff", "--no-edit", "--", &branch])
+    match run_git(&main_wt, &["merge", "--no-ff", "--no-edit", "--", &branch]) {
+        Ok(msg) => Ok(msg),
+        Err(e) => {
+            // The merge failed (conflict or otherwise): leave no surprise
+            // side effect beyond the merge itself — put the main worktree
+            // back on the branch the user had checked out. Best-effort: the
+            // merge error is the one that matters, so a failed restore is
+            // only appended, never replaces it.
+            if switched {
+                if let Err(r_err) = run_git(&main_wt, &["checkout", &cur]) {
+                    return Err(format!("{e}\n(also failed to restore branch '{cur}' on the main worktree: {r_err})"));
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 #[command]

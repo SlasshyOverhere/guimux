@@ -21,6 +21,11 @@ struct PtyEntry {
     // wait need &mut), while pty_kill drives this independent killer
     // handle (TerminateProcess on a process HANDLE — no &mut Child needed).
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    // Per-session master behind its own mutex: pty_resize clones the Arc and
+    // resizes with the sessions lock released, so a slow ConPTY resize (an
+    // RPC into conhost/OpenConsole) blocks only this pane — never another
+    // pane's spawn/kill/write (was a global MASTERS lock).
+    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
 }
 
 #[derive(Default)]
@@ -197,9 +202,6 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
     chain
 }
 
-static MASTERS: std::sync::LazyLock<Mutex<HashMap<u64, Box<dyn portable_pty::MasterPty + Send>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
 /// cwd per live session id, so `pty_restart` can respawn in place.
 static SPAWN_CWDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -231,7 +233,15 @@ fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.clamp(1, 1000), rows.clamp(1, 500))
 }
 
-fn push_buffer(id: u64, bytes: &[u8]) {
+fn push_buffer(id: u64, epoch: u64, bytes: &[u8]) {
+    // Epoch check BEFORE taking BUFFERS (lock order EPOCHS → BUFFERS, same
+    // as bump_epoch_reset_buffer): a pump thread that read bytes just before
+    // a restart/kill can never slip them into the reused id's fresh replay
+    // buffer — the old window showed dead-shell garbage in restarted panes.
+    let epochs = EPOCHS.lock().unwrap_or_else(|e| e.into_inner());
+    if epochs.get(&id).copied() != Some(epoch) {
+        return; // stale pump from a killed/restarted session
+    }
     // VecDeque: dropping from the front never memmoves the retained tail
     // (M-003: Vec::drain shifted ~256KB on every 8KB read while detached).
     let mut map = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -264,10 +274,7 @@ fn pty_debug() -> bool {
     std::env::var("GUIMUX_PTY_DEBUG").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
 }
 
-pub fn register_master(id: u64, master: Box<dyn portable_pty::MasterPty + Send>) {
-    MASTERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, master);
-}
-
+pub 
 fn epoch_current(id: u64, epoch: u64) -> bool {
     EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied() == Some(epoch)
 }
@@ -276,6 +283,15 @@ fn next_epoch(id: u64) -> u64 {
     let mut map = EPOCHS.lock().unwrap_or_else(|e| e.into_inner());
     let e = map.get(&id).copied().unwrap_or(0) + 1;
     map.insert(id, e);
+    e
+}
+
+/// Spawn/restart path: bump the epoch AND install a fresh replay buffer as
+/// one logical step (EPOCHS → BUFFERS lock order, matching push_buffer) so
+/// no stale pump can write between the bump and the reset.
+fn bump_epoch_reset_buffer(id: u64) -> u64 {
+    let e = next_epoch(id);
+    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, VecDeque::new());
     e
 }
 
@@ -326,7 +342,7 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                         first = false;
                         eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
                     }
-                    push_buffer(id, &buf[..n]);
+                    push_buffer(id, epoch, &buf[..n]);
                     let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
                         let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
@@ -407,11 +423,25 @@ fn spawn_pair(
             Err(e) => spawn_err = e.to_string(),
         }
     }
-    let child = child.ok_or_else(|| format!("failed to spawn shell: {spawn_err}"))?;
-    let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    // Failure paths after openpty: drop the master explicitly so ConPTY
+    // handles (conhost/OpenConsole pipe ends) are torn down via Drop if
+    // reader/writer extraction or every shell spawn failed. The pair/slave
+    // drop follows immediately, so nothing lingers.
+    let child = match child {
+        Some(c) => c,
+        None => {
+            drop(pair);
+            return Err(format!("failed to spawn shell: {spawn_err}"));
+        }
+    };
+    let (reader, writer) = match (pair.master.try_clone_reader(), pair.master.take_writer()) {
+        (Ok(r), Ok(w)) => (r, w),
+        (Err(e), _) | (_, Err(e)) => {
+            drop(pair);
+            return Err(e.to_string());
+        }
+    };
 
-    register_master(id, pair.master);
     {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.insert(
@@ -419,6 +449,7 @@ fn spawn_pair(
             PtyEntry {
                 writer: Arc::new(Mutex::new(writer)),
                 killer: child.clone_killer(),
+                master: Arc::new(Mutex::new(pair.master)),
             },
         );
     }
@@ -426,9 +457,8 @@ fn spawn_pair(
         let mut map = SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id, cwd.clone());
     }
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, VecDeque::new());
     ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, live);
-    let epoch = next_epoch(id);
+    let epoch = bump_epoch_reset_buffer(id);
 
     // Exit authority = shell process liveness (GetExitCodeProcess), never
     // pipe EOF. The watcher owns the real Child; the stored killer stays
@@ -527,26 +557,50 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
     let (cols, rows) = clamp_dims(cols, rows);
     // M-007: error on unknown ids (pty_attach does) so resize-to-dead-pane
     // bugs surface instead of silently succeeding.
-    let masters = MASTERS.lock().unwrap_or_else(|e| e.into_inner());
-    let master = masters.get(&id).ok_or("no such pty session")?;
-    let _ = master.resize(portable_pty::PtySize {
+    // Clone the per-session master Arc under the sessions lock, then resize
+    // with the lock released: a slow ConPTY resize can't stall other panes'
+    // spawn/kill/write (and resize of a dead pane errors below).
+    let master = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.get(&id).map(|e| e.master.clone()).ok_or("no such pty session")?
+    };
+    let dbg = pty_debug();
+    if dbg {
+        eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows}");
+    }
+    let r = master.lock().unwrap_or_else(|e| e.into_inner()).resize(portable_pty::PtySize {
         rows,
         cols,
         pixel_width: 0,
         pixel_height: 0,
     });
+    if dbg {
+        match &r {
+            Ok(_) => eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows} ok"),
+            Err(e) => eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows} ERR: {e}"),
+        }
+    }
+    let _ = r;
     Ok(())
 }
 
 #[command]
 pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut entry) = sessions.remove(&id) {
-        // Killer handle = TerminateProcess on the shell HANDLE. Never touches
-        // the exit-watcher's owned Child, which exits its poll on its own.
-        let _ = entry.killer.kill();
-    }
-    MASTERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    let master_to_close = {
+        let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.remove(&id).map(|mut entry| {
+            // Killer handle = TerminateProcess on the shell HANDLE. Never
+            // touches the exit-watcher's owned Child, which exits its poll
+            // on its own.
+            let _ = entry.killer.kill();
+            entry.master
+        })
+    };
+    // Drop the master OUTSIDE the sessions lock: portable-pty's Drop/close
+    // tears down ConPTY handles and can block briefly. (The master Arc may
+    // still be cloned-here-then-held by a concurrent resize; dropping our
+    // Arc lets the last holder close the PTY.)
+    drop(master_to_close);
     SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
@@ -589,12 +643,33 @@ mod tests {
     fn replay_buffer_caps_oldest_first() {
         let id = 0xB0FFEBu64;
         BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        push_buffer(id, &[b'a'; 10]);
-        push_buffer(id, &[b'b'; REPLAY_CAP + 100]);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
+        push_buffer(id, 1, &[b'a'; 10]);
+        push_buffer(id, 1, &[b'b'; REPLAY_CAP + 100]);
         let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
         assert_eq!(buf.len(), REPLAY_CAP);
         // oldest bytes ('a's) were dropped
         assert!(buf.iter().all(|&b| b == b'b'));
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    #[test]
+    fn stale_pump_cannot_pollute_replay_buffer() {
+        // Regression: a pump thread that read bytes just before a restart
+        // could push them into the reused id's fresh replay buffer between
+        // pty_kill's BUFFERS.remove and spawn_pair's insert.
+        let id = 0x5EEDu64;
+        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
+        // old-epoch pump arrives AFTER the restart bumped the epoch
+        push_buffer(id, 1, b"old-shell-garbage");
+        let e2 = bump_epoch_reset_buffer(id);
+        assert_ne!(e2, 1);
+        push_buffer(id, 1, b"late stale bytes"); // must be dropped
+        push_buffer(id, e2, b"fresh");
+        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
+        assert_eq!(buf, b"fresh".to_vec());
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     #[test]
