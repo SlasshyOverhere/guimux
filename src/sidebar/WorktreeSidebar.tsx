@@ -95,6 +95,28 @@ export function WorktreeSidebar() {
   const [statuses, setStatuses] = useState<Record<string, FileStatus[]>>({});
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
+  // Other projects start collapsed: one line each until opened. Active
+  // project is always expanded. Persisted so the list stays calm.
+  const [projOpen, setProjOpen] = useState<Record<string, true>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("guimux-sidebar-expanded") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  const toggleProjOpen = (pid: string) => {
+    setProjOpen((c) => {
+      const next = { ...c };
+      if (next[pid]) delete next[pid];
+      else next[pid] = true as const;
+      try {
+        localStorage.setItem("guimux-sidebar-expanded", JSON.stringify(next));
+      } catch {
+        /* private mode */
+      }
+      return next;
+    });
+  };
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<{ x: number; y: number; id: string; projectId: string } | null>(null);
   const [pinned, setPinned] = useState<Record<string, true>>(() => {
@@ -610,6 +632,22 @@ export function WorktreeSidebar() {
             </div>
           )}
 
+          {/* Active project gets its own labeled section so its rows never
+              blend into the projects below. */}
+          {proj && (shownLive.length > 0 || q) && (
+            <div
+              className="flex items-baseline justify-between px-2.5 pb-1 pt-2"
+              title={proj.path}
+            >
+              <span className="truncate text-[12px] font-semibold text-ink-100">
+                {proj.name}
+              </span>
+              <span className="tnum gm-meta flex-none">
+                {shownLive.length}
+              </span>
+            </div>
+          )}
+
           {shownLive.map((wt) => {
             const dirty = (statuses[wt.id] ?? []).length;
             const plainRow = wt.id.startsWith("plain:");
@@ -762,24 +800,46 @@ export function WorktreeSidebar() {
             </div>
           )}
 
-          {/* Other projects: their live sessions, one click away. Rows jump
-              straight to that project's worktree, no topbar picker needed. */}
+          {/* Other projects: collapsed to one labeled line each. Chevron
+              expands; rows jump straight to that project's worktree. While
+              filtering, every project with a match auto-expands. */}
+          {!q && otherProjects.length > 0 && (
+            <div
+              className="mx-2.5 mb-1 mt-3"
+              style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
+            />
+          )}
           {!q && otherProjects.map((p) => {
             const all = otherRows(p);
             const rows = visibleRows(all, p.id);
             if (all.length === 0) return null;
+            const open = !!projOpen[p.id];
             return (
-              <div key={p.id} className="mt-1">
-                <button
-                  className="gm-tab flex w-full items-center gap-1.5 px-2.5 py-2"
-                  data-active={false}
-                  onClick={() => useStore.getState().setActiveProject(p.id)}
-                  onKeyDown={rowKey(() => useStore.getState().setActiveProject(p.id))}
-                  title={`${p.path}\nSwitch to ${p.name}.`}
+              <div key={p.id} className="mt-0.5">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={open}
+                  className="gm-row flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2"
+                  onClick={() => toggleProjOpen(p.id)}
+                  onKeyDown={rowKey(() => toggleProjOpen(p.id))}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    useStore.getState().setActiveProject(p.id);
+                  }}
+                  title={`${p.path}\nExpand to browse, right-click to switch.`}
                 >
-                  <span className="truncate text-[12px] font-semibold text-ink-100">{p.name}</span>
-                  <span className="tnum text-[11px] text-ink-500">{rows.length}</span>
-                </button>
+                  <ChevronRight
+                    size={12}
+                    strokeWidth={2}
+                    className={`shrink-0 text-ink-500 transition-transform ${open ? "rotate-90" : ""}`}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink-100">{p.name}</span>
+                  <span className="tnum gm-meta flex-none">{rows.length}</span>
+                </div>
+                {!open ? null : (
+                <>
+                <div className="pb-0.5 pl-4">
                 {rows.map((wt) => {
                   const selected = wt.id === activeWorktreeId;
                   const plainRow = wt.id.startsWith("plain:");
@@ -912,6 +972,39 @@ export function WorktreeSidebar() {
                     </div>
                   );
                 })()}
+                </div>
+                </>
+                )}
+              </div>
+            );
+          })}
+
+          {q && otherProjects.map((p) => {
+            const all = otherRows(p);
+            const rows = all.filter(matches);
+            if (rows.length === 0) return null;
+            return (
+              <div key={p.id} className="mt-1">
+                <div className="px-2.5 pb-0.5 pt-2 text-[12px] font-semibold text-ink-100" title={p.path}>
+                  {p.name} <span className="tnum gm-meta font-normal">· {rows.length}</span>
+                </div>
+                {rows.map((wt) => (
+                  <div
+                    key={wt.id}
+                    role="button"
+                    tabIndex={0}
+                    className="gm-row cursor-pointer px-2.5 py-2"
+                    onClick={() => openProjectWorktree(p.id, wt.id)}
+                    onKeyDown={rowKey(() => openProjectWorktree(p.id, wt.id))}
+                    onContextMenu={(e) => openMenu(e, wt.id, p.id)}
+                    title={`${wt.branch}\n${wt.path}`}
+                  >
+                    <div className="truncate text-[13px] font-medium text-ink-200">{wt.branch}</div>
+                    <div className="gm-meta mono mt-0.5 truncate" title={wt.path}>
+                      {shortPath(wt.path, wt.is_main)}
+                    </div>
+                  </div>
+                ))}
               </div>
             );
           })}
