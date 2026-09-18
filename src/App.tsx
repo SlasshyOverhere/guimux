@@ -29,6 +29,7 @@ import type { Project, Worktree } from "./types";
 
 import { detectToProject } from "./project";
 import { maybeStartStress } from "./terminal/stress";
+import { maybeAutoCheck } from "./updater";
 export { detectToProject };
 
 /* ------------------------------------------------------------------ */
@@ -422,9 +423,10 @@ export default function App() {
 
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
 
-  // Dev-only terminal stress loop (localStorage `guimux-stress=1`); no-op otherwise.
   useEffect(() => {
     maybeStartStress();
+    // Startup update check: fire-and-forget, never blocks boot or terminals.
+    void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
   }, []);
 
   // Restore persisted projects once on startup, then persist on every change.
