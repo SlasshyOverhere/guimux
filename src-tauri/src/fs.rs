@@ -223,11 +223,24 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
     let n = WRITE_CTR.fetch_add(1, Ordering::SeqCst);
     let tmp = parent.join(format!(".guimux-tmp-{}-{}", std::process::id(), n));
     fs::write(&tmp, &content).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(&tmp, &p) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.to_string());
+    // AV scanners and indexers briefly lock a freshly written file on Windows:
+    // retry the swap instead of failing the save outright.
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..4 {
+        match fs::rename(&tmp, &p) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+            }
+        }
     }
-    Ok(())
+    // Never leave the temp file behind: it shows up as untracked in the
+    // user's project.
+    let _ = fs::remove_file(&tmp);
+    Err(last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "rename failed".into()))
 }
 
 #[cfg(test)]
