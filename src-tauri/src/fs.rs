@@ -145,6 +145,24 @@ pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
     Ok(build_tree(&p, 0, depth.clamp(1, 6), &mut budget))
 }
 
+/// Directory identity for a rename. Windows paths are case-insensitive and
+/// accept both separators, so a raw Path compare rejected `c:/a` vs `C:\a`.
+fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
+    let (a, b) = match (a, b) {
+        (Some(a), Some(b)) => (
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+        ),
+        _ => return false,
+    };
+    if cfg!(windows) {
+        a.replace('/', "\\")
+            .eq_ignore_ascii_case(&b.replace('/', "\\"))
+    } else {
+        a == b
+    }
+}
+
 #[command]
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     let from = PathBuf::from(&old);
@@ -152,7 +170,7 @@ pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     if !from.exists() {
         return Err(format!("not found: {old}"));
     }
-    if from.parent() != to.parent() {
+    if !same_dir(from.parent(), to.parent()) {
         return Err("can only rename within the same folder".into());
     }
     // Same reserved-name/device-path guard as fs_read/fs_write: renaming a
