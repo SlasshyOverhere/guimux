@@ -8,8 +8,13 @@ import { Search, ChevronRight, X, GitBranch, Check } from "lucide-react";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { menuPos } from "../menuPos";
+import { createSingleFlight } from "../singleFlight";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
+
+// One listing at a time: two in-flight `worktree_list` calls race to write the
+// same store slice, and the loser is whichever finished last.
+const listGuard = createSingleFlight();
 
 // Row menu: six items at most (open, pin, copy, merge, abort, remove).
 const ROW_MENU = { w: 192, h: 214 };
@@ -84,11 +89,18 @@ export function WorktreeSidebar() {
       for (const p of missing) {
         const root = p.gitRoot ?? p.path;
         try {
+          const before = useStore.getState().worktrees;
           const wts: Worktree[] = await invoke("worktree_list", { repoRoot: root });
           if (cancelled || !wts.length) continue;
           const st = useStore.getState();
-          if (st.activeProjectId === p.id) st.setWorktrees(wts);
-          else st.setProjectWorktrees(p.id, wts);
+          // This fetch can outlive a create/remove and would then replace a
+          // newer list with an older one. The store swaps the array on every
+          // write, so identity is the "untouched since I started" test.
+          if (st.activeProjectId === p.id) {
+            if (st.worktrees === before) st.setWorktrees(wts);
+          } else {
+            st.setProjectWorktrees(p.id, wts);
+          }
         } catch {
           /* offline/locked: App's loader surfaces errors for the active project */
         }
@@ -187,28 +199,33 @@ export function WorktreeSidebar() {
   // not `clean`, so the panel needs to know whether status has landed.
   const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
 
-  const refreshList = async () => {
+  // `immediate` skips the deferral below: explicit user actions (create,
+  // merge, remove) are not racing App's loader and should not wait 1.5s to
+  // reconcile. One listing at a time, so a create+remove pair cannot interleave.
+  const refreshList = async (immediate = false) => {
     if (!repoRoot || !isGit) return;
     // Skip while App's loader owns this repoRoot: App always lists right
     // after it sets repoRoot, so a sidebar re-list here doubles the spawns
     // on every project switch (and on startup).
-    await new Promise((r) => setTimeout(r, 1500));
+    if (!immediate) await new Promise((r) => setTimeout(r, 1500));
     const st = useStore.getState();
     if (st.repoRoot !== repoRoot) return;
-    try {
-      const wts: Worktree[] = await invoke("worktree_list", { repoRoot });
-      if (useStore.getState().repoRoot !== repoRoot) return;
-      // Never blank a live list: an empty/errored re-list here used to wipe
-      // the seeded fallback and strand the shell on "Starting terminal…".
-      if (wts.length === 0) return;
-      setWorktrees(wts);
-      const cur = useStore.getState();
-      if (!wts.find((w) => w.id === cur.activeWorktreeId)) {
-        setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
+    await listGuard.run(async () => {
+      try {
+        const wts: Worktree[] = await invoke("worktree_list", { repoRoot });
+        if (useStore.getState().repoRoot !== repoRoot) return;
+        // Never blank a live list: an empty/errored re-list here used to wipe
+        // the seeded fallback and strand the shell on "Starting terminal…".
+        if (wts.length === 0) return;
+        setWorktrees(wts);
+        const cur = useStore.getState();
+        if (!wts.find((w) => w.id === cur.activeWorktreeId)) {
+          setActiveWorktree((wts.find((w) => w.is_main) ?? wts[0]).id);
+        }
+      } catch {
+        /* App's loader surfaces list errors in the banner; stay quiet here */
       }
-    } catch {
-      /* App's loader surfaces list errors in the banner; stay quiet here */
-    }
+    });
   };
 
   useEffect(() => {
@@ -260,7 +277,7 @@ export function WorktreeSidebar() {
       // Mount the new shell at once; the re-list below reconciles in background.
       setWorktrees([...useStore.getState().worktrees, created]);
       setActiveWorktree(created.id);
-      await refreshList();
+      await refreshList(true);
     } catch (e) {
       void errorDialog(`worktree create failed: ${e}`);
     } finally {
@@ -303,7 +320,7 @@ export function WorktreeSidebar() {
       if (pid && pid !== useStore.getState().activeProjectId) {
         await refreshProjectList(pid, root);
       } else {
-        await refreshList();
+        await refreshList(true);
       }
     };
     try {
@@ -332,7 +349,7 @@ export function WorktreeSidebar() {
       if (pid && root && pid !== useStore.getState().activeProjectId) {
         await refreshProjectList(pid, root);
       } else {
-        await refreshList();
+        await refreshList(true);
       }
     } catch (e) {
       void errorDialog(`merge failed: ${e}`);
@@ -346,7 +363,7 @@ export function WorktreeSidebar() {
       if (pid && root && pid !== useStore.getState().activeProjectId) {
         await refreshProjectList(pid, root);
       } else {
-        await refreshList();
+        await refreshList(true);
       }
     } catch (e) {
       void errorDialog(`abort failed: ${e}`);
