@@ -28,6 +28,12 @@ function readScrollback(paneId: string): string | null {
 
 function persistScrollback(paneId: string, state: string) {
   stateCache.set(paneId, state);
+  // Same cap as the localStorage index: the in-memory map grew forever.
+  while (stateCache.size > MAX_PERSISTED_PANES) {
+    const oldest = stateCache.keys().next().value;
+    if (oldest === undefined) break;
+    stateCache.delete(oldest);
+  }
   try {
     localStorage.setItem(LS_SCROLL_PREFIX + paneId, state);
     // Pane ids embed a timestamp and are never reused, so cap the stored
@@ -192,6 +198,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const exitedRef = useRef(false);
   // Mirrors the mount effect's `alive` flag for code that outlives a render.
   const aliveRef = useRef(true);
+  // The resize observer is created once per pane: reading the prop directly
+  // left it pinned to the visibility of the first render.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
   const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
@@ -513,8 +523,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
+    // Live panes need this too: scrollback was frozen at mount, and the pane
+    // created at boot predates the persisted settings load.
+    if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
     maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term));
-  }, [fontSize]);
+  }, [fontSize, scrollback]);
 
   // Ctrl+wheel / Ctrl+= / Ctrl+- zooms this pane; Ctrl+0 resets.
   // Wheel needs a non-passive listener + stopPropagation: xterm's own wheel
@@ -779,11 +792,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     })();
 
     const ro = new ResizeObserver(() => {
-      if (!visible) return;
+      if (!visibleRef.current) return;
       // One fit+resize per frame tops: the observer can fire multiple times
       // per layout change, and fit() itself mutates layout (echo loop).
       requestAnimationFrame(() => {
-        if (!alive || !visible) return;
+        if (!alive || !visibleRef.current) return;
         const hostPx =
           hostRef.current?.getBoundingClientRect();
         if (resizeDebug && hostPx) {
