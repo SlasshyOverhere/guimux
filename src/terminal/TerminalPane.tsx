@@ -204,7 +204,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   visibleRef.current = visible;
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
-  const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
+  const splitPane = useStore((s) => s.splitPane);
+  const setActivePane = useStore((s) => s.setActivePane);
+  const setPtyId = useStore((s) => s.setPtyId);
+  const toggleMaximizePane = useStore((s) => s.toggleMaximizePane);
   const maximized = useStore((s) => s.maximizedPaneId === paneId);
   const paneCount = useStore((s) => allPaneIds(s.layout).length);
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so

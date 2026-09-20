@@ -32,7 +32,8 @@ export function SplitView({ node, cwd, maximizedId, depth = 0 }: { node: PaneNod
 }
 
 function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximizedId: string | null }) {
-  const { activePaneId, closePane } = useStore();
+  const activePaneId = useStore((s) => s.activePaneId);
+  const closePane = useStore((s) => s.closePane);
   const active = activePaneId === pane.id;
   // Maximized siblings stay mounted (PTY alive) but hidden, so restore is instant.
   const hidden = maximizedId != null && maximizedId !== pane.id;

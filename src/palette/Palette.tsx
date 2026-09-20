@@ -37,15 +37,13 @@ function fuzzy(hay: string, needle: string): boolean {
 }
 
 export function Palette() {
-  const {
-    paletteOpen,
-    setPaletteOpen,
-    addProject,
-    setActiveProject,
-    repoRoot,
-    worktrees,
-    setActiveWorktree,
-  } = useStore();
+  const paletteOpen = useStore((s) => s.paletteOpen);
+  const setPaletteOpen = useStore((s) => s.setPaletteOpen);
+  const addProject = useStore((s) => s.addProject);
+  const setActiveProject = useStore((s) => s.setActiveProject);
+  const repoRoot = useStore((s) => s.repoRoot);
+  const worktrees = useStore((s) => s.worktrees);
+  const setActiveWorktree = useStore((s) => s.setActiveWorktree);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [files, setFiles] = useState<FsNode[]>([]);

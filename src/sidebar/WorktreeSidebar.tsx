@@ -41,20 +41,20 @@ function shortPath(p: string, full: boolean): string {
 }
 
 export function WorktreeSidebar() {
-  const {
-    projects,
-    activeProjectId,
-    repoRoot,
-    worktrees,
-    worktreesByProject,
-    layouts,
-    activeWorktreeId,
-    setActiveWorktree,
-    openProjectWorktree,
-    setWorktrees,
-    updateProject,
-    openEditor,
-  } = useStore();
+  // Slices, not the whole store: a bare useStore() re-rendered this panel on
+  // every keystroke-driven markPaneDirty anywhere in the app.
+  const projects = useStore((s) => s.projects);
+  const activeProjectId = useStore((s) => s.activeProjectId);
+  const repoRoot = useStore((s) => s.repoRoot);
+  const worktrees = useStore((s) => s.worktrees);
+  const worktreesByProject = useStore((s) => s.worktreesByProject);
+  const layouts = useStore((s) => s.layouts);
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setActiveWorktree = useStore((s) => s.setActiveWorktree);
+  const openProjectWorktree = useStore((s) => s.openProjectWorktree);
+  const setWorktrees = useStore((s) => s.setWorktrees);
+  const updateProject = useStore((s) => s.updateProject);
+  const openEditor = useStore((s) => s.openEditor);
   // Unvisited projects have no cached list yet: fill them in once per repo
   // root so every project shows rows (your screenshot's always-on panel).
   // Writes go through setProjectWorktrees (cache only), never the live list.

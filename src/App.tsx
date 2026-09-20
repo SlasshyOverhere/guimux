@@ -38,20 +38,18 @@ export { detectToProject };
 /* ------------------------------------------------------------------ */
 
 function Topbar({ onAdd }: { onAdd: () => void }) {
-  const {
-    projects,
-    activeProjectId,
-    setActiveProject,
-    removeProject,
-    worktrees,
-    activeWorktreeId,
-    setSettingsOpen,
-    setAgentOpen,
-    leftVisible,
-    rightVisible,
-    toggleLeft,
-    toggleRight,
-  } = useStore();
+  const projects = useStore((s) => s.projects);
+  const activeProjectId = useStore((s) => s.activeProjectId);
+  const setActiveProject = useStore((s) => s.setActiveProject);
+  const removeProject = useStore((s) => s.removeProject);
+  const worktrees = useStore((s) => s.worktrees);
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen);
+  const setAgentOpen = useStore((s) => s.setAgentOpen);
+  const leftVisible = useStore((s) => s.leftVisible);
+  const rightVisible = useStore((s) => s.rightVisible);
+  const toggleLeft = useStore((s) => s.toggleLeft);
+  const toggleRight = useStore((s) => s.toggleRight);
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
   const [projOpen, setProjOpen] = useState(false);
@@ -402,21 +400,19 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
 }
 
 export default function App() {
-  const {
-    projects,
-    activeProjectId,
-    hydrated,
-    addProject,
-    setActiveProject,
-    setRepoRoot,
-    worktrees,
-    activeWorktreeId,
-    setActiveWorktree,
-    setWorktrees,
-    layout,
-    leftVisible,
-    rightVisible,
-  } = useStore();
+  const projects = useStore((s) => s.projects);
+  const activeProjectId = useStore((s) => s.activeProjectId);
+  const hydrated = useStore((s) => s.hydrated);
+  const addProject = useStore((s) => s.addProject);
+  const setActiveProject = useStore((s) => s.setActiveProject);
+  const setRepoRoot = useStore((s) => s.setRepoRoot);
+  const worktrees = useStore((s) => s.worktrees);
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setActiveWorktree = useStore((s) => s.setActiveWorktree);
+  const setWorktrees = useStore((s) => s.setWorktrees);
+  const layout = useStore((s) => s.layout);
+  const leftVisible = useStore((s) => s.leftVisible);
+  const rightVisible = useStore((s) => s.rightVisible);
 
   const [busy, setBusy] = useState(false);
   const [repoError, setRepoError] = useState<string | null>(null);
