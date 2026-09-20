@@ -15,6 +15,19 @@ import type { FsNode } from "../types";
 
 const SEP = /[\\/]/;
 
+// Unsaved buffers keyed by path: the pane remounts on every worktree switch
+// (key={wt.id}), and local state alone took the user's edits with it.
+const buffers = new Map<string, { content: string; saved: string; dirty: boolean }>();
+
+// Tree paths mix separators (worktree roots use `/`, DirEntry adds `\`), so
+// both comparisons below normalize before matching.
+const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+const inRoot = (root: string, p: string) => {
+  const r = normSep(root);
+  const n = normSep(p);
+  return n === r || n.startsWith(r + "/");
+};
+
 function baseName(p: string): string {
   const parts = p.split(SEP);
   return parts[parts.length - 1] ?? p;
@@ -241,6 +254,11 @@ export function ExplorerPane({ root }: { root: string }) {
       return;
     }
     // Untitled flow: renaming the open file retargets the editor buffer.
+    const buffered = buffers.get(oldPath);
+    if (buffered) {
+      buffers.delete(oldPath);
+      buffers.set(newPath, buffered);
+    }
     if (editorPath === oldPath) openEditor(newPath, diffMode);
     refreshTree();
   };
@@ -267,11 +285,24 @@ export function ExplorerPane({ root }: { root: string }) {
   useEffect(() => {
     setRenaming(null);
     setMenu(null);
+    // This pane now shows another worktree: an editor still open on the
+    // previous one sits outside the tree with a nonsense relative name.
+    const open = useStore.getState().editorPath;
+    if (open && !inRoot(root, open)) useStore.getState().closeEditor();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
   useEffect(() => {
     if (!editorPath) return;
+    // A dirty buffer outranks disk: this is the remount that used to lose it.
+    const cached = buffers.get(editorPath);
+    if (cached?.dirty) {
+      setContent(cached.content);
+      setSavedContent(cached.saved);
+      setDirty(true);
+      setContentLoaded(true);
+      return;
+    }
     // Load in diff mode too: "Accept working-tree content" writes this buffer
     // back to disk, so it must hold real file content, never the initial "".
     invoke<string>("fs_read", { path: editorPath })
@@ -291,6 +322,14 @@ export function ExplorerPane({ root }: { root: string }) {
 
   // Ctrl+S anywhere while editing (never from a focused terminal: the
   // shell owns that key, and DC3 would silently pause output via XOFF).
+  // Mirror only unsaved buffers: a clean one reloads from disk, and keeping
+  // every opened file in memory would grow without bound.
+  useEffect(() => {
+    if (!editorPath) return;
+    if (dirty) buffers.set(editorPath, { content, saved: savedContent, dirty: true });
+    else buffers.delete(editorPath);
+  }, [editorPath, content, savedContent, dirty]);
+
   useEffect(() => {
     if (!editorPath || diffMode) return;
     const onKey = (e: KeyboardEvent) => {
@@ -316,8 +355,9 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const shortName = useMemo(() => {
     if (!editorPath) return "";
-    const rel = editorPath.slice(root.length + 1);
-    return rel;
+    const r = normSep(root);
+    const p = normSep(editorPath);
+    return p.startsWith(r + "/") ? p.slice(r.length + 1) : p;
   }, [editorPath, root]);
 
   const language = useMemo(() => {
@@ -341,7 +381,12 @@ export function ExplorerPane({ root }: { root: string }) {
     setSavedContent(content);
     setDirty(false);
   };
-  saveRef.current = () => void save();
+  // Monaco's Ctrl+S handler is registered once in onMount, so it reads the
+  // current save through a ref instead of a stale closure.
+  const saveRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    saveRef.current = () => void save();
+  });
 
   const revert = () => {
     setContent(savedContent);
@@ -632,6 +677,9 @@ export function ExplorerPane({ root }: { root: string }) {
         ) : (
           <Editor
             height="100%"
+            // One model per file: without a path every file shared Monaco's
+            // default model, so Ctrl+Z could restore another file's text.
+            path={normSep(editorPath ?? "")}
             language={language}
             theme="vs-dark"
             value={content}
@@ -678,7 +726,3 @@ export function ExplorerPane({ root }: { root: string }) {
     </div>
   );
 }
-
-// Wired per-render by the component so the Monaco Ctrl+S command saves
-// the current buffer. Declared at module scope because onMount only fires once.
-const saveRef: { current: () => void } = { current: () => {} };
