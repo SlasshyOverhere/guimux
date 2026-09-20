@@ -9,6 +9,7 @@ import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { menuPos } from "../menuPos";
 import { createSingleFlight } from "../singleFlight";
+import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
 
@@ -27,7 +28,7 @@ const menuViewport = () => ({
   h: window.innerHeight,
 });
 import { confirmDialog, errorDialog } from "../dialogs";
-import type { Worktree, FileStatus, Project } from "../types";
+import type { Worktree, Project } from "../types";
 
 // Rows are divs with onClick; make them reachable and activable by keyboard.
 const rowKey = (fn: () => void) => (e: React.KeyboardEvent) => {
@@ -36,19 +37,6 @@ const rowKey = (fn: () => void) => (e: React.KeyboardEvent) => {
     fn();
   }
 };
-
-// Porcelain letters, not icon glyphs: M amber, added green, deleted red.
-function statusLetter(s: FileStatus): { letter: string; color: string; label: string } {
-  if (s.workdir_status === "?" || s.index_status === "?")
-    return { letter: "A", color: "var(--gm-green)", label: "untracked" };
-  if (s.workdir_status === "M" || s.index_status === "M")
-    return { letter: "M", color: "var(--gm-amber)", label: "modified" };
-  if (s.workdir_status === "D" || s.index_status === "D")
-    return { letter: "D", color: "var(--gm-red)", label: "deleted" };
-  if (s.workdir_status === "R" || s.index_status === "R")
-    return { letter: "R", color: "var(--gm-ink-dim)", label: "renamed" };
-  return { letter: "·", color: "var(--gm-ink-dim)", label: s.workdir_status || "changed" };
-}
 
 // Long Windows paths wrap mid-segment and wreck the list; shorten to the
 // last two segments. Main worktree keeps its full path (it is the anchor).
