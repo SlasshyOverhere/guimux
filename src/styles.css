@@ -229,6 +229,21 @@ textarea,
   background: var(--gm-pressed);
 }
 
+/* Selected list row in the sidebar carries a rail: a fill alone reads as one
+   more hover, and the rail survives the row's own hover. */
+.gm-rail[data-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--gm-ink-mute);
+}
+
+/* Panel section label: the one heading style in a list panel. */
+.gm-sect {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gm-ink-faint);
+}
+
 /* xterm tuning: fixed cell grid, so no kerning/ligatures/legibility
    shaping that shuffles monospace advances (the "weird font" look).
    Body sets Inter stylistic sets + antialiased smoothing: reset all of it
