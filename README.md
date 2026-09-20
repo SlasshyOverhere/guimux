@@ -22,6 +22,17 @@ npm run tauri dev    # full app
 npm run tauri build
 ```
 
+## Test
+
+```bash
+npm run typecheck      # tsc --noEmit
+npm test               # frontend unit tests (node --test)
+cd src-tauri && cargo test
+```
+
+CI runs all three on every push to `main` and every pull request
+(`.github/workflows/ci.yml`).
+
 ## Updates
 
 Guimux self-updates via the Tauri updater plugin + GitHub Releases.
@@ -51,4 +62,5 @@ Release checklist:
 
 - **Worktrees** — list / create / remove / merge branches
 - **Terminal splits** — GPU-accelerated xterm.js, unlimited h/v splits per worktree
-- **File explorer + editor** — Monaco with autosave
+- **File explorer + editor** — bundled Monaco, explicit save (Ctrl+S),
+  unsaved buffers survive closing and switching worktrees
