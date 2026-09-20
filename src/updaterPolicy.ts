@@ -1,9 +1,6 @@
 // Dependency-free updater policy: pure logic + concurrency guard.
 // No Tauri imports so node --test can exercise this directly.
 
-// Concurrent check/download corrupts the updater Resource and double-notifies.
-export { createSingleFlight, type SingleFlight } from "./singleFlight";
-
 /** Map updater failures to one user-friendly line; never leak stack traces. */
 export function updaterErrorMessage(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e ?? "");

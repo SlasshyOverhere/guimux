@@ -2,7 +2,8 @@
 // Run: node --test src/updaterPolicy.test.ts
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createSingleFlight, updaterErrorMessage } from "./updaterPolicy.ts";
+import { createSingleFlight } from "./singleFlight.ts";
+import { updaterErrorMessage } from "./updaterPolicy.ts";
 
 describe("single flight", () => {
   it("second concurrent caller gets null, first completes", async () => {

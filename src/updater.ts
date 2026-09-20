@@ -1,7 +1,8 @@
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { createSingleFlight, updaterErrorMessage } from "./updaterPolicy";
+import { createSingleFlight } from "./singleFlight";
+import { updaterErrorMessage } from "./updaterPolicy";
 
 export { updaterErrorMessage };
 
