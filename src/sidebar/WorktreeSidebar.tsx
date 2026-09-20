@@ -8,6 +8,7 @@ import { Search, ChevronRight, X, GitBranch, Check } from "lucide-react";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { menuPos } from "../menuPos";
+import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
 
 // Row menu: six items at most (open, pin, copy, merge, abort, remove).
@@ -105,7 +106,6 @@ export function WorktreeSidebar() {
   const [baseOpen, setBaseOpen] = useState(false);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
-  const [statuses, setStatuses] = useState<Record<string, FileStatus[]>>({});
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
   // Other projects start collapsed: one line each until opened. Active
@@ -183,6 +183,9 @@ export function WorktreeSidebar() {
     projects.find((p) => p.id === activeProjectId) ?? null;
   const isGit = proj?.isGit ?? false;
   const isPlain = proj ? !proj.isGit : false;
+  // Must run before any conditional return and after isGit exists: `empty` is
+  // not `clean`, so the panel needs to know whether status has landed.
+  const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
 
   const refreshList = async () => {
     if (!repoRoot || !isGit) return;
@@ -212,46 +215,6 @@ export function WorktreeSidebar() {
     refreshList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoRoot, isGit]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      if (!repoRoot || !isGit) return;
-      // Active worktree first (snappy badge), the rest staggered 300ms
-      // apart so N worktrees never burst N git spawns at once on startup.
-      const ids = worktrees.filter((wt) => !wt.id.startsWith("plain:")).map((wt) => wt.id);
-      const paths = new Map(worktrees.map((wt) => [wt.id, wt.path]));
-      const ordered = [
-        ...ids.filter((id) => id === useStore.getState().activeWorktreeId),
-        ...ids.filter((id) => id !== useStore.getState().activeWorktreeId),
-      ];
-      const next: Record<string, FileStatus[]> = {};
-      for (const [i, id] of ordered.entries()) {
-        if (i > 0) await new Promise((r) => setTimeout(r, 300));
-        if (cancelled) return;
-        try {
-          next[id] = await invoke("git_status", { path: paths.get(id)! });
-        } catch {
-          next[id] = [];
-        }
-        if (!cancelled) setStatuses({ ...next });
-      }
-      if (!cancelled) setStatuses(next);
-    };
-    // First poll deferred 3s: the shell burst owns startup; badges catch up.
-    const first = setTimeout(() => void poll(), 3000);
-    // 8s (not 4s) and skipped while the window is hidden: git_status runs
-    // per worktree and this poll is the app's steady-state background load.
-    const t = setInterval(() => {
-      if (!document.hidden) void poll();
-    }, 8000);
-    return () => {
-      cancelled = true;
-      clearTimeout(first);
-      clearInterval(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoRoot, isGit, activeProjectId, worktrees.length]);
 
   // Click anywhere or Escape dismisses the row context menu.
   useEffect(() => {
@@ -436,7 +399,8 @@ export function WorktreeSidebar() {
     !wt.is_main &&
     wt.id !== activeWorktreeId &&
     !revived[wt.id] &&
-    (statuses[wt.id] ?? []).length === 0 &&
+    // Known-empty only: an unread row is not evidence of a quiet worktree.
+    statuses[wt.id]?.length === 0 &&
     wt.last_commit != null &&
     nowS - wt.last_commit > SETTLE_AFTER_S;
   const gitRows = worktrees.filter((wt) => (isGit ? !wt.id.startsWith("plain:") : true));
@@ -654,7 +618,8 @@ export function WorktreeSidebar() {
           )}
 
           {shownLive.map((wt) => {
-            const dirty = (statuses[wt.id] ?? []).length;
+            const known = statuses[wt.id] !== undefined;
+            const dirty = statuses[wt.id]?.length ?? 0;
             const plainRow = wt.id.startsWith("plain:");
             const selected = wt.id === activeWorktreeId;
             return (
@@ -685,7 +650,11 @@ export function WorktreeSidebar() {
                       <span className="font-normal text-ink-500"> · pinned</span>
                     )}
                   </span>
-                  {dirty > 0 ? (
+                  {!known ? (
+                    <span className="gm-meta tnum flex-none" title="Status not read yet">
+                      …
+                    </span>
+                  ) : dirty > 0 ? (
                     <span className="tnum flex-none text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>
                       {dirty}
                     </span>
@@ -1064,9 +1033,11 @@ export function WorktreeSidebar() {
             <div className="px-2.5 pb-1 pt-1 text-[12.5px] font-semibold text-ink-100">
               {activeWt.branch}{" "}
               <span className="font-normal text-ink-500">
-                {activeStatuses.length === 0
-                  ? "is clean."
-                  : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
+                {!statusLoaded
+                  ? "· reading status…"
+                  : activeStatuses.length === 0
+                    ? "is clean."
+                    : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
               </span>
             </div>
           )}
