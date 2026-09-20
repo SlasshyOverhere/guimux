@@ -4,6 +4,7 @@ import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
+import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
 
@@ -456,10 +457,7 @@ export function ExplorerPane({ root }: { root: string }) {
     </div>
   );
 
-  const [width, setWidth] = useState(() => {
-    const v = Number(localStorage.getItem("guimux-explorer-w"));
-    return Number.isFinite(v) && v >= 220 && v <= 720 ? v : 256;
-  });
+  const [width, setWidth] = useState(() => readPref(PREF.explorerWidth, 256, numIn(220, 720)));
   const widthRef = useRef(width);
   widthRef.current = width;
   const onResizeDown = (e: React.MouseEvent) => {
@@ -477,7 +475,7 @@ export function ExplorerPane({ root }: { root: string }) {
     const up = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      localStorage.setItem("guimux-explorer-w", String(Math.round(widthRef.current)));
+      writePref(PREF.explorerWidth, Math.round(widthRef.current));
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };

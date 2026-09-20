@@ -7,6 +7,7 @@ import { Search, ChevronRight, X, GitBranch, Check } from "lucide-react";
 // proves undiscoverable.
 import { useStore } from "../store";
 import { detectToProject } from "../project";
+import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
 import { confirmDialog, errorDialog } from "../dialogs";
 import type { Worktree, FileStatus, Project } from "../types";
 
@@ -97,66 +98,47 @@ export function WorktreeSidebar() {
   const [settledOpen, setSettledOpen] = useState(false);
   // Other projects start collapsed: one line each until opened. Active
   // project is always expanded. Persisted so the list stays calm.
-  const [projOpen, setProjOpen] = useState<Record<string, true>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("guimux-sidebar-expanded") ?? "{}");
-    } catch {
-      return {};
-    }
-  });
+  const [projOpen, setProjOpen] = useState<Record<string, true>>(() =>
+    readPref<Record<string, true>>(PREF.expandedProjects, {}, flagMap),
+  );
   const toggleProjOpen = (pid: string) => {
     setProjOpen((c) => {
       const next = { ...c };
       if (next[pid]) delete next[pid];
       else next[pid] = true as const;
-      try {
-        localStorage.setItem("guimux-sidebar-expanded", JSON.stringify(next));
-      } catch {
-        /* private mode */
-      }
+      writePref(PREF.expandedProjects, next);
       return next;
     });
   };
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<{ x: number; y: number; id: string; projectId: string } | null>(null);
-  const [pinned, setPinned] = useState<Record<string, true>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("guimux-pinned-worktrees") ?? "{}");
-    } catch {
-      return {};
-    }
-  });
+  const [pinned, setPinned] = useState<Record<string, true>>(() =>
+    readPref<Record<string, true>>(PREF.pinnedWorktrees, {}, flagMap),
+  );
   const togglePin = (id: string) => {
     setPinned((p) => {
       const next = { ...p };
       if (next[id]) delete next[id];
       else next[id] = true as const;
-      localStorage.setItem("guimux-pinned-worktrees", JSON.stringify(next));
+      writePref(PREF.pinnedWorktrees, next);
       return next;
     });
   };
-  const [revived, setRevived] = useState<Record<string, true>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("guimux-revived-worktrees") ?? "{}");
-    } catch {
-      return {};
-    }
-  });
+  const [revived, setRevived] = useState<Record<string, true>>(() =>
+    readPref<Record<string, true>>(PREF.revivedWorktrees, {}, flagMap),
+  );
   // ponytail: inactivity = last commit age only (no fs mtime/terminal polling).
   // Upgrade path: backend `inactive_since` covering mtime + dirty + pty recency.
   const SETTLE_AFTER_S = 48 * 3600;
   const revive = (id: string) => {
     setRevived((r) => {
       const next = { ...r, [id]: true as const };
-      localStorage.setItem("guimux-revived-worktrees", JSON.stringify(next));
+      writePref(PREF.revivedWorktrees, next);
       return next;
     });
     setActiveWorktree(id);
   };
-  const [width, setWidth] = useState(() => {
-    const v = Number(localStorage.getItem("guimux-sidebar-w"));
-    return Number.isFinite(v) && v >= 180 && v <= 480 ? v : 240;
-  });
+  const [width, setWidth] = useState(() => readPref(PREF.sidebarWidth, 240, numIn(180, 480)));
   const widthRef = useRef(width);
   widthRef.current = width;
 
@@ -177,7 +159,7 @@ export function WorktreeSidebar() {
     const up = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      localStorage.setItem("guimux-sidebar-w", String(Math.round(widthRef.current)));
+      writePref(PREF.sidebarWidth, Math.round(widthRef.current));
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };
@@ -462,20 +444,12 @@ export function WorktreeSidebar() {
   const [showAll, setShowAll] = useState<Record<string, true>>({});
   const [disExpanded, setDisExpanded] = useState<Record<string, true>>({});
   const [disGroups, setDisGroups] = useState<Record<string, true>>({});
-  const [disBaseline, setDisBaseline] = useState<Record<string, string[]>>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("guimux-discovered-baseline") ?? "{}");
-    } catch {
-      return {};
-    }
-  });
+  const [disBaseline, setDisBaseline] = useState<Record<string, string[]>>(() =>
+    readPref<Record<string, string[]>>(PREF.discoveredBaseline, {}, stringArrayMap),
+  );
   const saveBaseline = (next: Record<string, string[]>) => {
     setDisBaseline(next);
-    try {
-      localStorage.setItem("guimux-discovered-baseline", JSON.stringify(next));
-    } catch {
-      /* private mode */
-    }
+    writePref(PREF.discoveredBaseline, next);
   };
   const parentPath = (p: string) => {
     // Shared dirname: keeps case + Windows separators, never re-joins.
@@ -562,7 +536,7 @@ export function WorktreeSidebar() {
         onDoubleClick={() => {
           widthRef.current = 240;
           setWidth(240);
-          localStorage.setItem("guimux-sidebar-w", "240");
+          writePref(PREF.sidebarWidth, 240);
         }}
         title="Drag to resize, double-click to reset"
       >
