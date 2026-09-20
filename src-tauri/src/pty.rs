@@ -151,9 +151,13 @@ fn resolve_pwsh() -> Option<String> {
 /// pwsh -> inbox powershell -> cmd, so a terminal always opens.
 #[cfg(windows)]
 fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
+    let mut chain: Vec<(String, Vec<String>)> = vec![];
+    // Override wins, but the chain stays behind it: a typo'd path used to
+    // leave the pane with no shell at all.
     if let Ok(over) = std::env::var("GUIMUX_SHELL") {
-        if !over.trim().is_empty() {
-            return vec![(over, vec![])];
+        let over = over.trim().to_string();
+        if !over.is_empty() {
+            chain.push((over, vec![]));
         }
     }
     let pwsh = resolve_pwsh();
@@ -182,9 +186,10 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
             encoded.clone(),
         ]
     };
-    let mut chain = vec![];
     if let Some(p) = pwsh {
-        chain.push((p, ps_args()));
+        if !chain.iter().any(|(s, _)| s.eq_ignore_ascii_case(&p)) {
+            chain.push((p, ps_args()));
+        }
     }
     if let Some(p) = inbox {
         if !chain.iter().any(|(s, _)| s.eq_ignore_ascii_case(&p)) {
@@ -373,7 +378,9 @@ fn spawn_pair(
     let t_start = std::time::Instant::now();
     // Cap live shells: each holds a 256KB replay buffer (H-003).
     if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
-        return Err("too many pty sessions (close panes and retry)".into());
+        return Err(format!(
+            "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+        ));
     }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
@@ -584,8 +591,9 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
             Err(e) => eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows} ERR: {e}"),
         }
     }
-    let _ = r;
-    Ok(())
+    // Report instead of swallowing: a wedged ConPTY resize used to look like
+    // success from the frontend's side.
+    r.map_err(|e| format!("pty_resize failed: {e}"))
 }
 
 #[command]
