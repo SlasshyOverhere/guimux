@@ -363,7 +363,7 @@ pub fn worktree_remove(
         }
         if !lost.is_empty() {
             return Err(format!(
-                "worktree has {} — commit or merge first, or retry to discard them",
+                "worktree has {}. Commit or merge first, or retry to discard them",
                 lost.join(" and ")
             ));
         }

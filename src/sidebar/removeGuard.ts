@@ -1,8 +1,8 @@
 // Removing a worktree runs `git worktree remove --force` plus `branch -D`, so
 // it can discard two different kinds of work. The backend refuses and names
 // what would be lost; this turns that refusal into the facts the confirm dialog
-// needs. Anything else (locked file, stale entry) returns null and must be
-// reported as an error rather than escalated into a destructive retry.
+// needs. Anything else, such as a locked file or a stale entry, returns null
+// and must be reported as an error, never escalated into a destructive retry.
 //
 // Sentinels are matched on the phrase the backend appends to every guard, so a
 // reworded list of reasons still escalates correctly.
@@ -24,7 +24,9 @@ export function parseRemoveGuard(e: unknown): RemoveGuard | null {
   const dirty = msg.includes("uncommitted changes");
   const m = /(\d+) commits? not in (\S+)/.exec(msg);
   const unmerged = m ? Number(m[1]) : 0;
-  const base = m ? m[2] : null;
+  // `\S+` runs to the next space, so it carries the message's sentence period.
+  // A branch name can contain dots, so trim only the punctuation at the end.
+  const base = m ? m[2].replace(/[.,;:!?]+$/, "") : null;
 
   const parts: string[] = [];
   if (dirty) parts.push("uncommitted changes");
