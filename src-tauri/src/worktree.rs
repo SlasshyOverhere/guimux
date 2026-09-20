@@ -280,11 +280,14 @@ fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, S
     Err("worktree is not registered with git and is outside ~/.guimux/worktrees — delete it manually".into())
 }
 
-fn delete_branch_guarded(root: &Path, b: &str) {
+fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
     if b.is_empty() || b.starts_with('-') || b.contains('\0') {
         return;
     }
-    let _ = run_git(root, &["branch", "-D", "--", b]);
+    // -d refuses an unmerged branch; -D only once the caller accepted the
+    // loss of uncommitted work.
+    let flag = if force { "-D" } else { "-d" };
+    let _ = run_git(root, &["branch", flag, "--", b]);
 }
 
 fn sanitize(name: &str) -> String {
@@ -316,8 +319,10 @@ pub fn worktree_remove(
     repo_root: String,
     id: String,
     delete_branch: bool,
+    force: Option<bool>,
 ) -> Result<(), String> {
     reject_git_ref(&id, "worktree id")?;
+    let force = force.unwrap_or(false);
     let path = PathBuf::from(&id);
     // Run git from the MAIN worktree (a linked worktree reports itself as
     // toplevel, and removing a worktree from inside itself fails on Windows).
@@ -330,6 +335,22 @@ pub fn worktree_remove(
         // prune the stale entry so `git worktree list` stops showing it.
         let _ = run_git(&root, &["worktree", "prune"]);
         return Ok(());
+    }
+    // --force also discards uncommitted work, so refuse it until the caller
+    // confirmed the loss. Ignored build output does not count as dirty.
+    if !force {
+        let dirty = git_cmd()
+            .args(["status", "--porcelain"])
+            .current_dir(&path)
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if dirty {
+            return Err(
+                "worktree has uncommitted changes — commit or stash first, or retry to discard them"
+                    .into(),
+            );
+        }
     }
     // capture branch before removal
     let branch = current_branch(&path).ok();
@@ -365,7 +386,7 @@ pub fn worktree_remove(
         let _ = run_git(&root, &["worktree", "prune"]);
         if delete_branch {
             if let Some(b) = branch {
-                delete_branch_guarded(&root, &b);
+                delete_branch_guarded(&root, &b, force);
             }
         }
         return Ok(());
@@ -375,7 +396,7 @@ pub fn worktree_remove(
     }
     if delete_branch {
         if let Some(b) = branch {
-            delete_branch_guarded(&root, &b);
+            delete_branch_guarded(&root, &b, force);
         }
         return Ok(());
     }

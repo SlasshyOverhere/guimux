@@ -332,8 +332,13 @@ export function WorktreeSidebar() {
     if (!(await confirmDialog(`Remove worktree "${wt.branch}"? (branch will be deleted)`))) return;
     const root = pid ? rootOf(pid) : repoRoot;
     if (!root) return;
-    try {
-      await invoke("worktree_remove", { repoRoot: root, id: wt.id, deleteBranch: !wt.is_main });
+    const runRemove = async (force: boolean) => {
+      await invoke("worktree_remove", {
+        repoRoot: root,
+        id: wt.id,
+        deleteBranch: !wt.is_main,
+        force,
+      });
       // Orphaned shells no longer die on unmount, so reap them explicitly.
       for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
         invoke("pty_kill", { id: pty }).catch(() => {});
@@ -343,8 +348,22 @@ export function WorktreeSidebar() {
       } else {
         await refreshList();
       }
+    };
+    try {
+      await runRemove(false);
     } catch (e) {
-      void errorDialog(`remove failed: ${e}`);
+      // Uncommitted work is the one failure worth a second, explicit confirm:
+      // the backend refuses rather than silently discarding it.
+      if (!String(e).includes("uncommitted changes")) {
+        void errorDialog(`remove failed: ${e}`);
+        return;
+      }
+      if (!(await confirmDialog(`${wt.branch} has uncommitted changes. Remove it anyway and discard them?`))) return;
+      try {
+        await runRemove(true);
+      } catch (e2) {
+        void errorDialog(`remove failed: ${e2}`);
+      }
     }
   };
 
