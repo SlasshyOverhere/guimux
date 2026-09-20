@@ -11,6 +11,8 @@ pub struct FileStatus {
 }
 
 const DIFF_CAP: usize = 1_000_000; // 1MB per file
+/// `status -z` on a repo with ~100k changes is ~8MB; cap the read there too.
+const STATUS_CAP: usize = 8 * 1024 * 1024;
 
 /// All git spawns go through here: on Windows a child console process flashes
 /// a visible console window unless CREATE_NO_WINDOW is set — that flash is
@@ -138,13 +140,77 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
     Ok(p.to_string_lossy().to_string())
 }
 
+/// Capped read: `Command::output()` buffered a whole multi-hundred-MB diff
+/// only for the caller to keep the first 1MB. Stop reading at the cap, then
+/// kill the child so it never blocks on a full pipe. Returns (text, truncated).
+fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = git_cmd()
+        .args(args)
+        .current_dir(repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "[git] failed to spawn".to_string())?;
+    // Drain stderr on its own thread: reading it after wait() would deadlock
+    // if git ever filled the pipe while we were still reading stdout.
+    let err_thread = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            s
+        })
+    });
+    let mut buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    if let Some(mut out) = child.stdout.take() {
+        let mut chunk = [0u8; 32 * 1024];
+        while buf.len() < cap {
+            match out.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let room = cap - buf.len();
+                    if n > room {
+                        buf.extend_from_slice(&chunk[..room]);
+                        truncated = true;
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if truncated {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr = err_thread.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    if !truncated && !status.success() {
+        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()));
+    }
+    Ok((String::from_utf8_lossy(&buf).to_string(), truncated))
+}
+
 #[command]
 pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     let repo = PathBuf::from(&path);
     // core.quotepath=false (same as git_diff): without it non-ASCII paths
     // come back quoted + octal-escaped ("na\303\257ve.txt") and can't be
     // opened from the tree.
-    let out = git(&repo, &["-c", "core.quotepath=false", "status", "--porcelain", "-z"])?;
+    let (mut out, truncated) = git_capped(
+        &repo,
+        &["-c", "core.quotepath=false", "status", "--porcelain", "-z"],
+        STATUS_CAP,
+    )?;
+    if truncated {
+        // The tail entry is a partial record: drop it rather than report a
+        // bogus path that cannot be opened from the tree.
+        if let Some(i) = out.rfind('\0') {
+            out.truncate(i + 1);
+        }
+    }
     let mut files = vec![];
     let mut iter = out.split('\0').filter(|s| !s.is_empty());
     // M-004: byte-slice panicked on any <3-byte entry; non-UTF8 names came
@@ -189,10 +255,15 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
     }
     args.push("--".into());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let diff = git(&repo, &args_ref)?;
-    if diff.len() > DIFF_CAP {
+    let (diff, truncated) = git_capped(&repo, &args_ref, DIFF_CAP)?;
+    if truncated {
+        // Cut on a char boundary: String::truncate panics mid multi-byte.
         let mut cut = diff;
-        cut.truncate(DIFF_CAP);
+        let mut at = cut.len();
+        while at > 0 && !cut.is_char_boundary(at) {
+            at -= 1;
+        }
+        cut.truncate(at);
         cut.push_str("\n... [diff truncated at 1MB]\n");
         return Ok(cut);
     }
