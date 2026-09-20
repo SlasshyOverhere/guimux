@@ -4,9 +4,9 @@
 import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 // monaco 0.56 resolves subpaths under `esm/vs/` via its exports map, and only
-// the explicit `.js` form matches for every worker — without it the json
-// worker silently fails to resolve. The full `monaco-editor/esm/vs/...`
-// spelling no longer resolves at all.
+// the explicit `.js` form matches for every worker. Without it the json worker
+// silently fails to resolve. The full `monaco-editor/esm/vs/...` spelling no
+// longer resolves at all.
 import editorWorker from "monaco-editor/editor/editor.worker.js?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker.js?worker";
 import cssWorker from "monaco-editor/language/css/css.worker.js?worker";

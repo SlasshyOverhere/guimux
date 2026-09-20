@@ -7,8 +7,8 @@ export interface StatusMark {
 }
 
 // Porcelain letters, not icon glyphs. Precedence matters: a file deleted from
-// the worktree reads "D" even when the index also carries an "M" (it is gone,
-// whatever was staged), and a staged addition is "A" rather than a blank "·".
+// the worktree reads "D" even when the index also carries an "M", because it is
+// gone whatever was staged. A staged addition reads "A", never a blank "·".
 // Colors are the --gm-* state tokens, so components never hardcode one.
 export function statusLetter(s: FileStatus): StatusMark {
   const cols = [s.index_status, s.workdir_status];

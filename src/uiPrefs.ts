@@ -1,4 +1,4 @@
-// Chrome view state (sidebar/explorer width, pins, collapse, hidden groups).
+// Chrome view state: sidebar and explorer width, pins, collapse, hidden groups.
 // Every read and write goes through here: storage throws in private mode and at
 // quota, and two of these writes run inside React state updaters, where a throw
 // would take down the render. Key names live in PREF so they are greppable.

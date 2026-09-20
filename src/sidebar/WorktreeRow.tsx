@@ -3,8 +3,8 @@ import { MoreHorizontal } from "lucide-react";
 import type { FileStatus, Worktree } from "../types";
 
 // One row shape for every worktree in the panel: selected rail, branch line,
-// status cluster, and an actions button that appears on hover (the context
-// menu alone is unreachable without a mouse).
+// status cluster, and a hover actions button. A context menu alone leaves the
+// actions unreachable without a mouse.
 
 export const rowKey = (fn: () => void) => (e: KeyboardEvent) => {
   if (e.key === "Enter" || e.key === " ") {
@@ -13,8 +13,8 @@ export const rowKey = (fn: () => void) => (e: KeyboardEvent) => {
   }
 };
 
-// Long Windows paths wrap mid-segment and wreck the list: shorten to the last
-// two segments. Main worktree keeps its full path (it is the anchor).
+// Long Windows paths wrap mid-segment and wreck the list, so shortPath keeps
+// the last two segments. The main worktree keeps its full path.
 export function shortPath(p: string, full: boolean): string {
   if (full) return p;
   const parts = p.split(/[\\/]+/).filter(Boolean);

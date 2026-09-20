@@ -1,6 +1,6 @@
-// Dependency-free single-flight guard (no Tauri imports, so node --test can
-// exercise it directly). Used by the updater, and by the sidebar's status poll
-// and worktree list refresh.
+// Dependency-free single-flight guard. It imports no Tauri APIs, so node --test
+// can load it directly. Used by the updater, the sidebar status poll, and the
+// worktree list refresh.
 
 export interface SingleFlight {
   readonly busy: boolean;

@@ -1,5 +1,5 @@
-// Porcelain letter precedence. The regression this pins: a staged addition
-// came back as "·" (index "A" matched no branch) and a file deleted from the
+// Porcelain letter precedence. The regression this pins: a staged addition came
+// back as "·" because index "A" matched no branch, and a file deleted from the
 // worktree read "M" whenever it was also staged-modified.
 // Run: node --test src/sidebar/statusLetter.test.ts
 import { describe, it } from "node:test";

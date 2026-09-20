@@ -2,10 +2,10 @@ import type { ReactNode } from "react";
 import { ChevronRight, X } from "lucide-react";
 import type { Worktree } from "../types";
 
-// Worktrees git knows that guimux never opened ("discovered"): one collapsed
-// line per project, expanding to a preview grouped by parent directory. Rows
-// open through the caller's own handler, so the active project and the other
-// projects keep their different wiring in one place each.
+// Worktrees git knows that guimux never opened. The panel calls them
+// discovered: one collapsed line per project, expanding to a preview grouped by
+// parent directory. Rows open through the caller's own handler, so the active
+// project and the other projects keep their different wiring in one place each.
 //
 // The line is a notification, not a permanent toggle: it counts only rows that
 // arrived since the last dismiss, and it disappears once the rows are shown or

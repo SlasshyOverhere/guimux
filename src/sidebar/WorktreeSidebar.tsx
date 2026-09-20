@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, MoreHorizontal, Search, X } from "lucide-react";
-// Ledger sidebar: typographic rows, no status dots. Status reads as words
-// ("3", "clean", "…"), actions sit behind the row's own menu button and the
-// right-click menu. Rows come from WorktreeRow, so every list (active, other
-// projects, discovered, sleeping) shares one shape.
+// Ledger sidebar: typographic rows with no status dots. Status reads as a word,
+// such as "3" or "clean". Actions sit behind the row's own menu button and the
+// right-click menu. Rows come from WorktreeRow, so the active project, other
+// projects, discovered previews, and sleeping rows all share one shape.
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { createSingleFlight } from "../singleFlight";
@@ -48,9 +48,9 @@ export function WorktreeSidebar() {
   const updateProject = useStore((s) => s.updateProject);
   const openEditor = useStore((s) => s.openEditor);
 
-  // Unvisited projects have no cached list yet: fill them in once per repo
-  // root so every project shows rows. Writes go through setProjectWorktrees
-  // (cache only), never the live list.
+  // Unvisited projects have no cached list yet, so fill them in once per repo
+  // root and every project shows rows. Writes go through setProjectWorktrees,
+  // which touches the cache only and never the live list.
   const [listedRoots, setListedRoots] = useState<Record<string, true>>({});
   const cacheKeys = Object.keys(worktreesByProject).length;
   useEffect(() => {
@@ -123,7 +123,7 @@ export function WorktreeSidebar() {
   const [revived, setRevived] = useState<Record<string, true>>(() =>
     readPref<Record<string, true>>(PREF.revivedWorktrees, {}, flagMap),
   );
-  // ponytail: inactivity = last commit age only (no fs mtime/terminal polling).
+  // ponytail: inactivity reads the last commit age only, not fs mtime or terminal use.
   // Upgrade path: backend `inactive_since` covering mtime + dirty + pty recency.
   const SETTLE_AFTER_S = 48 * 3600;
   const revive = (id: string) => {
@@ -170,14 +170,14 @@ export function WorktreeSidebar() {
   // not `clean`, so the panel needs to know whether status has landed.
   const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
 
-  // `immediate` skips the deferral below: explicit user actions (create,
-  // merge, remove) are not racing App's loader and should not wait 1.5s to
+  // `immediate` skips the deferral below, because an explicit user action such
+  // as create or remove is not racing App's loader and should not wait 1.5s to
   // reconcile. One listing at a time, so a create+remove pair cannot interleave.
   const refreshList = async (immediate = false) => {
     if (!repoRoot || !isGit) return;
-    // Skip while App's loader owns this repoRoot: App always lists right
-    // after it sets repoRoot, so a sidebar re-list here doubles the spawns
-    // on every project switch (and on startup).
+    // Skip while App's loader owns this repoRoot: App always lists right after
+    // it sets repoRoot, so a re-list here doubles the spawns on every project
+    // switch and on startup.
     if (!immediate) await new Promise((r) => setTimeout(r, 1500));
     if (useStore.getState().repoRoot !== repoRoot) return;
     await listGuard.run(async () => {
@@ -315,7 +315,7 @@ export function WorktreeSidebar() {
     } catch (e) {
       // The backend refuses to discard real work and names what is at stake:
       // uncommitted changes, unmerged commits, or both. Anything else is an
-      // ordinary failure — never escalate it into a destructive retry.
+      // ordinary failure, not a reason to retry with force.
       const guard = parseRemoveGuard(e);
       if (!guard) {
         void errorDialog(`remove failed: ${e}`);
@@ -386,7 +386,7 @@ export function WorktreeSidebar() {
   const matches = (wt: Worktree) =>
     !q || wt.branch.toLowerCase().includes(q) || wt.path.toLowerCase().includes(q);
   // Discovered rows are worktrees git knows that guimux never created: no
-  // layout (never opened as a session), no guimux/ branch, not main.
+  // layout, so never opened as a session, no guimux/ branch, and not main.
   // One collapsed line per project, expanding to a preview grouped by parent
   // path; a persisted dismiss baseline keeps the line down until new ones
   // arrive, and the filter still searches everything.
@@ -689,7 +689,7 @@ export function WorktreeSidebar() {
           )}
           {isGit && !q && shownLive.length === 0 && (
             <div className="gm-meta px-2.5 py-3 leading-5">
-              No worktrees yet — create one below, or pull a branch in with git.
+              No worktrees yet. Create one below, or pull a branch in with git.
             </div>
           )}
 
@@ -796,7 +796,7 @@ export function WorktreeSidebar() {
               </button>
               {settledOpen &&
                 shownSettled.map((wt) => (
-                  <div key={wt.id} title="Quiet over 48h — click to make active again">
+                  <div key={wt.id} title="Quiet over 48h. Click to make active again">
                     <WorktreeRow
                       wt={wt}
                       dim

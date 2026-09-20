@@ -12,8 +12,8 @@ export interface WorktreeStatuses {
 }
 
 // One pass at a time. A pass costs ~300ms per worktree, which outruns the 8s
-// tick on a repo with enough of them — overlapping passes would double every
-// git spawn and re-render the panel twice as often.
+// tick on a repo with enough of them, so overlapping passes would double the
+// git spawns and re-renders.
 const pass = createSingleFlight();
 
 const same = (a: FileStatus[] | undefined, b: FileStatus[] | undefined) => {
@@ -44,8 +44,8 @@ export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean): Wo
     let cancelled = false;
 
     const run = async () => {
-      // Read the list at pass time: a create/remove between ticks is picked up
-      // without re-arming the interval (and without a stale closure).
+      // Read the list at pass time, so a create or remove between ticks is
+      // picked up without re-arming the interval and without a stale closure.
       const st = useStore.getState();
       const active = st.activeWorktreeId;
       const ids = st.worktrees.filter((wt) => !wt.id.startsWith("plain:")).map((wt) => wt.id);
@@ -59,13 +59,13 @@ export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean): Wo
         try {
           next[id] = await invoke<FileStatus[]>("git_status", { path: paths.get(id)! });
         } catch {
-          // Unreadable (dir gone, repo locked): leave it out. An empty list
-          // here would read as "clean", which is exactly the wrong claim.
+          // Unreadable, because the dir is gone or the repo is locked, so leave
+          // it out. An empty list here would read as "clean".
           continue;
         }
         if (cancelled) return;
-        // Publish each row as it lands (snappy badges) but skip the update when
-        // nothing changed, so a steady-state poll costs no renders at all.
+        // Publish each row as it lands, so badges appear early, but skip the
+        // update when nothing changed, so a steady poll costs no renders.
         const snap = { ...next };
         const current = useStore.getState().repoRoot === repoRoot;
         if (!current) return;
@@ -76,8 +76,8 @@ export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean): Wo
             : { forRoot: repoRoot, byWorktree: snap },
         );
       }
-      // No worktrees to read: the repo is genuinely clean, so stop saying
-      // "checking". A pass where every read failed stays unknown on purpose.
+      // No worktrees to read: the repo is clean, so stop saying "checking".
+      // A pass where every read failed stays unknown on purpose.
       if (!cancelled && !published && ordered.length === 0) {
         setState((prev) => (prev.forRoot === repoRoot ? prev : { forRoot: repoRoot, byWorktree: {} }));
       }

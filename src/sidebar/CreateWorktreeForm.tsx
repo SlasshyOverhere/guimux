@@ -129,7 +129,7 @@ export function CreateWorktreeForm({ branches, onSubmit, onCancel }: Props) {
             }
             if (e.key === "Enter") {
               // The highlighted option wins while the list is open; a bare
-              // Enter (no highlight) creates with whatever was typed.
+              // With no row highlighted, Enter creates with whatever was typed.
               if (open && at >= 0) take(at);
               else submit();
               return;
@@ -161,7 +161,7 @@ export function CreateWorktreeForm({ branches, onSubmit, onCancel }: Props) {
             {options.map((b, i) => option(i + 1, b, base === b))}
             {q && options.length === 0 && (
               <div className="px-3 py-2 text-[11.5px] text-ink-400">
-                No match — Enter uses it as-is.
+                No match. Enter uses it as-is.
               </div>
             )}
           </div>
