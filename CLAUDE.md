@@ -32,6 +32,7 @@ Guimux: lean Tauri 2 + React worktree/terminal workbench. Worktree = git dir (pa
 - Restart reuses the numeric id with a bumped epoch; stale exit-watchers/output pumps stay silent.
 - WebGL (`@xterm/addon-webgl`) is the primary renderer; `onContextLoss` disposes to canvas/DOM fallback, re-attempted on next visible mount. Hidden panes dispose WebGL, PTY stays alive.
 - Debug flags: `GUIMUX_PTY_DEBUG=1` (backend spawn timestamps on stderr); `localStorage guimux-stress=1` + reload runs the dev-only split/write/close stress loop (console `[gm-stress]`; `__gmStressStop()` stops it).
+- A save made in the app's editor is announced to the dev server (`announceWrite` + the `guimux-ignore-app-writes` plugin in `vite.config.ts`), so it does not hot-reload the app that made it. An edit from another editor still does.
 - App zoom via CSS `zoom` on `<html>` (0.5–2); terminals refit via ResizeObserver. Ctrl+D splits h (outside inputs/terminal), Ctrl+K palette skipped when terminal focused (kill-line).
 
 ## Custom Instructions
