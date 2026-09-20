@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Search, X } from "lucide-react";
+import { ChevronRight, MoreHorizontal, Search, X } from "lucide-react";
 // Ledger sidebar: typographic rows, no status dots. Status reads as words
 // ("3", "clean", "…"), actions sit behind the row's own menu button and the
 // right-click menu. Rows come from WorktreeRow, so every list (active, other
@@ -23,16 +23,14 @@ import type { Project, Worktree } from "../types";
 // same store slice, and the loser is whichever finished last.
 const listGuard = createSingleFlight();
 
-// Row menu box (six items at most), used to keep it inside the viewport.
+// Menu boxes, sized to their item count, used to keep them inside the viewport.
 const ROW_MENU_SIZE = { w: 192, h: 214 };
+const PROJECT_MENU_SIZE = { w: 216, h: 126 };
 
-interface MenuState {
-  x: number;
-  y: number;
-  wt: Worktree;
-  /** Owned by the row's project; undefined for the active project. */
-  pid?: string;
-}
+// One popover serves both menus: a worktree row's actions, and a project's.
+type MenuState =
+  | { kind: "row"; x: number; y: number; wt: Worktree; pid?: string }
+  | { kind: "project"; x: number; y: number; pid: string };
 
 export function WorktreeSidebar() {
   // Slices, not the whole store: a bare useStore() re-rendered this panel on
@@ -487,6 +485,53 @@ export function WorktreeSidebar() {
     return items;
   };
 
+  const hideDiscovered = (pid: string, rows: Worktree[]) => {
+    // Answered, so the announcement line stays quiet about them.
+    markHidden(pid, rows);
+    setShowAll((s) => delKey(s, pid));
+  };
+
+  /** Project header menu: the per-project switches, plus its path. */
+  const projectMenuItems = (pid: string): MenuItem[] => {
+    const st = useStore.getState();
+    const p = projects.find((x) => x.id === pid);
+    const rows = pid === st.activeProjectId ? gitRows : p ? otherRows(p) : [];
+    const items: MenuItem[] = [];
+    if (pid !== st.activeProjectId) {
+      items.push({ label: "Switch to project", onSelect: () => st.setActiveProject(pid) });
+    }
+    // Offered whenever the project has discovered worktrees at all, hidden by
+    // the baseline included: that is exactly when the switch means something.
+    if (rows.some(isDiscovered)) {
+      items.push(
+        showAll[pid]
+          ? { label: "Hide discovered worktrees", onSelect: () => hideDiscovered(pid, rows) }
+          : { label: "Show discovered worktrees", onSelect: () => showDiscovered(pid, rows) },
+      );
+    }
+    if (p) items.push({ label: "Copy path", onSelect: () => void copyPath(p.path) });
+    return items;
+  };
+
+  /** Hover-revealed actions button on a project header. */
+  const projActions = (pid: string, name: string) => (
+    <button
+      className="gm-icon-btn gm-icon-btn--sm shrink-0 opacity-0 group-hover/proj:opacity-100 focus-visible:opacity-100"
+      aria-label={`Project actions for ${name}`}
+      aria-haspopup="menu"
+      title="Project actions"
+      onClick={(e) => {
+        // The header itself expands or collapses: never both.
+        e.stopPropagation();
+        const r = e.currentTarget.getBoundingClientRect();
+        setMenu({ kind: "project", x: r.right, y: r.bottom + 4, pid });
+      }}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
+      <MoreHorizontal size={14} strokeWidth={2} />
+    </button>
+  );
+
   /** Shared wiring for every row in the panel. */
   const row = (wt: Worktree, pid?: string) => (
     <WorktreeRow
@@ -498,7 +543,7 @@ export function WorktreeSidebar() {
       // than claim anything about rows we have not looked at.
       status={pid ? undefined : statuses[wt.id] ?? null}
       onOpen={() => (pid ? openProjectWorktree(pid, wt.id) : setActiveWorktree(wt.id))}
-      onMenu={(at) => setMenu({ ...at, wt, pid })}
+      onMenu={(at) => setMenu({ kind: "row", ...at, wt, pid })}
     />
   );
 
@@ -509,7 +554,7 @@ export function WorktreeSidebar() {
       compact
       selected={wt.id === activeWorktreeId}
       onOpen={() => (pid ? openProjectWorktree(pid, wt.id) : setActiveWorktree(wt.id))}
-      onMenu={(at) => setMenu({ ...at, wt, pid })}
+      onMenu={(at) => setMenu({ kind: "row", ...at, wt, pid })}
     />
   );
 
@@ -605,9 +650,19 @@ export function WorktreeSidebar() {
           {/* Active project gets its own labeled section so its rows never
               blend into the projects below. */}
           {proj && (shownLive.length > 0 || q) && (
-            <div className="flex items-baseline justify-between px-2.5 pb-1 pt-2" title={proj.path}>
-              <span className="truncate text-[12px] font-semibold text-ink-100">{proj.name}</span>
+            <div
+              className="group/proj flex items-center gap-1 px-2.5 pb-1 pt-2"
+              title={proj.path}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: activePid });
+              }}
+            >
+              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink-100">
+                {proj.name}
+              </span>
               <span className="tnum gm-meta flex-none">{shownLive.length}</span>
+              {projActions(activePid, proj.name)}
             </div>
           )}
 
@@ -655,7 +710,7 @@ export function WorktreeSidebar() {
                     role="button"
                     tabIndex={0}
                     aria-expanded={open}
-                    className="gm-row flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2"
+                    className="gm-row group/proj flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2"
                     onClick={() => toggleProjOpen(p.id)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -665,9 +720,9 @@ export function WorktreeSidebar() {
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      useStore.getState().setActiveProject(p.id);
+                      setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
                     }}
-                    title={`${p.path}\nExpand to browse, right-click to switch.`}
+                    title={`${p.path}\nExpand to browse, right-click for the project menu.`}
                   >
                     <ChevronRight
                       size={12}
@@ -678,6 +733,7 @@ export function WorktreeSidebar() {
                       {p.name}
                     </span>
                     <span className="tnum gm-meta flex-none">{rows.length}</span>
+                    {projActions(p.id, p.name)}
                   </div>
                   {open && (
                     <div className="pb-0.5 pl-4">
@@ -705,8 +761,17 @@ export function WorktreeSidebar() {
               if (rows.length === 0) return null;
               return (
                 <div key={p.id} className="mt-1">
-                  <div className="px-2.5 pb-0.5 pt-2 text-[12px] font-semibold text-ink-100" title={p.path}>
-                    {p.name} <span className="tnum gm-meta font-normal">· {rows.length}</span>
+                  <div
+                    className="group/proj flex items-center gap-1 px-2.5 pb-0.5 pt-2 text-[12px] font-semibold text-ink-100"
+                    title={p.path}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
+                    {projActions(p.id, p.name)}
                   </div>
                   {rows.map((wt) => row(wt, p.id))}
                 </div>
@@ -737,7 +802,7 @@ export function WorktreeSidebar() {
                       dim
                       pinned={!!pinned[wt.id]}
                       onOpen={() => revive(wt.id)}
-                      onMenu={(at) => setMenu({ ...at, wt })}
+                      onMenu={(at) => setMenu({ kind: "row", ...at, wt })}
                     />
                   </div>
                 ))}
@@ -816,8 +881,8 @@ export function WorktreeSidebar() {
         <RowMenu
           x={menu.x}
           y={menu.y}
-          size={ROW_MENU_SIZE}
-          items={menuItems(menu.wt, menu.pid)}
+          size={menu.kind === "row" ? ROW_MENU_SIZE : PROJECT_MENU_SIZE}
+          items={menu.kind === "row" ? menuItems(menu.wt, menu.pid) : projectMenuItems(menu.pid)}
           onClose={() => setMenu(null)}
         />
       )}
