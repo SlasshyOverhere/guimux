@@ -37,6 +37,45 @@ export { detectToProject };
 /* a document title, tools right. One palette, one accent, Inter only.  */
 /* ------------------------------------------------------------------ */
 
+// Drag must ignore anything clickable: on Windows a native drag started on
+// mousedown swallows the follow-up click, which bricked every dropdown row
+// and click-outside overlay in the bar (they are divs, not <button>s).
+const noDrag = (t: HTMLElement) =>
+  !!t.closest("button, [role='button'], input, textarea, a, [data-no-drag]");
+
+// Drag on mousemove-after-press (real gesture), never on bare mousedown:
+// Windows treats startDragging like a native caption drag and swallows the
+// click that follows. Both topbars share this so neither drifts.
+function barDragDown(e: React.MouseEvent) {
+  if (e.button !== 0 || noDrag(e.target as HTMLElement)) return;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  const move = (ev: MouseEvent) => {
+    if (dragging) return;
+    if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+    dragging = true;
+    cleanup();
+    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+      getCurrentWindow().startDragging().catch(() => {});
+    }).catch(() => {});
+  };
+  const up = () => cleanup();
+  const cleanup = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+}
+
+function barDoubleClick(e: React.MouseEvent) {
+  if (noDrag(e.target as HTMLElement)) return;
+  import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+    getCurrentWindow().toggleMaximize().catch(() => {});
+  }).catch(() => {});
+}
+
 function Topbar({ onAdd }: { onAdd: () => void }) {
   const projects = useStore((s) => s.projects);
   const activeProjectId = useStore((s) => s.activeProjectId);
@@ -80,50 +119,11 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
     };
   }, [projOpen]);
 
-  // Drag must ignore anything clickable: on Windows a native drag started on
-  // mousedown swallows the follow-up click, which bricked every dropdown row
-  // and click-outside overlay in this bar (they are divs, not <button>s).
-  const noDrag = (t: HTMLElement) =>
-    !!t.closest("button, [role='button'], input, textarea, a, [data-no-drag]");
-  // Drag on mousemove-after-press (real gesture), never on bare mousedown:
-  // Windows treats startDragging like a native caption drag and swallows the
-  // click that follows, which bricked every dropdown in this bar (the click
-  // that opens the menu never fires its onClick after a drag starts, and the
-  // same swallowed-click bricks rows and the click-outside overlay).
-  const onBarDown = (e: React.MouseEvent) => {
-    if (e.button !== 0 || noDrag(e.target as HTMLElement)) return;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let dragging = false;
-    const move = (ev: MouseEvent) => {
-      if (dragging) return;
-      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
-      dragging = true;
-      cleanup();
-      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        getCurrentWindow().startDragging().catch(() => {});
-      }).catch(() => {});
-    };
-    const up = () => cleanup();
-    const cleanup = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-  const onBarDouble = (e: React.MouseEvent) => {
-    if (noDrag(e.target as HTMLElement)) return;
-    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-      getCurrentWindow().toggleMaximize().catch(() => {});
-    }).catch(() => {});
-  };
-
   return (
     <div
       data-tauri-drag-region
-      onMouseDown={onBarDown}
-      onDoubleClick={onBarDouble}
+      onMouseDown={barDragDown}
+      onDoubleClick={barDoubleClick}
       className="flex h-11 shrink-0 select-none items-center gap-1.5 bg-ink-900 pl-3 pr-0"
       style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
     >
@@ -679,18 +679,8 @@ export default function App() {
       <div className="flex h-full flex-col">
         <div
           data-tauri-drag-region
-          onMouseDown={(e) => {
-            if (e.button !== 0 || (e.target as HTMLElement).closest("button, [role='button'], input, textarea, a")) return;
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-              getCurrentWindow().startDragging().catch(() => {});
-            }).catch(() => {});
-          }}
-          onDoubleClick={(e) => {
-            if ((e.target as HTMLElement).closest("button, [role='button'], input, textarea, a")) return;
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-              getCurrentWindow().toggleMaximize().catch(() => {});
-            }).catch(() => {});
-          }}
+          onMouseDown={barDragDown}
+          onDoubleClick={barDoubleClick}
           className="flex h-11 shrink-0 select-none items-center gap-2 bg-ink-900 pl-3 pr-0"
           style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
         >
