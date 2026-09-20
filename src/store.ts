@@ -30,6 +30,16 @@ export type PaneNode = Pane | Split;
 let counter = 0;
 export const nextId = () => `n${++counter}-${Date.now().toString(36)}`;
 
+// Path prefix must land on a separator: "C:/proj" also prefixes "C:/proj-old",
+// which seeded another project's worktree and spawned a shell in it.
+function underRoot(root: string | null, path: string): boolean {
+  if (!root) return false;
+  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
+  const r = norm(root);
+  const p = norm(path);
+  return p === r || p.startsWith(r + "/");
+}
+
 function readVis(key: string): boolean {
   try {
     return localStorage.getItem(key) !== "0";
@@ -259,8 +269,7 @@ export const useStore = create<AppState>((set, get) => ({
       p ? (p.isGit ? (p.gitRoot ?? p.path) : p.path) : null;
     const seedWts = seed?.worktrees.filter((w) => {
       // Seed must belong to the active project or the shell spawns elsewhere.
-      const root = rootOf(proj);
-      return !!root && (w.path === root || w.path.startsWith(root));
+      return underRoot(rootOf(proj), w.path);
     }) ?? [];
     const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
       ? seed.activeWorktreeId
@@ -274,7 +283,7 @@ export const useStore = create<AppState>((set, get) => ({
         const list = seed.worktreesByProject[p.id];
         if (!list) continue;
         const root = rootOf(p);
-        const kept = list.filter((w) => !!root && (w.path === root || w.path.startsWith(root)));
+        const kept = list.filter((w) => underRoot(root, w.path));
         if (kept.length > 0) seedCache[p.id] = kept.slice(0, 50);
       }
     }
@@ -312,6 +321,17 @@ export const useStore = create<AppState>((set, get) => ({
       const dead = new Set(
         (removingActive ? s.worktrees : (s.worktreesByProject[id] ?? [])).map((w) => w.id),
       );
+      // A background project with no cached list left its layouts (and their
+      // shells) behind: sweep every layout no remaining project owns.
+      const owned = new Set<string>();
+      for (const p of projects) {
+        owned.add(`plain:${p.id}`);
+        const list = p.id === s.activeProjectId ? s.worktrees : (s.worktreesByProject[p.id] ?? []);
+        for (const w of list) owned.add(w.id);
+      }
+      for (const lid of Object.keys(s.layouts)) {
+        if (!owned.has(lid)) dead.add(lid);
+      }
       for (const [lid, node] of Object.entries(s.layouts)) {
         if (!dead.has(lid)) continue;
         for (const p of collectPaneObjs(node)) {
@@ -483,6 +503,10 @@ export const useStore = create<AppState>((set, get) => ({
   closePane: (paneId) => {
     const { layout, activeWorktreeId, layouts, maximizedPaneId } = get();
     if (!layout || !activeWorktreeId) return;
+    // Own the PTY here: every caller used to have to remember, and a forgotten
+    // kill left an orphaned shell behind a closed pane.
+    const closing = collectPaneObjs(layout).find((p) => p.id === paneId);
+    if (closing?.ptyId != null) invoke("pty_kill", { id: closing.ptyId }).catch(() => {});
     // Never leave a null layout: closing the last pane opens a fresh shell.
     // Null bricks the worktree on "Starting terminal…" with no way back.
     const next = removePane(layout, paneId) ?? { kind: "pane", id: nextId(), ptyId: null };
