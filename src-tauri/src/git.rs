@@ -179,12 +179,15 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
         "core.quotepath=false".into(),
         "diff".into(),
         "--no-color".into(),
-        "--".into(),
     ];
+    // Base BEFORE `--`: everything after it is a pathspec, so the old order
+    // made `git diff -- <ref>` diff a path named like the ref (usually
+    // nothing) instead of the revision.
     if let Some(b) = &base {
         reject_git_ref(b, "base")?;
         args.push(b.clone());
     }
+    args.push("--".into());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let diff = git(&repo, &args_ref)?;
     if diff.len() > DIFF_CAP {
