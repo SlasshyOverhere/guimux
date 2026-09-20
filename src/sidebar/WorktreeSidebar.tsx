@@ -465,10 +465,13 @@ export function WorktreeSidebar() {
     saveBaseline({ ...disBaseline, [pid]: [...base] });
     setDisExpanded((s) => delKey(s, pid));
   };
-  const showDiscovered = (pid: string) => {
-    const next = { ...disBaseline };
-    delete next[pid];
-    saveBaseline(next);
+  // Showing them resolves the announcement as well: the line counts rows the
+  // user has not answered, and a line that keeps claiming "hiding 5" above five
+  // visible rows is worse than no line at all.
+  const showDiscovered = (pid: string, rows: Worktree[]) => {
+    const base = baseSet(pid);
+    for (const wt of rows) if (isDiscovered(wt)) base.add(wt.id);
+    saveBaseline({ ...disBaseline, [pid]: [...base] });
     setShowAll((s) => ({ ...s, [pid]: true as const }));
     setDisExpanded((s) => delKey(s, pid));
   };
@@ -670,7 +673,7 @@ export function WorktreeSidebar() {
           })}
 
           {(() => {
-            const fresh = freshDiscovered(gitRows, activePid);
+            const fresh = showAll[activePid] ? [] : freshDiscovered(gitRows, activePid);
             if (fresh.length === 0 || q) return null;
             const expanded = !!disExpanded[activePid];
             const noun = fresh.length === 1 ? "worktree" : "worktrees";
@@ -750,7 +753,7 @@ export function WorktreeSidebar() {
                     <div className="mt-1 flex items-center gap-2 px-2 py-1">
                       <button
                         className="font-semibold text-ink-100 hover:underline text-[12px]"
-                        onClick={() => showDiscovered(activePid)}
+                        onClick={() => showDiscovered(activePid, gitRows)}
                       >
                         Show in worktree list
                       </button>
@@ -849,7 +852,7 @@ export function WorktreeSidebar() {
                   );
                 })}
                 {(() => {
-                  const fresh = freshDiscovered(all, p.id);
+                  const fresh = showAll[p.id] ? [] : freshDiscovered(all, p.id);
                   if (fresh.length === 0) return null;
                   const expanded = !!disExpanded[p.id];
                   const noun = fresh.length === 1 ? "worktree" : "worktrees";
@@ -929,7 +932,7 @@ export function WorktreeSidebar() {
                           <div className="mt-1 flex items-center gap-2 px-2 py-1">
                             <button
                               className="font-semibold text-ink-100 hover:underline text-[12px]"
-                              onClick={() => showDiscovered(p.id)}
+                              onClick={() => showDiscovered(p.id, all)}
                             >
                               Show in worktree list
                             </button>
