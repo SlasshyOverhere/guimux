@@ -190,6 +190,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const initCmdRef = useRef<string | null>(initCmd ?? null);
   initCmdRef.current = initCmd ?? null;
   const exitedRef = useRef(false);
+  // Mirrors the mount effect's `alive` flag for code that outlives a render.
+  const aliveRef = useRef(true);
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
   const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
@@ -347,6 +349,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
       markExited();
     });
+    // Unmounted mid-await: these handlers would otherwise outlive the
+    // terminal and keep firing into a disposed buffer, and attaching would
+    // drain the backend's replay buffer for a pane that is no longer there.
+    if (!aliveRef.current) {
+      disposeOutput();
+      disposeExit();
+      return;
+    }
     unlisteners.current.push(disposeOutput, disposeExit);
     const replay = await invoke<number[]>("pty_attach", { id: sid });
     if (replay.length > 0) {
@@ -667,6 +677,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       }
       return true;
     });
+    // Registered before the spawn/attach round-trips below: xterm fires into
+    // nothing until a listener exists, so the first keystrokes were dropped.
+    term.onData((data) => {
+      useStore.getState().markPaneDirty(paneId);
+      if (exitedRef.current) return;
+      const sid = sessionRef.current;
+      if (sid != null) invoke("pty_write", { id: sid, data });
+    });
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
@@ -685,6 +703,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     }
 
     let alive = true;
+    aliveRef.current = true;
 
     (async () => {
       if (!alive) return;
@@ -757,14 +776,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         }, 600);
       }
 
-      term.onData((data) => {
-        useStore.getState().markPaneDirty(paneId);
-        if (exitedRef.current) return;
-        const sid = sessionRef.current;
-        if (sid != null) {
-          invoke("pty_write", { id: sid, data });
-        }
-      });
     })();
 
     const ro = new ResizeObserver(() => {
@@ -787,6 +798,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     return () => {
       alive = false;
+      aliveRef.current = false;
       if (resizeTimerRef.current != null) {
         clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
