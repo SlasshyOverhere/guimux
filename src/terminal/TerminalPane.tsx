@@ -148,6 +148,34 @@ function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: n
   return dims;
 }
 
+// A TUI repaint sends ED 3 (scrollback wipe), and a long agent run trims the
+// scrollback cap on every line past it. Either way xterm deletes the lines
+// above the viewport and clamps a scrolled-up one to line 0 — the reader lands
+// at the very start of a buffer that keeps growing below them, with no way
+// back but a long scroll. When a write clamps a non-following viewport to the
+// start, its lines are gone from the buffer: show the live screen instead.
+// A surviving place (xterm shifts it with the trim) is left alone.
+function writeKeepPlace(term: Terminal, data: string | Uint8Array) {
+  let vp = 0;
+  let following = true;
+  try {
+    const b = term.buffer.active;
+    vp = b.viewportY;
+    following = vp >= b.baseY;
+  } catch {
+    /* no buffer yet */
+  }
+  term.write(data, () => {
+    if (following || vp === 0) return;
+    try {
+      const b = term.buffer.active;
+      if (b.viewportY === 0 && b.baseY > 0) term.scrollToBottom();
+    } catch {
+      /* disposed mid-write */
+    }
+  });
+}
+
 // Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
 // (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
 // powershell bootstrap in pty.rs. Snoop the raw output bytes, keep the last
@@ -353,7 +381,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         );
       }
       try {
-        term.write(bytes);
+        writeKeepPlace(term, bytes);
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
@@ -375,7 +403,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     if (replay.length > 0) {
       const bytes = new Uint8Array(replay);
       snoopLiveCwd(bytes);
-      term.write(bytes);
+      writeKeepPlace(term, bytes);
     }
   };
 
