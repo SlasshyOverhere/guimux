@@ -523,6 +523,21 @@ mod tests {
     }
 
     #[test]
+    fn worktree_remove_guards_uncommitted_work() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("dirty-one".into())).unwrap();
+        fs::write(Path::new(&wt.path).join("scratch.txt"), "uncommitted").unwrap();
+
+        let err = worktree_remove(root.clone(), wt.id.clone(), false, None).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "unexpected error: {err}");
+
+        worktree_remove(root.clone(), wt.id.clone(), false, Some(true)).unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn worktree_lifecycle() {
         let repo = fixture_repo();
         let root = repo.to_string_lossy().to_string();
@@ -544,7 +559,7 @@ mod tests {
         let msg = worktree_merge(wt.id.clone()).unwrap();
         assert!(msg.contains("Merge") || !msg.is_empty());
 
-        worktree_remove(root.clone(), wt.id.clone(), true).unwrap();
+        worktree_remove(root.clone(), wt.id.clone(), true, Some(false)).unwrap();
         assert!(!Path::new(&wt.path).exists());
         let _ = fs::remove_dir_all(&repo);
     }
