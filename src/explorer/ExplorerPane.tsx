@@ -4,6 +4,7 @@ import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
+import { menuPos } from "../menuPos";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
@@ -440,10 +441,11 @@ export function ExplorerPane({ root }: { root: string }) {
   const menuEl = menu && (
     <div
       className="gm-menu tnum fixed z-50 w-40"
-      style={{
-        left: Math.min(menu.x, window.innerWidth - 180),
-        top: Math.min(menu.y, window.innerHeight - 80),
-      }}
+      style={menuPos(menu.x, menu.y, { w: 160, h: 44 }, {
+        zoom: useStore.getState().settings.uiZoom || 1,
+        w: window.innerWidth,
+        h: window.innerHeight,
+      })}
       onClick={(e) => e.stopPropagation()}
       role="menu"
     >

@@ -7,7 +7,19 @@ import { Search, ChevronRight, X, GitBranch, Check } from "lucide-react";
 // proves undiscoverable.
 import { useStore } from "../store";
 import { detectToProject } from "../project";
+import { menuPos } from "../menuPos";
 import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
+
+// Row menu: six items at most (open, pin, copy, merge, abort, remove).
+const ROW_MENU = { w: 192, h: 214 };
+
+// Zoom lives in the store, not in a prop: reading it at open time keeps the
+// menu correct without re-rendering the panel on Ctrl+= .
+const menuViewport = () => ({
+  zoom: useStore.getState().settings.uiZoom || 1,
+  w: window.innerWidth,
+  h: window.innerHeight,
+});
 import { confirmDialog, errorDialog } from "../dialogs";
 import type { Worktree, FileStatus, Project } from "../types";
 
@@ -1221,10 +1233,7 @@ export function WorktreeSidebar() {
       {menu && menuWt && (
         <div
           className="gm-menu tnum fixed z-50 w-48"
-          style={{
-            left: Math.min(menu.x, window.innerWidth - 200),
-            top: Math.min(menu.y, window.innerHeight - 260),
-          }}
+          style={menuPos(menu.x, menu.y, ROW_MENU, menuViewport())}
           onClick={(e) => e.stopPropagation()}
           role="menu"
         >
