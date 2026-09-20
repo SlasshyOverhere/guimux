@@ -34,6 +34,24 @@ pub struct PtyManager {
     sessions: Mutex<HashMap<u64, PtyEntry>>,
 }
 
+impl PtyManager {
+    /// Terminate every live shell. ConPTY children are not in a job object, so
+    /// without this the shells (and any agents they host) outlive the window.
+    pub fn kill_all(&self) {
+        let entries: Vec<PtyEntry> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.drain().map(|(_, entry)| entry).collect()
+        };
+        for mut entry in entries {
+            let _ = entry.killer.kill();
+            drop(entry.master);
+        }
+        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
