@@ -342,10 +342,14 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                         first = false;
                         eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
                     }
-                    push_buffer(id, epoch, &buf[..n]);
                     let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
                         let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
+                    } else {
+                        // Attached panes have no reader for the replay buffer
+                        // (pty_attach drained it), so rebuilding a 256KB copy
+                        // per chunk only burned memory and memcpy.
+                        push_buffer(id, epoch, &buf[..n]);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
