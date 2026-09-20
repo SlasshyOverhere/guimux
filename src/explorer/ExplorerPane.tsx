@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
+import { announceWrite } from "../announceWrite";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { menuPos } from "../menuPos";
@@ -260,6 +261,7 @@ export function ExplorerPane({ root }: { root: string }) {
     }
     const newPath = siblingPath(oldPath, name);
     setRenaming(null);
+    announceWrite(oldPath, newPath);
     try {
       await invoke("fs_rename", { old: oldPath, new: newPath });
     } catch (e) {
@@ -385,6 +387,7 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const save = async () => {
     if (!editorPath) return;
+    announceWrite(editorPath);
     try {
       await invoke("fs_write", { path: editorPath, content });
     } catch (e) {
@@ -418,6 +421,7 @@ export function ExplorerPane({ root }: { root: string }) {
     } catch {
       // doesn't exist yet: create it empty so the editor opens real content
       try {
+        announceWrite(p);
         await invoke("fs_write", { path: p, content: "" });
       } catch {
         /* fall through: editor will show the read error */
@@ -672,6 +676,7 @@ export function ExplorerPane({ root }: { root: string }) {
                 onClick={async () => {
                   if (editorPath && contentLoaded) {
                     try {
+                      announceWrite(editorPath);
                       await invoke("fs_write", { path: editorPath, content });
                     } catch (e) {
                       void errorDialog(`save failed: ${e}`);
