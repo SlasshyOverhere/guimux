@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
-// Side-effect import: configures the loader with the bundled Monaco before
-// any Editor renders.
-import "../monaco";
 import { useStore } from "../store";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
@@ -194,6 +191,20 @@ export function ExplorerPane({ root }: { root: string }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [bulk, setBulk] = useState({ open: true, n: 0 });
+  // Bundled Monaco is most of the app bundle: fetch it the first time a file
+  // is opened rather than at boot, where it delayed the first shell. The
+  // import configures the loader, so it must finish before Editor renders.
+  const [monacoReady, setMonacoReady] = useState(false);
+  useEffect(() => {
+    if (!editorPath || monacoReady) return;
+    let cancelled = false;
+    void import("../monaco").then(() => {
+      if (!cancelled) setMonacoReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editorPath, monacoReady]);
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -674,6 +685,8 @@ export function ExplorerPane({ root }: { root: string }) {
               </button>
             </div>
           </div>
+        ) : !monacoReady ? (
+          <div className="gm-meta p-3 text-[12px]">Loading editor…</div>
         ) : (
           <Editor
             height="100%"
