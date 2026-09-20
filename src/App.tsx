@@ -421,8 +421,6 @@ export default function App() {
 
   useEffect(() => {
     maybeStartStress();
-    // Startup update check: fire-and-forget, never blocks boot or terminals.
-    void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
   }, []);
 
   // Restore persisted projects once on startup, then persist on every change.
@@ -433,6 +431,10 @@ export default function App() {
       if (cancelled) return;
       const st = useStore.getState();
       if (saved?.settings) st.hydrateSettings(saved.settings);
+      // After hydration: read before this point, the check always saw
+      // DEFAULT_SETTINGS, so turning the auto-check off never took effect at
+      // startup. Fire-and-forget: never blocks boot or terminals.
+      void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
       if (saved && saved.projects.length > 0) {
         // Paint instantly from disk, revalidate in background. The old flow
         // awaited N git rev-parses before the first hydrate, so boot sat on
