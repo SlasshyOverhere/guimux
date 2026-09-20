@@ -11,7 +11,7 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/updaterPolicy.test.ts src/menuPos.test.ts src/sidebar/statusLetter.test.ts"
+    "test": "node --test src/updaterPolicy.test.ts src/menuPos.test.ts src/sidebar/statusLetter.test.ts src/sidebar/removeGuard.test.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",

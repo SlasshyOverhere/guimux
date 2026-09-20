@@ -345,11 +345,27 @@ pub fn worktree_remove(
             .output()
             .map(|o| o.status.success() && !o.stdout.is_empty())
             .unwrap_or(false);
+        // delete_branch runs `branch -D`, which also drops commits the base
+        // never saw. Name them: a finished-but-unmerged branch must not vanish
+        // behind a generic "branch will be deleted" prompt.
+        let unmerged = if delete_branch {
+            unmerged_commits(&root, &path).filter(|(n, _)| *n > 0)
+        } else {
+            None
+        };
+        let mut lost: Vec<String> = Vec::new();
         if dirty {
-            return Err(
-                "worktree has uncommitted changes — commit or stash first, or retry to discard them"
-                    .into(),
-            );
+            lost.push("uncommitted changes".into());
+        }
+        if let Some((n, base)) = &unmerged {
+            let noun = if *n == 1 { "commit" } else { "commits" };
+            lost.push(format!("{n} {noun} not in {base}"));
+        }
+        if !lost.is_empty() {
+            return Err(format!(
+                "worktree has {} — commit or merge first, or retry to discard them",
+                lost.join(" and ")
+            ));
         }
     }
     // capture branch before removal
@@ -499,6 +515,23 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     Ok(cur_branch)
 }
 
+/// Commits on the worktree's branch that its base lacks: what `branch -D`
+/// would throw away. None when git cannot tell (detached HEAD, no base).
+fn unmerged_commits(main_wt: &Path, wt: &Path) -> Option<(usize, String)> {
+    let branch = current_branch(wt).ok()?;
+    let base = find_base_branch(main_wt, &branch).ok()?;
+    let out = git_cmd()
+        .args(["rev-list", "--count", &format!("{base}..{branch}")])
+        .current_dir(main_wt)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let n = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>().ok()?;
+    Some((n, base))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +566,32 @@ mod tests {
         assert!(err.contains("uncommitted changes"), "unexpected error: {err}");
 
         worktree_remove(root.clone(), wt.id.clone(), false, Some(true)).unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn worktree_remove_guards_unmerged_commits() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("unmerged-one".into())).unwrap();
+        fs::write(Path::new(&wt.path).join("c.txt"), "only on this branch").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "unmerged work"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+
+        // Clean tree, but the branch holds a commit main never saw.
+        let err = worktree_remove(root.clone(), wt.id.clone(), true, None).unwrap_err();
+        assert!(err.contains("1 commit not in main"), "unexpected error: {err}");
+
+        worktree_remove(root.clone(), wt.id.clone(), true, Some(true)).unwrap();
         assert!(!Path::new(&wt.path).exists());
         let _ = fs::remove_dir_all(&repo);
     }

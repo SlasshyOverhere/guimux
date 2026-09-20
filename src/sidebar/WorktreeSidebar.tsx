@@ -9,6 +9,7 @@ import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { menuPos } from "../menuPos";
 import { createSingleFlight } from "../singleFlight";
+import { parseRemoveGuard } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
@@ -291,7 +292,8 @@ export function WorktreeSidebar() {
   // pid scopes the git call to the row's own project (other-project rows
   // carry their projectId; active rows default to the current repo root).
   const remove = async (wt: Worktree, pid?: string) => {
-    if (!(await confirmDialog(`Remove worktree "${wt.branch}"? (branch will be deleted)`))) return;
+    if (!(await confirmDialog(`Remove worktree "${wt.branch}"? The directory and its branch are deleted.`)))
+      return;
     const root = pid ? rootOf(pid) : repoRoot;
     if (!root) return;
     const runRemove = async (force: boolean) => {
@@ -314,13 +316,16 @@ export function WorktreeSidebar() {
     try {
       await runRemove(false);
     } catch (e) {
-      // Uncommitted work is the one failure worth a second, explicit confirm:
-      // the backend refuses rather than silently discarding it.
-      if (!String(e).includes("uncommitted changes")) {
+      // The backend refuses to discard real work and names what is at stake:
+      // uncommitted changes, unmerged commits, or both. Anything else is an
+      // ordinary failure — never escalate it into a destructive retry.
+      const guard = parseRemoveGuard(e);
+      if (!guard) {
         void errorDialog(`remove failed: ${e}`);
         return;
       }
-      if (!(await confirmDialog(`${wt.branch} has uncommitted changes. Remove it anyway and discard them?`))) return;
+      if (!(await confirmDialog(`${wt.branch} ${guard.summary}. Remove it anyway and discard that work?`)))
+        return;
       try {
         await runRemove(true);
       } catch (e2) {
