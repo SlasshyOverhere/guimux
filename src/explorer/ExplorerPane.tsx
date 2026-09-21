@@ -10,6 +10,7 @@ import { confirmDialog, errorDialog } from "../dialogs";
 import { menuPos } from "../menuPos";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
+import { isMarkdownPath, renderMarkdown } from "./markdown";
 import type { FsNode, GrepHit } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
@@ -211,8 +212,12 @@ export function ExplorerPane({ root }: { root: string }) {
   const [monacoReady, setMonacoReady] = useState(false);
   const [monacoError, setMonacoError] = useState<string | null>(null);
   const [monacoRetry, setMonacoRetry] = useState(0);
+  // Markdown preview: defaults on for .md files, toggled per-file.
+  const [markdownPreview, setMarkdownPreview] = useState(true);
   useEffect(() => {
-    if (!editorPath || monacoReady) return;
+    // Skip Monaco load when markdown preview is active: saves bundle init
+    // time. Monaco loads on first raw toggle.
+    if (!editorPath || monacoReady || (markdownPreview && isMarkdownPath(editorPath))) return;
     let cancelled = false;
     setMonacoError(null);
     // No catch used to leave monacoReady false forever on failure, so a
@@ -231,7 +236,7 @@ export function ExplorerPane({ root }: { root: string }) {
     return () => {
       cancelled = true;
     };
-  }, [editorPath, monacoReady, monacoRetry]);
+  }, [editorPath, monacoReady, monacoRetry, markdownPreview]);
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -846,6 +851,28 @@ export function ExplorerPane({ root }: { root: string }) {
               >
                 <Pencil size={14} strokeWidth={2} />
               </button>
+              {isMarkdownPath(editorPath ?? "") && (
+                <div className="gm-seg" role="radiogroup" aria-label="Markdown view">
+                  <button
+                    role="radio"
+                    aria-checked={!markdownPreview}
+                    data-active={String(!markdownPreview)}
+                    title="Show raw source"
+                    onClick={() => setMarkdownPreview(false)}
+                  >
+                    Raw
+                  </button>
+                  <button
+                    role="radio"
+                    aria-checked={markdownPreview}
+                    data-active={String(markdownPreview)}
+                    title="Show rendered markdown"
+                    onClick={() => setMarkdownPreview(true)}
+                  >
+                    Markdown
+                  </button>
+                </div>
+              )}
               <button
                 title="Toggle diff"
                 className="gm-icon-btn gm-icon-btn--sm"
@@ -933,6 +960,11 @@ export function ExplorerPane({ root }: { root: string }) {
               </button>
             </div>
           </div>
+        ) : markdownPreview && isMarkdownPath(editorPath ?? "") ? (
+          <div
+            className="gm-md-preview"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+          />
         ) : !monacoReady ? (
           monacoError ? (
             <div className="gm-meta p-3 text-[12px]">
