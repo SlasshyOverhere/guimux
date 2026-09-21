@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
-import { dragFile, quoteForShell } from "../dragFile";
+import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
@@ -492,6 +492,40 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     }
   };
 
+  // Transient pane hint (clipboard empty, image blocked). A small overlay,
+  // never terminal output: writing into the grid would pollute the shell.
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
+  const pasteHintTimer = useRef<number | null>(null);
+  const showPasteHint = (msg: string) => {
+    setPasteHint(msg);
+    if (pasteHintTimer.current != null) clearTimeout(pasteHintTimer.current);
+    pasteHintTimer.current = window.setTimeout(() => setPasteHint(null), 2200);
+  };
+  useEffect(
+    () => () => {
+      if (pasteHintTimer.current != null) clearTimeout(pasteHintTimer.current);
+    },
+    [],
+  );
+
+  // Chord-initiated pastes (Ctrl+V et al below) are followed ~instantly by
+  // the webview's own native `paste` event. The async pasteClipboard() owns
+  // those gestures, so the sync reader must stand down briefly or every
+  // key-chord paste lands twice. Refreshed per chord, so rapid repeats keep
+  // working; a menu-only paste inside the window is the accepted tradeoff.
+  const chordPasteAt = useRef(0);
+
+  // ConPTY wants CR for newlines; a lone LF pastes as a bare linefeed.
+  const normalizePaste = (text: string) => text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+
+  const pasteDebug = (info: string) => {
+    try {
+      if (localStorage.getItem("GUIMUX_PASTE_DEBUG") === "1") console.log(`[gm-paste pane=${paneId}] ${info}`);
+    } catch {
+      /* storage unavailable */
+    }
+  };
+
   const copySelection = () => {
     const term = termRef.current;
     if (!term || !term.hasSelection()) return false;
@@ -524,23 +558,46 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return true;
   };
 
-  const pasteClipboard = () => {
+  const pasteClipboard = (chord = "key") => {
     const term = termRef.current;
     term?.focus();
     if (navigator.clipboard?.readText) {
       navigator.clipboard
         .readText()
-        .then((text) => {
-          if (!text) return;
-          // term.paste honors bracketed-paste mode; raw pty_write would not.
-          try {
-            term?.paste(text);
-          } catch {
-            sendRaw(text);
+        .then(async (text) => {
+          if (text) {
+            // Single sender: term.paste honors bracketed-paste mode and flows
+            // through onData -> pty_write. Raw pty_write would not.
+            pasteDebug(`chord=${chord} textLen=${text.length} imagePresent=false fallbackUsed=false`);
+            try {
+              term?.paste(normalizePaste(text));
+            } catch {
+              sendRaw(normalizePaste(text));
+            }
+            return;
           }
+          // Empty text: probe for an image so a screenshot copy is never a
+          // silent no-op. Chosen behavior: explicit hint, no path insert.
+          let imagePresent = false;
+          try {
+            if (navigator.clipboard?.read) {
+              const items = await navigator.clipboard.read();
+              imagePresent = items.some((it) => it.types.some((t) => t.startsWith("image/")));
+            }
+          } catch {
+            /* probe denied: treat as empty */
+          }
+          pasteDebug(`chord=${chord} textLen=0 imagePresent=${imagePresent} fallbackUsed=false`);
+          showPasteHint(imagePresent ? "Images cannot be pasted as text" : "Clipboard is empty");
         })
-        .catch(() => sendRaw("\x16"));
+        .catch(() => {
+          // Permission denial only: let the shell paste itself. Empty/image
+          // never reaches here, so this is not a blind fallback.
+          pasteDebug(`chord=${chord} textLen=? imagePresent=? fallbackUsed=true`);
+          sendRaw("\x16");
+        });
     } else {
+      pasteDebug(`chord=${chord} textLen=? imagePresent=? fallbackUsed=true`);
       sendRaw("\x16");
     }
   };
@@ -683,24 +740,61 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     fitRef.current = fit;
     term.open(hostRef.current);
     registerLiveTerm(paneId, term);
-    // Single paste path: xterm natively sends `paste` DOM events to the PTY
-    // (handlePasteEvent → triggerDataEvent → onData), while our Ctrl+V /
-    // right-click path ALSO sends via term.paste() → every paste lands twice.
-    // Kill the native event at capture (an ancestor capture listener fires
-    // before xterm's own textarea/element listeners, and stopPropagation on
-    // the way down never reaches the target) so the manual term.paste() in
-    // pasteClipboard() is the only sender. Keydown preventDefault is NOT
-    // enough: xterm's keydown path never cancels it on the custom-handler
-    // early-return, and the webview fires the paste event anyway.
+    // Single paste path: the native `paste` DOM event carries the only
+    // synchronous clipboard source (`clipboardData`), so read it here first
+    // and send via term.paste() (bracketed-paste aware, one sender). The
+    // Ctrl+V / right-click path below ALSO sends via term.paste() — the
+    // preventDefault here keeps the native handler from double-sending.
+    // Keydown preventDefault is NOT enough: xterm's keydown path never
+    // cancels it on the custom-handler early-return, and the webview fires
+    // the paste event anyway.
     // ponytail: one capture listener; drop it if xterm ever gains a "no native paste" option.
     const killNativePaste = (e: Event) => {
+      // Owned by the chord handler just now: eat without re-sending, or the
+      // gesture pastes twice (sync here + async pasteClipboard).
+      if (Date.now() - chordPasteAt.current < 500) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      const ce = e as ClipboardEvent;
+      const data = ce.clipboardData;
+      const text = data?.getData("text/plain") ?? "";
+      if (text) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteDebug(`chord=native-paste textLen=${text.length} imagePresent=false fallbackUsed=false`);
+        useStore.getState().markPaneDirty(paneId);
+        try {
+          term.paste(normalizePaste(text));
+        } catch {
+          sendRaw(normalizePaste(text));
+        }
+        return;
+      }
+      const files = data?.files;
+      const hasImage =
+        !!files &&
+        Array.from(files).some((f) => f.type.startsWith("image/"));
+      if (hasImage) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteDebug(`chord=native-paste textLen=0 imagePresent=true fallbackUsed=false`);
+        useStore.getState().markPaneDirty(paneId);
+        showPasteHint("Images cannot be pasted as text");
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
     };
     hostRef.current.addEventListener("paste", killNativePaste, true);
      // Keybinds that must work while a TUI owns the grid: Ctrl+C copy when
     // text is selected (else the SIGINT the TUI may need), Ctrl+V paste.
-    // Returning false keeps xterm from also feeding the key to the PTY.
+    // Supported paste chords: Ctrl+V, Cmd+V, Ctrl+Shift+V (shift is
+    // intentionally not excluded), Shift+Insert. Alt+V is NOT paste anywhere
+    // (it falls through to the PTY as ESC+v for readline); claiming it would
+    // break word-backward bindings. Returning false keeps xterm from also
+    // feeding the key to the PTY.
     term.attachCustomKeyEventHandler((e) => {
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.type === "keydown") {
         const termNow = termRef.current;
@@ -709,14 +803,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           return false;
         }
         if (e.key.toLowerCase() === "v") {
-          pasteClipboard();
+          chordPasteAt.current = Date.now();
+          pasteClipboard(e.shiftKey ? "ctrl-shift-v" : e.metaKey && !e.ctrlKey ? "cmd-v" : "ctrl-v");
           return false;
         }
       }
       // Shift+Insert emits a native `paste` event (xterm emits no key for it);
       // the capture listener above eats that event, so send it ourselves.
       if (e.type === "keydown" && e.key === "Insert" && e.shiftKey && !e.ctrlKey && !e.metaKey) {
-        pasteClipboard();
+        chordPasteAt.current = Date.now();
+        pasteClipboard("shift-insert");
         return false;
       }
       return true;
@@ -724,6 +820,17 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // Registered before the spawn/attach round-trips below: xterm fires into
     // nothing until a listener exists, so the first keystrokes were dropped.
     term.onData((data) => {
+      // Word-kill probe: with GUIMUX_KEY_DEBUG=1, log the raw codes xterm
+      // emits for Ctrl+Backspace / Ctrl+Delete to confirm the sequence
+      // (typically ESC[3;5~) reaches pty_write unmodified.
+      try {
+        if (localStorage.getItem("GUIMUX_KEY_DEBUG") === "1" && /[\x7f\x08]|\x1b\[3/.test(data)) {
+          const codes = Array.from(data).map((c) => c.charCodeAt(0));
+          console.log(`[gm-key pane=${paneId}] onData codes=${JSON.stringify(codes)}`);
+        }
+      } catch {
+        /* storage unavailable */
+      }
       useStore.getState().markPaneDirty(paneId);
       if (exitedRef.current) return;
       const sid = sessionRef.current;
@@ -954,6 +1061,24 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     window.addEventListener("gm-file-drop", onFileDrop);
     return () => window.removeEventListener("gm-file-drop", onFileDrop);
   }, [paneId]);
+  // OS file drags (Explorer -> window) never fire HTML5 drag events here,
+  // so the bridge announces the hovered point and the pane under it glows.
+  useEffect(() => {
+    const onOver = (ev: Event) => {
+      const { x, y } = (ev as CustomEvent<{ x: number; y: number }>).detail ?? {};
+      if (typeof x !== "number" || typeof y !== "number") return;
+      const el = paneRef.current ? document.elementFromPoint(x, y) : null;
+      const inside = !!el && !!paneRef.current?.contains(el);
+      setDropHot(visibleRef.current && !exitedRef.current && inside);
+    };
+    const onLeave = () => setDropHot(false);
+    window.addEventListener("gm-file-drag-over", onOver);
+    window.addEventListener("gm-file-drag-leave", onLeave);
+    return () => {
+      window.removeEventListener("gm-file-drag-over", onOver);
+      window.removeEventListener("gm-file-drag-leave", onLeave);
+    };
+  }, [paneId]);
   const acceptDrag = (e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
@@ -970,6 +1095,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // A Tauri OS drop already pasted: this late HTML5 echo is stale.
+    if (recentOsDrop()) return;
     dragDepth.current = 0;
     setDropHot(false);
     if (exitedRef.current) return;
@@ -1013,7 +1140,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       onContextMenu={(e) => {
         e.preventDefault();
         if (termRef.current?.hasSelection()) copySelection();
-        else pasteClipboard();
+        else pasteClipboard("context-menu");
       }}
       onDragEnter={handleDragEnter}
       onDragOver={acceptDrag}
@@ -1070,6 +1197,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           </button>
         </div>
       </div>
+      {pasteHint && (
+        <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center">
+          <div
+            className="gm-menu px-3 py-1.5 text-[12px] text-ink-200"
+            role="status"
+          >
+            {pasteHint}
+          </div>
+        </div>
+      )}
       {exited && (
         <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pb-3">
           <div

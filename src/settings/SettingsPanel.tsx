@@ -203,6 +203,14 @@ export function SettingsPanel() {
             )}
           </div>
         </div>
+        <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
+          <div className="text-[12.5px] font-medium text-ink-200">Terminal keys</div>
+          <div className="gm-meta mt-1.5 text-[11.5px] leading-5">
+            Paste with Ctrl+V, Cmd+V, Ctrl+Shift+V, Shift+Insert, or right-click. Alt+V is not
+            paste: it reaches the shell as ESC+v. Ctrl+Backspace deletes the left word,
+            Ctrl+Delete the right word (Ctrl+W also works).
+          </div>
+        </div>
         <UpdatesSection />
 
         <div className="flex items-center justify-between px-4 py-3">
