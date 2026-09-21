@@ -66,12 +66,12 @@ export function SettingsPanel() {
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="w-[400px] max-w-full overflow-hidden rounded-xl shadow-pop"
+        className="flex max-h-[calc(100vh-2rem)] w-[400px] max-w-full flex-col overflow-hidden rounded-xl shadow-pop"
         style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="flex items-center justify-between px-4 py-3"
+          className="flex shrink-0 items-center justify-between px-4 py-3"
           style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
         >
           <div>
@@ -88,6 +88,7 @@ export function SettingsPanel() {
           </button>
         </div>
 
+        <div className="min-h-0 flex-1 overflow-y-auto">
         <Row
           label="Interface zoom (%)"
           value={Math.round(settings.uiZoom * 100)}
@@ -212,8 +213,12 @@ export function SettingsPanel() {
           </div>
         </div>
         <UpdatesSection />
+        </div>
 
-        <div className="flex items-center justify-between px-4 py-3">
+        <div
+          className="flex shrink-0 items-center justify-between px-4 py-3"
+          style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
+        >
           <button
             className="text-[12px] font-medium text-ink-400 hover:text-ink-100"
             onClick={() => setSettings({ ...DEFAULT_SETTINGS })}
