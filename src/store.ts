@@ -126,6 +126,18 @@ function removePane(node: PaneNode, paneId: string): PaneNode | null {
   return { ...node, first, second };
 }
 
+// Pane drag-and-drop swaps two leaves: sessions travel with their pane
+// objects, so the dragged terminal keeps its shell.
+function findPane(node: PaneNode, paneId: string): Pane | null {
+  if (node.kind === "pane") return node.id === paneId ? node : null;
+  return findPane(node.first, paneId) ?? findPane(node.second, paneId);
+}
+
+function replacePane(node: PaneNode, paneId: string, replacement: PaneNode): PaneNode {
+  if (node.kind === "pane") return node.id === paneId ? replacement : node;
+  return { ...node, first: replacePane(node.first, paneId, replacement), second: replacePane(node.second, paneId, replacement) };
+}
+
 // Balanced tiling for agent fan-out: split the list in half, alternate h/v
 // per depth. 2 = side by side, 3 = one left + two stacked right, 4 = 2x2.
 function tileGrid(panes: Pane[], depth = 0): PaneNode {
@@ -241,6 +253,7 @@ interface AppState {
   setSplitRatio: (worktreeId: string, splitId: string, ratio: number) => void;
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
+  movePane: (dragId: string, dropId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
   launchAgents: (items: { command: string; count: number }[]) => void;
   dropWorktreeLayout: (id: string) => number[];
@@ -583,6 +596,20 @@ export const useStore = create<AppState>((set, get) => ({
         ? { maximizedPaneId: null }
         : { maximizedPaneId: paneId, activePaneId: paneId },
     ),
+  movePane: (dragId, dropId) => {
+    const { layout, activeWorktreeId, layouts } = get();
+    if (!layout || !activeWorktreeId || dragId === dropId) return;
+    const dragNode = findPane(layout, dragId);
+    const dropNode = findPane(layout, dropId);
+    if (!dragNode || !dropNode) return;
+    const next = replacePane(replacePane(layout, dragId, dropNode), dropId, dragNode);
+    set({
+      layout: next,
+      layouts: { ...layouts, [activeWorktreeId]: next },
+      activePaneId: dragId,
+      maximizedPaneId: null,
+    });
+  },
   // Fan-out keeps every pane object (dropping them orphaned the running PTY)
   // and retiles the whole set into one equal grid, so launching 4 always
   // makes 4 equal panes. Total tiles capped at 12: past that every pane

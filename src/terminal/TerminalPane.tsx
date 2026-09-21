@@ -6,7 +6,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
+import { Columns2, GripVertical, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
@@ -62,6 +62,10 @@ function persistScrollback(paneId: string, state: string) {
     /* quota */
   }
 }
+
+// Pane rearrangement is pointer-based: HTML5 DnD never dispatches dragover in
+// this webview, so a grip drag tracks the pointer and swaps on release.
+export const paneDrag = { id: null as string | null };
 
 interface Props {
   paneId: string;
@@ -1123,6 +1127,48 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // quoted path through its own live terminal input (same path typed keys
   // use). The acceptDrag/handleDrop handlers below stay as the fallback
   // for OS file drops if the webview ever dispatches real drop events.
+  // Grip drag: press and drag onto any other pane to swap the two. Pointer
+  // events only (no dataTransfer); Escape cancels mid-drag.
+  const startPaneDrag = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setActivePane(paneId);
+    paneDrag.id = paneId;
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
+    let over: string | null = null;
+    let done = false;
+    const finish = (cancelled: boolean) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.dispatchEvent(new CustomEvent("gm-pane-drag-end"));
+      const target = cancelled ? null : over;
+      paneDrag.id = null;
+      if (target) useStore.getState().movePane(paneId, target);
+    };
+    const move = (ev: MouseEvent) => {
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const host = el?.closest?.("[data-pane-id]") as HTMLElement | null;
+      const id = host?.dataset.paneId ?? null;
+      over = id && id !== paneId ? id : null;
+      window.dispatchEvent(
+        new CustomEvent("gm-pane-drag-over", { detail: { dragId: paneId, overId: over } }),
+      );
+    };
+    const up = () => finish(false);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") finish(true);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    window.addEventListener("keydown", onKey, true);
+  };
   const dragDepth = useRef(0);
   const [dropHot, setDropHot] = useState(false);
   useEffect(() => {
@@ -1161,6 +1207,21 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       window.removeEventListener("gm-file-drag-over", onOver);
       window.removeEventListener("gm-file-drag-leave", onLeave);
+    };
+  }, [paneId]);
+  // Drop highlight for an incoming pane drag (see the grip below).
+  const [moveHot, setMoveHot] = useState(false);
+  useEffect(() => {
+    const onOver = (ev: Event) => {
+      const { overId } = (ev as CustomEvent<{ overId: string | null }>).detail ?? {};
+      setMoveHot(overId === paneId);
+    };
+    const onEnd = () => setMoveHot(false);
+    window.addEventListener("gm-pane-drag-over", onOver);
+    window.addEventListener("gm-pane-drag-end", onEnd);
+    return () => {
+      window.removeEventListener("gm-pane-drag-over", onOver);
+      window.removeEventListener("gm-pane-drag-end", onEnd);
     };
   }, [paneId]);
   const acceptDrag = (e: React.DragEvent) => {
@@ -1211,10 +1272,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     <div
       ref={paneRef}
       className="relative h-full w-full"
-      data-drop-hot={dropHot}
+      data-drop-hot={dropHot || moveHot}
       data-pane-drop
+      data-pane-id={paneId}
       data-pty-id={sessionRef.current ?? undefined}
-      style={dropHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
+      style={dropHot || moveHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
       onMouseDown={() => {
         setActivePane(paneId);
         // Clicking pane chrome (toolbar, gutters) parks focus on a button or
@@ -1244,6 +1306,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           </span>
         )}
         <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
+          <button
+            title="Drag to move pane"
+            aria-label="Drag to move pane"
+            className="cursor-grab active:cursor-grabbing"
+            onMouseDown={startPaneDrag}
+          >
+            <GripVertical size={13} strokeWidth={2} />
+          </button>
           <button
             title="Split right (Ctrl+Shift+D)"
             aria-label="Split pane right"
