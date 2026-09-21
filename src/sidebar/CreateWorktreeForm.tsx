@@ -11,11 +11,12 @@ const CTRL_HEAD = 0;
 
 interface Props {
   branches: string[];
+  projectName?: string;
   onSubmit: (values: { name: string; base: string }) => void;
   onCancel: () => void;
 }
 
-export function CreateWorktreeForm({ branches, onSubmit, onCancel }: Props) {
+export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }: Props) {
   const [name, setName] = useState("");
   const [base, setBase] = useState("");
   const [open, setOpen] = useState(false);
@@ -66,7 +67,9 @@ export function CreateWorktreeForm({ branches, onSubmit, onCancel }: Props) {
       style={{ background: "var(--gm-panel)", border: "1px solid var(--gm-hairline-soft)" }}
     >
       <div className="flex items-center justify-between">
-        <span className="text-[12.5px] font-semibold text-ink-100">New worktree</span>
+        <span className="truncate text-[12.5px] font-semibold text-ink-100">
+          {projectName ? `New worktree in ${projectName}` : "New worktree"}
+        </span>
         <button
           className="gm-icon-btn gm-icon-btn--sm"
           onClick={onCancel}

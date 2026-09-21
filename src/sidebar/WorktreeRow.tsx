@@ -93,11 +93,6 @@ export function WorktreeRow({
         >
           {wt.branch}
         </span>
-        {wt.is_main && (
-          <span className="flex-none rounded border border-ink-600 px-1 py-px text-[10px] text-ink-400">
-            primary
-          </span>
-        )}
         {dirty > 0 && (
           <span className="tnum flex-none text-[11px] font-medium" style={{ color: "var(--gm-amber)" }}>
             {dirty}

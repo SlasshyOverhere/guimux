@@ -87,7 +87,7 @@ export function WorktreeSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.length, cacheKeys]);
 
-  const [creating, setCreating] = useState(false);
+  const [creatingPid, setCreatingPid] = useState<string | null>(null);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
@@ -317,33 +317,47 @@ export function WorktreeSidebar() {
     }
   };
 
-  const openCreate = async () => {
-    setCreating(true);
-    if (!repoRoot) return;
+  const openCreate = async (pid: string) => {
+    setCreatingPid(pid);
+    const root = rootOf(pid);
+    if (!root) {
+      setBranches([]);
+      return;
+    }
     try {
-      const list: string[] = await invoke("git_branches", { repoRoot });
+      const list: string[] = await invoke("git_branches", { repoRoot: root });
       setBranches(list);
     } catch {
       setBranches([]);
     }
   };
 
-  const create = async (values: { name: string; base: string }) => {
-    if (!repoRoot || !isGit) return;
-    setCreating(false);
+  const create = async (pid: string, values: { name: string; base: string }) => {
+    const st0 = useStore.getState();
+    const p = st0.projects.find((x) => x.id === pid);
+    const root = p && p.isGit ? (p.gitRoot ?? p.path) : null;
+    if (!root) return;
+    setCreatingPid(null);
     // Optimistic progress row: the form closes at once and creation runs
     // underneath while the user keeps working.
     setPending(values.name || "worktree");
     try {
       const created: Worktree = await invoke("worktree_create", {
-        repoRoot,
+        repoRoot: root,
         name: values.name || null,
         base: values.base || null,
       });
-      // Mount the new shell at once; the re-list below reconciles in background.
-      setWorktrees([...useStore.getState().worktrees, created]);
-      setActiveWorktree(created.id);
-      await refreshList(true);
+      const st = useStore.getState();
+      if (pid === st.activeProjectId) {
+        // Mount the new shell at once; the re-list below reconciles in background.
+        setWorktrees([...st.worktrees, created]);
+        setActiveWorktree(created.id);
+        await refreshList(true);
+      } else {
+        st.setProjectWorktrees(pid, [...(st.worktreesByProject[pid] ?? []), created]);
+        st.openProjectWorktree(pid, created.id);
+        await refreshProjectList(pid, root);
+      }
     } catch (e) {
       void errorDialog(`worktree create failed: ${e}`);
     } finally {
@@ -720,6 +734,26 @@ export function WorktreeSidebar() {
     </button>
   );
 
+  /** Hover-revealed new-worktree button on a git project header. */
+  const newWorktreeBtn = (p: Project) => {
+    if (!p.isGit) return null;
+    return (
+      <button
+        className="gm-icon-btn gm-icon-btn--sm shrink-0 opacity-0 group-hover/proj:opacity-100 focus-visible:opacity-100"
+        aria-label={`New worktree in ${p.name}`}
+        title={`New worktree in ${p.name}`}
+        onClick={(e) => {
+          // The header itself expands or collapses: never both.
+          e.stopPropagation();
+          void openCreate(p.id);
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <Plus size={14} strokeWidth={2} />
+      </button>
+    );
+  };
+
   /** Shared wiring for every row in the panel. */
   const row = (wt: Worktree, pid?: string) => (
     <WorktreeRow
@@ -897,6 +931,7 @@ export function WorktreeSidebar() {
                     {p.name}
                   </span>
                   <span className="tnum gm-meta flex-none">{visible.length}</span>
+                  {newWorktreeBtn(p)}
                   {projActions(p.id, p.name)}
                 </div>
                 {open && (
@@ -950,6 +985,7 @@ export function WorktreeSidebar() {
                 >
                   <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
+                  {newWorktreeBtn(p)}
                   {projActions(p.id, p.name)}
                 </div>
                 {rows.map((wt) => row(wt, p.id === activeProjectId ? undefined : p.id))}
@@ -962,7 +998,7 @@ export function WorktreeSidebar() {
           )}
           {!q && isGit && allProjects.some((p) => p.id === activeProjectId) && shownLive.length === 0 && (
             <div className="gm-meta px-2.5 py-3 leading-5">
-              No worktrees yet. Create one below, or pull a branch in with git.
+              No worktrees yet. Hover the project name and hit + to create one.
             </div>
           )}
 
@@ -1089,23 +1125,26 @@ export function WorktreeSidebar() {
         </div>
       )}
 
-      {/* footer: new worktree is a quiet line in the panel, not a box */}
-      {tab === "worktrees" && isGit && (
-        <div className="px-4 pb-3">
-          {creating ? (
+      {/* new worktree: per-project hover plus opens a modal, not a footer line */}
+      {creatingPid && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setCreatingPid(null)}
+        >
+          <div
+            className="w-[400px] max-w-full"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="New worktree"
+          >
             <CreateWorktreeForm
               branches={branches}
-              onSubmit={create}
-              onCancel={() => setCreating(false)}
+              projectName={projects.find((x) => x.id === creatingPid)?.name}
+              onSubmit={(v) => void create(creatingPid, v)}
+              onCancel={() => setCreatingPid(null)}
             />
-          ) : (
-            <button
-              className="w-full pt-2 text-left text-[12px] font-medium text-ink-500 hover:text-ink-100"
-              onClick={() => void openCreate()}
-            >
-              + New worktree
-            </button>
-          )}
+          </div>
         </div>
       )}
 
