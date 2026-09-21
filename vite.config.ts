@@ -55,7 +55,7 @@ export default defineConfig({
   plugins: [react(), ignoreAppWrites()],
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 8471,
     strictPort: true,
     watch: {
       ignored: [

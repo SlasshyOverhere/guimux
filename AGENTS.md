@@ -6,8 +6,8 @@ Guimux: lean Tauri 2 + React worktree/terminal workbench. Worktree = git dir (pa
 
 ## Commands
 
-- `npm run dev` — Vite frontend only (port 1420, `strictPort`, ignores `src-tauri`).
-- `npm run tauri dev` — full app (frontend at `http://localhost:1420` per `src-tauri/tauri.conf.json`).
+- `npm run dev` — Vite frontend only (port 8471, `strictPort`, ignores `src-tauri`).
+- `npm run tauri dev` — full app (frontend at `http://localhost:8471` per `src-tauri/tauri.conf.json`).
 - `npm run typecheck` / `npm run build` — `tsc --noEmit` / `tsc --noEmit && vite build`. No lint script.
 - `npm test` — frontend unit tests: `node --test` over the dependency-free modules (`updaterPolicy`, `menuPos`, `sidebar/statusLetter`, `sidebar/removeGuard`), so they run without a bundler.
 - `cd src-tauri && cargo test` — Rust tests (`worktree_lifecycle`, `worktree_remove_guards_uncommitted_work`, `status_and_diff`, `encoded_command_matches_powershell`, `alias_stub_rejected`, plus pty replay/epoch and fs cap tests). Single test: `cd src-tauri && cargo test <name>`.
