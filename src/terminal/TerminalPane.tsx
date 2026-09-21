@@ -874,14 +874,39 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         pasteClipboard("shift-insert");
         return false;
       }
+      // Ctrl+Backspace: xterm emits a bare ^H (0x08), which ConPTY delivers
+      // WITHOUT the Ctrl modifier, so the shell sees a plain single-letter
+      // backward-delete. Translate to ^W (Ctrl+W) — backward-kill-word by
+      // default in PSReadLine, readline, zsh and fish — but only on the
+      // normal buffer: alternate-screen TUIs get the raw key untouched.
+      if (e.type === "keydown" && e.key === "Backspace" && e.ctrlKey && !e.metaKey && !e.altKey) {
+        let alt = false;
+        try {
+          const t = termRef.current;
+          alt = t != null && t.buffer.active !== t.buffer.normal;
+        } catch {
+          alt = false;
+        }
+        if (!alt) {
+          try {
+            if (localStorage.getItem("GUIMUX_KEY_DEBUG") === "1")
+              console.log(`[gm-key pane=${paneId}] ctrl-backspace -> ^W`);
+          } catch {
+            /* storage unavailable */
+          }
+          sendRaw("\x17");
+          return false;
+        }
+      }
       return true;
     });
     // Registered before the spawn/attach round-trips below: xterm fires into
     // nothing until a listener exists, so the first keystrokes were dropped.
     term.onData((data) => {
-      // Word-kill probe: with GUIMUX_KEY_DEBUG=1, log the raw codes xterm
-      // emits for Ctrl+Backspace / Ctrl+Delete to confirm the sequence
-      // (typically ESC[3;5~) reaches pty_write unmodified.
+      // Word-kill probe: with GUIMUX_KEY_DEBUG=1, log the raw codes reaching
+      // pty_write for Backspace/Delete chords. Ctrl+Backspace in the normal
+      // buffer is translated to ^W above and never reaches here; in a TUI it
+      // arrives as ^H, Ctrl+Delete as ESC[3;5~.
       try {
         if (localStorage.getItem("GUIMUX_KEY_DEBUG") === "1" && /[\x7f\x08]|\x1b\[3/.test(data)) {
           const codes = Array.from(data).map((c) => c.charCodeAt(0));
