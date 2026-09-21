@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { useStore } from "../store";
+import { announceWrite } from "../announceWrite";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
+import { menuPos } from "../menuPos";
+import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
 import type { FsNode } from "../types";
 
@@ -11,6 +14,19 @@ import type { FsNode } from "../types";
 // when the tree needs type scanning at a glance.
 
 const SEP = /[\\/]/;
+
+// Unsaved buffers keyed by path: the pane remounts on every worktree switch
+// (key={wt.id}), and local state alone took the user's edits with it.
+const buffers = new Map<string, { content: string; saved: string; dirty: boolean }>();
+
+// Tree paths mix separators (worktree roots use `/`, DirEntry adds `\`), so
+// both comparisons below normalize before matching.
+const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+const inRoot = (root: string, p: string) => {
+  const r = normSep(root);
+  const n = normSep(p);
+  return n === r || n.startsWith(r + "/");
+};
 
 function baseName(p: string): string {
   const parts = p.split(SEP);
@@ -178,6 +194,20 @@ export function ExplorerPane({ root }: { root: string }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [bulk, setBulk] = useState({ open: true, n: 0 });
+  // Bundled Monaco is most of the app bundle: fetch it the first time a file
+  // is opened rather than at boot, where it delayed the first shell. The
+  // import configures the loader, so it must finish before Editor renders.
+  const [monacoReady, setMonacoReady] = useState(false);
+  useEffect(() => {
+    if (!editorPath || monacoReady) return;
+    let cancelled = false;
+    void import("../monaco").then(() => {
+      if (!cancelled) setMonacoReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editorPath, monacoReady]);
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -231,6 +261,7 @@ export function ExplorerPane({ root }: { root: string }) {
     }
     const newPath = siblingPath(oldPath, name);
     setRenaming(null);
+    announceWrite(oldPath, newPath);
     try {
       await invoke("fs_rename", { old: oldPath, new: newPath });
     } catch (e) {
@@ -238,6 +269,11 @@ export function ExplorerPane({ root }: { root: string }) {
       return;
     }
     // Untitled flow: renaming the open file retargets the editor buffer.
+    const buffered = buffers.get(oldPath);
+    if (buffered) {
+      buffers.delete(oldPath);
+      buffers.set(newPath, buffered);
+    }
     if (editorPath === oldPath) openEditor(newPath, diffMode);
     refreshTree();
   };
@@ -264,11 +300,24 @@ export function ExplorerPane({ root }: { root: string }) {
   useEffect(() => {
     setRenaming(null);
     setMenu(null);
+    // This pane now shows another worktree: an editor still open on the
+    // previous one sits outside the tree with a nonsense relative name.
+    const open = useStore.getState().editorPath;
+    if (open && !inRoot(root, open)) useStore.getState().closeEditor();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
   useEffect(() => {
     if (!editorPath) return;
+    // A dirty buffer outranks disk: this is the remount that used to lose it.
+    const cached = buffers.get(editorPath);
+    if (cached?.dirty) {
+      setContent(cached.content);
+      setSavedContent(cached.saved);
+      setDirty(true);
+      setContentLoaded(true);
+      return;
+    }
     // Load in diff mode too: "Accept working-tree content" writes this buffer
     // back to disk, so it must hold real file content, never the initial "".
     invoke<string>("fs_read", { path: editorPath })
@@ -288,6 +337,14 @@ export function ExplorerPane({ root }: { root: string }) {
 
   // Ctrl+S anywhere while editing (never from a focused terminal: the
   // shell owns that key, and DC3 would silently pause output via XOFF).
+  // Mirror only unsaved buffers: a clean one reloads from disk, and keeping
+  // every opened file in memory would grow without bound.
+  useEffect(() => {
+    if (!editorPath) return;
+    if (dirty) buffers.set(editorPath, { content, saved: savedContent, dirty: true });
+    else buffers.delete(editorPath);
+  }, [editorPath, content, savedContent, dirty]);
+
   useEffect(() => {
     if (!editorPath || diffMode) return;
     const onKey = (e: KeyboardEvent) => {
@@ -313,8 +370,9 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const shortName = useMemo(() => {
     if (!editorPath) return "";
-    const rel = editorPath.slice(root.length + 1);
-    return rel;
+    const r = normSep(root);
+    const p = normSep(editorPath);
+    return p.startsWith(r + "/") ? p.slice(r.length + 1) : p;
   }, [editorPath, root]);
 
   const language = useMemo(() => {
@@ -329,6 +387,7 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const save = async () => {
     if (!editorPath) return;
+    announceWrite(editorPath);
     try {
       await invoke("fs_write", { path: editorPath, content });
     } catch (e) {
@@ -338,7 +397,12 @@ export function ExplorerPane({ root }: { root: string }) {
     setSavedContent(content);
     setDirty(false);
   };
-  saveRef.current = () => void save();
+  // Monaco's Ctrl+S handler is registered once in onMount, so it reads the
+  // current save through a ref instead of a stale closure.
+  const saveRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    saveRef.current = () => void save();
+  });
 
   const revert = () => {
     setContent(savedContent);
@@ -357,6 +421,7 @@ export function ExplorerPane({ root }: { root: string }) {
     } catch {
       // doesn't exist yet: create it empty so the editor opens real content
       try {
+        announceWrite(p);
         await invoke("fs_write", { path: p, content: "" });
       } catch {
         /* fall through: editor will show the read error */
@@ -380,10 +445,11 @@ export function ExplorerPane({ root }: { root: string }) {
   const menuEl = menu && (
     <div
       className="gm-menu tnum fixed z-50 w-40"
-      style={{
-        left: Math.min(menu.x, window.innerWidth - 180),
-        top: Math.min(menu.y, window.innerHeight - 80),
-      }}
+      style={menuPos(menu.x, menu.y, { w: 160, h: 44 }, {
+        zoom: useStore.getState().settings.uiZoom || 1,
+        w: window.innerWidth,
+        h: window.innerHeight,
+      })}
       onClick={(e) => e.stopPropagation()}
       role="menu"
     >
@@ -397,10 +463,7 @@ export function ExplorerPane({ root }: { root: string }) {
     </div>
   );
 
-  const [width, setWidth] = useState(() => {
-    const v = Number(localStorage.getItem("guimux-explorer-w"));
-    return Number.isFinite(v) && v >= 220 && v <= 720 ? v : 256;
-  });
+  const [width, setWidth] = useState(() => readPref(PREF.explorerWidth, 256, numIn(220, 720)));
   const widthRef = useRef(width);
   widthRef.current = width;
   const onResizeDown = (e: React.MouseEvent) => {
@@ -418,7 +481,7 @@ export function ExplorerPane({ root }: { root: string }) {
     const up = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      localStorage.setItem("guimux-explorer-w", String(Math.round(widthRef.current)));
+      writePref(PREF.explorerWidth, Math.round(widthRef.current));
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
     };
@@ -613,6 +676,7 @@ export function ExplorerPane({ root }: { root: string }) {
                 onClick={async () => {
                   if (editorPath && contentLoaded) {
                     try {
+                      announceWrite(editorPath);
                       await invoke("fs_write", { path: editorPath, content });
                     } catch (e) {
                       void errorDialog(`save failed: ${e}`);
@@ -626,9 +690,14 @@ export function ExplorerPane({ root }: { root: string }) {
               </button>
             </div>
           </div>
+        ) : !monacoReady ? (
+          <div className="gm-meta p-3 text-[12px]">Loading editor…</div>
         ) : (
           <Editor
             height="100%"
+            // One model per file: without a path every file shared Monaco's
+            // default model, so Ctrl+Z could restore another file's text.
+            path={normSep(editorPath ?? "")}
             language={language}
             theme="vs-dark"
             value={content}
@@ -675,7 +744,3 @@ export function ExplorerPane({ root }: { root: string }) {
     </div>
   );
 }
-
-// Wired per-render by the component so the Monaco Ctrl+S command saves
-// the current buffer. Declared at module scope because onMount only fires once.
-const saveRef: { current: () => void } = { current: () => {} };

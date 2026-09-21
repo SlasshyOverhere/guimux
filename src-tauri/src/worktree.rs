@@ -280,11 +280,14 @@ fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, S
     Err("worktree is not registered with git and is outside ~/.guimux/worktrees — delete it manually".into())
 }
 
-fn delete_branch_guarded(root: &Path, b: &str) {
+fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
     if b.is_empty() || b.starts_with('-') || b.contains('\0') {
         return;
     }
-    let _ = run_git(root, &["branch", "-D", "--", b]);
+    // -d refuses an unmerged branch; -D only once the caller accepted the
+    // loss of uncommitted work.
+    let flag = if force { "-D" } else { "-d" };
+    let _ = run_git(root, &["branch", flag, "--", b]);
 }
 
 fn sanitize(name: &str) -> String {
@@ -316,8 +319,10 @@ pub fn worktree_remove(
     repo_root: String,
     id: String,
     delete_branch: bool,
+    force: Option<bool>,
 ) -> Result<(), String> {
     reject_git_ref(&id, "worktree id")?;
+    let force = force.unwrap_or(false);
     let path = PathBuf::from(&id);
     // Run git from the MAIN worktree (a linked worktree reports itself as
     // toplevel, and removing a worktree from inside itself fails on Windows).
@@ -330,6 +335,38 @@ pub fn worktree_remove(
         // prune the stale entry so `git worktree list` stops showing it.
         let _ = run_git(&root, &["worktree", "prune"]);
         return Ok(());
+    }
+    // --force also discards uncommitted work, so refuse it until the caller
+    // confirmed the loss. Ignored build output does not count as dirty.
+    if !force {
+        let dirty = git_cmd()
+            .args(["status", "--porcelain"])
+            .current_dir(&path)
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        // delete_branch runs `branch -D`, which also drops commits the base
+        // never saw. Name them: a finished-but-unmerged branch must not vanish
+        // behind a generic "branch will be deleted" prompt.
+        let unmerged = if delete_branch {
+            unmerged_commits(&root, &path).filter(|(n, _)| *n > 0)
+        } else {
+            None
+        };
+        let mut lost: Vec<String> = Vec::new();
+        if dirty {
+            lost.push("uncommitted changes".into());
+        }
+        if let Some((n, base)) = &unmerged {
+            let noun = if *n == 1 { "commit" } else { "commits" };
+            lost.push(format!("{n} {noun} not in {base}"));
+        }
+        if !lost.is_empty() {
+            return Err(format!(
+                "worktree has {}. Commit or merge first, or retry to discard them",
+                lost.join(" and ")
+            ));
+        }
     }
     // capture branch before removal
     let branch = current_branch(&path).ok();
@@ -365,7 +402,7 @@ pub fn worktree_remove(
         let _ = run_git(&root, &["worktree", "prune"]);
         if delete_branch {
             if let Some(b) = branch {
-                delete_branch_guarded(&root, &b);
+                delete_branch_guarded(&root, &b, force);
             }
         }
         return Ok(());
@@ -375,7 +412,7 @@ pub fn worktree_remove(
     }
     if delete_branch {
         if let Some(b) = branch {
-            delete_branch_guarded(&root, &b);
+            delete_branch_guarded(&root, &b, force);
         }
         return Ok(());
     }
@@ -478,6 +515,23 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     Ok(cur_branch)
 }
 
+/// Commits on the worktree's branch that its base lacks: what `branch -D`
+/// would throw away. None when git cannot tell (detached HEAD, no base).
+fn unmerged_commits(main_wt: &Path, wt: &Path) -> Option<(usize, String)> {
+    let branch = current_branch(wt).ok()?;
+    let base = find_base_branch(main_wt, &branch).ok()?;
+    let out = git_cmd()
+        .args(["rev-list", "--count", &format!("{base}..{branch}")])
+        .current_dir(main_wt)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let n = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>().ok()?;
+    Some((n, base))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +556,47 @@ mod tests {
     }
 
     #[test]
+    fn worktree_remove_guards_uncommitted_work() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("dirty-one".into())).unwrap();
+        fs::write(Path::new(&wt.path).join("scratch.txt"), "uncommitted").unwrap();
+
+        let err = worktree_remove(root.clone(), wt.id.clone(), false, None).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "unexpected error: {err}");
+
+        worktree_remove(root.clone(), wt.id.clone(), false, Some(true)).unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn worktree_remove_guards_unmerged_commits() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("unmerged-one".into())).unwrap();
+        fs::write(Path::new(&wt.path).join("c.txt"), "only on this branch").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "unmerged work"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+
+        // Clean tree, but the branch holds a commit main never saw.
+        let err = worktree_remove(root.clone(), wt.id.clone(), true, None).unwrap_err();
+        assert!(err.contains("1 commit not in main"), "unexpected error: {err}");
+
+        worktree_remove(root.clone(), wt.id.clone(), true, Some(true)).unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn worktree_lifecycle() {
         let repo = fixture_repo();
         let root = repo.to_string_lossy().to_string();
@@ -523,7 +618,7 @@ mod tests {
         let msg = worktree_merge(wt.id.clone()).unwrap();
         assert!(msg.contains("Merge") || !msg.is_empty());
 
-        worktree_remove(root.clone(), wt.id.clone(), true).unwrap();
+        worktree_remove(root.clone(), wt.id.clone(), true, Some(false)).unwrap();
         assert!(!Path::new(&wt.path).exists());
         let _ = fs::remove_dir_all(&repo);
     }

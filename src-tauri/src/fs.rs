@@ -145,6 +145,24 @@ pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
     Ok(build_tree(&p, 0, depth.clamp(1, 6), &mut budget))
 }
 
+/// Directory identity for a rename. Windows paths are case-insensitive and
+/// accept both separators, so a raw Path compare rejected `c:/a` vs `C:\a`.
+fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
+    let (a, b) = match (a, b) {
+        (Some(a), Some(b)) => (
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+        ),
+        _ => return false,
+    };
+    if cfg!(windows) {
+        a.replace('/', "\\")
+            .eq_ignore_ascii_case(&b.replace('/', "\\"))
+    } else {
+        a == b
+    }
+}
+
 #[command]
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     let from = PathBuf::from(&old);
@@ -152,7 +170,7 @@ pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     if !from.exists() {
         return Err(format!("not found: {old}"));
     }
-    if from.parent() != to.parent() {
+    if !same_dir(from.parent(), to.parent()) {
         return Err("can only rename within the same folder".into());
     }
     // Same reserved-name/device-path guard as fs_read/fs_write: renaming a
@@ -223,11 +241,24 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
     let n = WRITE_CTR.fetch_add(1, Ordering::SeqCst);
     let tmp = parent.join(format!(".guimux-tmp-{}-{}", std::process::id(), n));
     fs::write(&tmp, &content).map_err(|e| e.to_string())?;
-    if let Err(e) = fs::rename(&tmp, &p) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.to_string());
+    // AV scanners and indexers briefly lock a freshly written file on Windows:
+    // retry the swap instead of failing the save outright.
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..4 {
+        match fs::rename(&tmp, &p) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+            }
+        }
     }
-    Ok(())
+    // Never leave the temp file behind: it shows up as untracked in the
+    // user's project.
+    let _ = fs::remove_file(&tmp);
+    Err(last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "rename failed".into()))
 }
 
 #[cfg(test)]

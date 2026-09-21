@@ -37,21 +37,58 @@ export { detectToProject };
 /* a document title, tools right. One palette, one accent, Inter only.  */
 /* ------------------------------------------------------------------ */
 
+// Drag must ignore anything clickable: on Windows a native drag started on
+// mousedown swallows the follow-up click, which bricked every dropdown row
+// and click-outside overlay in the bar (they are divs, not <button>s).
+const noDrag = (t: HTMLElement) =>
+  !!t.closest("button, [role='button'], input, textarea, a, [data-no-drag]");
+
+// Drag on mousemove-after-press (real gesture), never on bare mousedown:
+// Windows treats startDragging like a native caption drag and swallows the
+// click that follows. Both topbars share this so neither drifts.
+function barDragDown(e: React.MouseEvent) {
+  if (e.button !== 0 || noDrag(e.target as HTMLElement)) return;
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let dragging = false;
+  const move = (ev: MouseEvent) => {
+    if (dragging) return;
+    if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+    dragging = true;
+    cleanup();
+    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+      getCurrentWindow().startDragging().catch(() => {});
+    }).catch(() => {});
+  };
+  const up = () => cleanup();
+  const cleanup = () => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+  };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
+}
+
+function barDoubleClick(e: React.MouseEvent) {
+  if (noDrag(e.target as HTMLElement)) return;
+  import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
+    getCurrentWindow().toggleMaximize().catch(() => {});
+  }).catch(() => {});
+}
+
 function Topbar({ onAdd }: { onAdd: () => void }) {
-  const {
-    projects,
-    activeProjectId,
-    setActiveProject,
-    removeProject,
-    worktrees,
-    activeWorktreeId,
-    setSettingsOpen,
-    setAgentOpen,
-    leftVisible,
-    rightVisible,
-    toggleLeft,
-    toggleRight,
-  } = useStore();
+  const projects = useStore((s) => s.projects);
+  const activeProjectId = useStore((s) => s.activeProjectId);
+  const setActiveProject = useStore((s) => s.setActiveProject);
+  const removeProject = useStore((s) => s.removeProject);
+  const worktrees = useStore((s) => s.worktrees);
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setSettingsOpen = useStore((s) => s.setSettingsOpen);
+  const setAgentOpen = useStore((s) => s.setAgentOpen);
+  const leftVisible = useStore((s) => s.leftVisible);
+  const rightVisible = useStore((s) => s.rightVisible);
+  const toggleLeft = useStore((s) => s.toggleLeft);
+  const toggleRight = useStore((s) => s.toggleRight);
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
   const [projOpen, setProjOpen] = useState(false);
@@ -82,50 +119,11 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
     };
   }, [projOpen]);
 
-  // Drag must ignore anything clickable: on Windows a native drag started on
-  // mousedown swallows the follow-up click, which bricked every dropdown row
-  // and click-outside overlay in this bar (they are divs, not <button>s).
-  const noDrag = (t: HTMLElement) =>
-    !!t.closest("button, [role='button'], input, textarea, a, [data-no-drag]");
-  // Drag on mousemove-after-press (real gesture), never on bare mousedown:
-  // Windows treats startDragging like a native caption drag and swallows the
-  // click that follows, which bricked every dropdown in this bar (the click
-  // that opens the menu never fires its onClick after a drag starts, and the
-  // same swallowed-click bricks rows and the click-outside overlay).
-  const onBarDown = (e: React.MouseEvent) => {
-    if (e.button !== 0 || noDrag(e.target as HTMLElement)) return;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let dragging = false;
-    const move = (ev: MouseEvent) => {
-      if (dragging) return;
-      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
-      dragging = true;
-      cleanup();
-      import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-        getCurrentWindow().startDragging().catch(() => {});
-      }).catch(() => {});
-    };
-    const up = () => cleanup();
-    const cleanup = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-  const onBarDouble = (e: React.MouseEvent) => {
-    if (noDrag(e.target as HTMLElement)) return;
-    import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-      getCurrentWindow().toggleMaximize().catch(() => {});
-    }).catch(() => {});
-  };
-
   return (
     <div
       data-tauri-drag-region
-      onMouseDown={onBarDown}
-      onDoubleClick={onBarDouble}
+      onMouseDown={barDragDown}
+      onDoubleClick={barDoubleClick}
       className="flex h-11 shrink-0 select-none items-center gap-1.5 bg-ink-900 pl-3 pr-0"
       style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
     >
@@ -402,21 +400,19 @@ function Welcome({ onOpen, busy }: { onOpen: () => void; busy: boolean }) {
 }
 
 export default function App() {
-  const {
-    projects,
-    activeProjectId,
-    hydrated,
-    addProject,
-    setActiveProject,
-    setRepoRoot,
-    worktrees,
-    activeWorktreeId,
-    setActiveWorktree,
-    setWorktrees,
-    layout,
-    leftVisible,
-    rightVisible,
-  } = useStore();
+  const projects = useStore((s) => s.projects);
+  const activeProjectId = useStore((s) => s.activeProjectId);
+  const hydrated = useStore((s) => s.hydrated);
+  const addProject = useStore((s) => s.addProject);
+  const setActiveProject = useStore((s) => s.setActiveProject);
+  const setRepoRoot = useStore((s) => s.setRepoRoot);
+  const worktrees = useStore((s) => s.worktrees);
+  const activeWorktreeId = useStore((s) => s.activeWorktreeId);
+  const setActiveWorktree = useStore((s) => s.setActiveWorktree);
+  const setWorktrees = useStore((s) => s.setWorktrees);
+  const layout = useStore((s) => s.layout);
+  const leftVisible = useStore((s) => s.leftVisible);
+  const rightVisible = useStore((s) => s.rightVisible);
 
   const [busy, setBusy] = useState(false);
   const [repoError, setRepoError] = useState<string | null>(null);
@@ -425,8 +421,6 @@ export default function App() {
 
   useEffect(() => {
     maybeStartStress();
-    // Startup update check: fire-and-forget, never blocks boot or terminals.
-    void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
   }, []);
 
   // Restore persisted projects once on startup, then persist on every change.
@@ -437,6 +431,10 @@ export default function App() {
       if (cancelled) return;
       const st = useStore.getState();
       if (saved?.settings) st.hydrateSettings(saved.settings);
+      // After hydration: read before this point, the check always saw
+      // DEFAULT_SETTINGS, so turning the auto-check off never took effect at
+      // startup. Fire-and-forget: never blocks boot or terminals.
+      void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
       if (saved && saved.projects.length > 0) {
         // Paint instantly from disk, revalidate in background. The old flow
         // awaited N git rev-parses before the first hydrate, so boot sat on
@@ -683,18 +681,8 @@ export default function App() {
       <div className="flex h-full flex-col">
         <div
           data-tauri-drag-region
-          onMouseDown={(e) => {
-            if (e.button !== 0 || (e.target as HTMLElement).closest("button, [role='button'], input, textarea, a")) return;
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-              getCurrentWindow().startDragging().catch(() => {});
-            }).catch(() => {});
-          }}
-          onDoubleClick={(e) => {
-            if ((e.target as HTMLElement).closest("button, [role='button'], input, textarea, a")) return;
-            import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-              getCurrentWindow().toggleMaximize().catch(() => {});
-            }).catch(() => {});
-          }}
+          onMouseDown={barDragDown}
+          onDoubleClick={barDoubleClick}
           className="flex h-11 shrink-0 select-none items-center gap-2 bg-ink-900 pl-3 pr-0"
           style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
         >

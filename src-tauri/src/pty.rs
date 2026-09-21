@@ -34,6 +34,24 @@ pub struct PtyManager {
     sessions: Mutex<HashMap<u64, PtyEntry>>,
 }
 
+impl PtyManager {
+    /// Terminate every live shell. ConPTY children are not in a job object, so
+    /// without this the shells (and any agents they host) outlive the window.
+    pub fn kill_all(&self) {
+        let entries: Vec<PtyEntry> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.drain().map(|(_, entry)| entry).collect()
+        };
+        for mut entry in entries {
+            let _ = entry.killer.kill();
+            drop(entry.master);
+        }
+        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -151,9 +169,13 @@ fn resolve_pwsh() -> Option<String> {
 /// pwsh -> inbox powershell -> cmd, so a terminal always opens.
 #[cfg(windows)]
 fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
+    let mut chain: Vec<(String, Vec<String>)> = vec![];
+    // Override wins, but the chain stays behind it: a typo'd path used to
+    // leave the pane with no shell at all.
     if let Ok(over) = std::env::var("GUIMUX_SHELL") {
-        if !over.trim().is_empty() {
-            return vec![(over, vec![])];
+        let over = over.trim().to_string();
+        if !over.is_empty() {
+            chain.push((over, vec![]));
         }
     }
     let pwsh = resolve_pwsh();
@@ -182,9 +204,10 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
             encoded.clone(),
         ]
     };
-    let mut chain = vec![];
     if let Some(p) = pwsh {
-        chain.push((p, ps_args()));
+        if !chain.iter().any(|(s, _)| s.eq_ignore_ascii_case(&p)) {
+            chain.push((p, ps_args()));
+        }
     }
     if let Some(p) = inbox {
         if !chain.iter().any(|(s, _)| s.eq_ignore_ascii_case(&p)) {
@@ -342,10 +365,14 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                         first = false;
                         eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
                     }
-                    push_buffer(id, epoch, &buf[..n]);
                     let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
                         let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
+                    } else {
+                        // Attached panes have no reader for the replay buffer
+                        // (pty_attach drained it), so rebuilding a 256KB copy
+                        // per chunk only burned memory and memcpy.
+                        push_buffer(id, epoch, &buf[..n]);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -369,7 +396,9 @@ fn spawn_pair(
     let t_start = std::time::Instant::now();
     // Cap live shells: each holds a 256KB replay buffer (H-003).
     if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
-        return Err("too many pty sessions (close panes and retry)".into());
+        return Err(format!(
+            "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+        ));
     }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
@@ -580,8 +609,9 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
             Err(e) => eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows} ERR: {e}"),
         }
     }
-    let _ = r;
-    Ok(())
+    // Report instead of swallowing: a wedged ConPTY resize used to look like
+    // success from the frontend's side.
+    r.map_err(|e| format!("pty_resize failed: {e}"))
 }
 
 #[command]

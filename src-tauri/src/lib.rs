@@ -1,3 +1,5 @@
+use tauri::Manager;
+
 pub mod conpty_dll;
 pub mod fs;
 pub mod git;
@@ -45,6 +47,15 @@ pub fn run() {
             pty::pty_restart,
             pty::pty_kill,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // ConPTY children are not in a job object: without this, shells and
+            // the agents they host keep running with no window attached.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(pty) = app.try_state::<pty::PtyManager>() {
+                    pty.kill_all();
+                }
+            }
+        });
 }

@@ -28,6 +28,12 @@ function readScrollback(paneId: string): string | null {
 
 function persistScrollback(paneId: string, state: string) {
   stateCache.set(paneId, state);
+  // Same cap as the localStorage index: the in-memory map grew forever.
+  while (stateCache.size > MAX_PERSISTED_PANES) {
+    const oldest = stateCache.keys().next().value;
+    if (oldest === undefined) break;
+    stateCache.delete(oldest);
+  }
   try {
     localStorage.setItem(LS_SCROLL_PREFIX + paneId, state);
     // Pane ids embed a timestamp and are never reused, so cap the stored
@@ -142,6 +148,34 @@ function fitKeepViewport(term: Terminal, fit: FitAddon): { cols: number; rows: n
   return dims;
 }
 
+// A TUI repaint sends ED 3 (scrollback wipe), and a long agent run trims the
+// scrollback cap on every line past it. Either way xterm deletes the lines
+// above the viewport and clamps a scrolled-up one to line 0 — the reader lands
+// at the very start of a buffer that keeps growing below them, with no way
+// back but a long scroll. When a write clamps a non-following viewport to the
+// start, its lines are gone from the buffer: show the live screen instead.
+// A surviving place (xterm shifts it with the trim) is left alone.
+function writeKeepPlace(term: Terminal, data: string | Uint8Array) {
+  let vp = 0;
+  let following = true;
+  try {
+    const b = term.buffer.active;
+    vp = b.viewportY;
+    following = vp >= b.baseY;
+  } catch {
+    /* no buffer yet */
+  }
+  term.write(data, () => {
+    if (following || vp === 0) return;
+    try {
+      const b = term.buffer.active;
+      if (b.viewportY === 0 && b.baseY > 0) term.scrollToBottom();
+    } catch {
+      /* disposed mid-write */
+    }
+  });
+}
+
 // Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
 // (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
 // powershell bootstrap in pty.rs. Snoop the raw output bytes, keep the last
@@ -190,9 +224,18 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const initCmdRef = useRef<string | null>(initCmd ?? null);
   initCmdRef.current = initCmd ?? null;
   const exitedRef = useRef(false);
+  // Mirrors the mount effect's `alive` flag for code that outlives a render.
+  const aliveRef = useRef(true);
+  // The resize observer is created once per pane: reading the prop directly
+  // left it pinned to the visibility of the first render.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const [exited, setExited] = useState(false);
   const [webgl, setWebgl] = useState(true);
-  const { splitPane, setActivePane, setPtyId, toggleMaximizePane } = useStore();
+  const splitPane = useStore((s) => s.splitPane);
+  const setActivePane = useStore((s) => s.setActivePane);
+  const setPtyId = useStore((s) => s.setPtyId);
+  const toggleMaximizePane = useStore((s) => s.toggleMaximizePane);
   const maximized = useStore((s) => s.maximizedPaneId === paneId);
   const paneCount = useStore((s) => allPaneIds(s.layout).length);
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
@@ -338,7 +381,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         );
       }
       try {
-        term.write(bytes);
+        writeKeepPlace(term, bytes);
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
@@ -347,12 +390,20 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
       markExited();
     });
+    // Unmounted mid-await: these handlers would otherwise outlive the
+    // terminal and keep firing into a disposed buffer, and attaching would
+    // drain the backend's replay buffer for a pane that is no longer there.
+    if (!aliveRef.current) {
+      disposeOutput();
+      disposeExit();
+      return;
+    }
     unlisteners.current.push(disposeOutput, disposeExit);
     const replay = await invoke<number[]>("pty_attach", { id: sid });
     if (replay.length > 0) {
       const bytes = new Uint8Array(replay);
       snoopLiveCwd(bytes);
-      term.write(bytes);
+      writeKeepPlace(term, bytes);
     }
   };
 
@@ -503,8 +554,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const term = termRef.current;
     if (!term) return;
     if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
+    // Live panes need this too: scrollback was frozen at mount, and the pane
+    // created at boot predates the persisted settings load.
+    if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
     maybeResize(fitRef.current ? fitKeepViewport(term, fitRef.current) : saneDims(term));
-  }, [fontSize]);
+  }, [fontSize, scrollback]);
 
   // Ctrl+wheel / Ctrl+= / Ctrl+- zooms this pane; Ctrl+0 resets.
   // Wheel needs a non-passive listener + stopPropagation: xterm's own wheel
@@ -667,6 +721,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       }
       return true;
     });
+    // Registered before the spawn/attach round-trips below: xterm fires into
+    // nothing until a listener exists, so the first keystrokes were dropped.
+    term.onData((data) => {
+      useStore.getState().markPaneDirty(paneId);
+      if (exitedRef.current) return;
+      const sid = sessionRef.current;
+      if (sid != null) invoke("pty_write", { id: sid, data });
+    });
     enableWebgl(term);
 
     // Restore persisted scrollback (best-effort: a corrupt buffer must never
@@ -685,6 +747,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     }
 
     let alive = true;
+    aliveRef.current = true;
 
     (async () => {
       if (!alive) return;
@@ -757,22 +820,14 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         }, 600);
       }
 
-      term.onData((data) => {
-        useStore.getState().markPaneDirty(paneId);
-        if (exitedRef.current) return;
-        const sid = sessionRef.current;
-        if (sid != null) {
-          invoke("pty_write", { id: sid, data });
-        }
-      });
     })();
 
     const ro = new ResizeObserver(() => {
-      if (!visible) return;
+      if (!visibleRef.current) return;
       // One fit+resize per frame tops: the observer can fire multiple times
       // per layout change, and fit() itself mutates layout (echo loop).
       requestAnimationFrame(() => {
-        if (!alive || !visible) return;
+        if (!alive || !visibleRef.current) return;
         const hostPx =
           hostRef.current?.getBoundingClientRect();
         if (resizeDebug && hostPx) {
@@ -787,6 +842,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
     return () => {
       alive = false;
+      aliveRef.current = false;
       if (resizeTimerRef.current != null) {
         clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
