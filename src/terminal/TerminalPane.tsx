@@ -492,8 +492,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     }
   };
 
-  // Transient pane hint (clipboard empty, image blocked). A small overlay,
-  // never terminal output: writing into the grid would pollute the shell.
+  // Transient pane hint (clipboard empty, image save failed). A small
+  // overlay, never terminal output: writing into the grid would pollute the
+  // shell.
   const [pasteHint, setPasteHint] = useState<string | null>(null);
   const pasteHintTimer = useRef<number | null>(null);
   const showPasteHint = (msg: string) => {
@@ -523,6 +524,47 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       if (localStorage.getItem("GUIMUX_PASTE_DEBUG") === "1") console.log(`[gm-paste pane=${paneId}] ${info}`);
     } catch {
       /* storage unavailable */
+    }
+  };
+
+  // Fresh cwd for the mount-effect closures below, which capture the first
+  // render: the pane keeps its identity while the worktree cwd can change.
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
+
+  // Image paste: save the blob under `<cwd>/.guimux-pastes/` and paste the
+  // quoted path, so a screenshot Ctrl+V lands a file the shell (or an agent
+  // reading the path) can use. term.paste keeps bracketed-paste semantics.
+  const pasteImageBlob = async (blob: Blob, chord: string) => {
+    const term = termRef.current;
+    const ext =
+      blob.type === "image/jpeg" ? "jpg"
+      : blob.type === "image/gif" ? "gif"
+      : blob.type === "image/webp" ? "webp"
+      : blob.type === "image/bmp" ? "bmp"
+      : "png";
+    const dir = cwdRef.current.replace(/[/\\]+$/, "");
+    const name = `paste-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const path = `${dir}/.guimux-pastes/${name}`;
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+      const base64 = dataUrl.split(",", 2)[1] ?? "";
+      if (!base64) throw new Error("empty image data");
+      const saved = await invoke<string>("fs_write_bytes", { path, base64 });
+      pasteDebug(`chord=${chord} imageSaved=${blob.size}B ext=${ext} fallbackUsed=false`);
+      try {
+        term?.paste(quoteForShell(saved));
+      } catch {
+        sendRaw(quoteForShell(saved));
+      }
+    } catch (e) {
+      pasteDebug(`chord=${chord} imageSaveFailed fallbackUsed=false`);
+      showPasteHint("Couldn't save pasted image");
     }
   };
 
@@ -576,19 +618,38 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
             }
             return;
           }
-          // Empty text: probe for an image so a screenshot copy is never a
-          // silent no-op. Chosen behavior: explicit hint, no path insert.
-          let imagePresent = false;
+          // Empty text: probe for an image and save it under
+          // `.guimux-pastes/`, pasting the file path. A screenshot copy is
+          // never a silent no-op.
+          let imageType: string | null = null;
+          let imageItem: ClipboardItem | null = null;
           try {
             if (navigator.clipboard?.read) {
               const items = await navigator.clipboard.read();
-              imagePresent = items.some((it) => it.types.some((t) => t.startsWith("image/")));
+              for (const it of items) {
+                const t = it.types.find((x) => x.startsWith("image/"));
+                if (t) {
+                  imageType = t;
+                  imageItem = it;
+                  break;
+                }
+              }
             }
           } catch {
             /* probe denied: treat as empty */
           }
-          pasteDebug(`chord=${chord} textLen=0 imagePresent=${imagePresent} fallbackUsed=false`);
-          showPasteHint(imagePresent ? "Images cannot be pasted as text" : "Clipboard is empty");
+          if (imageItem && imageType) {
+            try {
+              const blob = await imageItem.getType(imageType);
+              await pasteImageBlob(blob, chord);
+            } catch {
+              pasteDebug(`chord=${chord} textLen=0 imagePresent=true fallbackUsed=false`);
+              showPasteHint("Couldn't read pasted image");
+            }
+            return;
+          }
+          pasteDebug(`chord=${chord} textLen=0 imagePresent=false fallbackUsed=false`);
+          showPasteHint("Clipboard is empty");
         })
         .catch(() => {
           // Permission denial only: let the shell paste itself. Empty/image
@@ -773,15 +834,13 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         return;
       }
       const files = data?.files;
-      const hasImage =
-        !!files &&
-        Array.from(files).some((f) => f.type.startsWith("image/"));
-      if (hasImage) {
+      const imageFile = files ? Array.from(files).find((f) => f.type.startsWith("image/")) : undefined;
+      if (imageFile) {
         e.preventDefault();
         e.stopPropagation();
         pasteDebug(`chord=native-paste textLen=0 imagePresent=true fallbackUsed=false`);
         useStore.getState().markPaneDirty(paneId);
-        showPasteHint("Images cannot be pasted as text");
+        void pasteImageBlob(imageFile, "native-paste");
         return;
       }
       e.preventDefault();

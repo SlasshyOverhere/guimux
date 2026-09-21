@@ -265,6 +265,110 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
         .unwrap_or_else(|| "rename failed".into()))
 }
 
+/// Paste drop for clipboard images: base64 bytes -> `<dir>/.guimux-pastes/`.
+/// Narrow by design: the parent dir must be `.guimux-pastes` and the file
+/// name `paste-*<ext>` with an image extension, so this can never become a
+/// general binary writer. Returns the final path (numeric suffix on clash).
+const MAX_PASTE_BYTES: usize = 10_000_000;
+
+fn base64_val(c: u8) -> Option<u32> {
+    match c {
+        b'A'..=b'Z' => Some((c - b'A') as u32),
+        b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+        b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if bytes.len() % 4 != 0 {
+        return Err("invalid base64 length".into());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for c in bytes.chunks(4) {
+        let mut n: u32 = 0;
+        let mut pad = 0;
+        for (i, &b) in c.iter().enumerate() {
+            if b == b'=' {
+                pad += 1;
+                n <<= 6;
+            } else {
+                if pad > 0 {
+                    return Err("invalid base64 padding".into());
+                }
+                n = (n << 6) | base64_val(b).ok_or("invalid base64 character")?;
+            }
+            let _ = i;
+        }
+        if pad > 2 {
+            return Err("invalid base64 padding".into());
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn valid_paste_name(name: &str) -> bool {
+    let Some(stem) = name.strip_prefix("paste-") else {
+        return false;
+    };
+    let Some(dot) = stem.rfind('.') else {
+        return false;
+    };
+    let (id, ext) = stem.split_at(dot);
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return false;
+    }
+    matches!(ext.to_ascii_lowercase().as_str(), ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp")
+}
+
+#[command]
+pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
+    if base64.len() > MAX_PASTE_BYTES / 3 * 4 + 4 {
+        return Err("pasted image too large".into());
+    }
+    let p = PathBuf::from(&path);
+    reject_special_path(&p, "path")?;
+    if p.parent().and_then(|d| d.file_name()).map(|n| n != ".guimux-pastes").unwrap_or(true) {
+        return Err("fs_write_bytes only writes into .guimux-pastes".into());
+    }
+    let name = p.file_name().and_then(|s| s.to_str()).ok_or("invalid file name")?;
+    if !valid_paste_name(name) {
+        return Err("invalid paste file name".into());
+    }
+    let bytes = base64_decode(&base64)?;
+    if bytes.len() > MAX_PASTE_BYTES {
+        return Err("pasted image too large (> 10MB)".into());
+    }
+    // Our own managed drop dir: create it, unlike fs_write's no-mkdir rule.
+    let parent = p.parent().ok_or("invalid path")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    // Suffix on clash instead of truncating another paste.
+    let mut target = p.clone();
+    for i in 1..100 {
+        if !target.exists() {
+            break;
+        }
+        let stem = name.rsplit_once('.').map(|s| s.0).unwrap_or(name);
+        let ext = name.rsplit_once('.').map(|s| s.1).unwrap_or("png");
+        target = parent.join(format!("{stem}-{i}.{ext}"));
+    }
+    if target.exists() {
+        return Err("could not pick a free paste file name".into());
+    }
+    std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepHit {
     pub path: String,
@@ -561,6 +665,45 @@ mod tests {
         assert!(hits[0].path.ends_with("a.txt"));
         assert!(grep_search(root.clone(), "   ".into(), None, None).is_err());
         assert!(grep_search(root, "HELLO".into(), Some(true), None).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn base64_decode_vectors() {
+        assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode("aGk=").unwrap(), b"hi");
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert!(base64_decode("!!!").is_err());
+        assert!(base64_decode("abc").is_err());
+    }
+
+    #[test]
+    fn paste_names_narrow() {
+        assert!(valid_paste_name("paste-m3x-abc123.png"));
+        assert!(valid_paste_name("paste-1.JPG"));
+        assert!(!valid_paste_name("paste-x.txt"));
+        assert!(!valid_paste_name("evil.png"));
+        assert!(!valid_paste_name("paste-.png"));
+        assert!(!valid_paste_name("paste-a/b.png"));
+    }
+
+    #[test]
+    fn paste_bytes_roundtrip_and_guards() {
+        let dir = std::env::temp_dir().join(format!("guimux-paste-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let drop = dir.join(".guimux-pastes");
+        // 1x1 png body, arbitrary bytes: the command is encoding-agnostic.
+        let target = drop.join("paste-t1-abc.png");
+        let saved = fs_write_bytes(target.to_string_lossy().to_string(), "aGVsbG8=".into()).unwrap();
+        assert_eq!(std::fs::read(&saved).unwrap(), b"hello");
+        // Clash suffixes instead of truncating.
+        let saved2 = fs_write_bytes(target.to_string_lossy().to_string(), "aGk=".into()).unwrap();
+        assert_ne!(saved, saved2);
+        assert_eq!(std::fs::read(&saved2).unwrap(), b"hi");
+        // Outside the drop dir, and bad names, are refused.
+        assert!(fs_write_bytes(dir.join("x.png").to_string_lossy().to_string(), "aGk=".into()).is_err());
+        assert!(fs_write_bytes(drop.join("evil.txt").to_string_lossy().to_string(), "aGk=".into()).is_err());
+        assert!(fs_write_bytes(target.to_string_lossy().to_string(), "!!!".into()).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 }
