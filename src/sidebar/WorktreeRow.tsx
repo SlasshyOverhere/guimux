@@ -1,6 +1,6 @@
 import type { KeyboardEvent, MouseEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
-import type { FileStatus, Worktree } from "../types";
+import type { AheadBehind, FileStatus, Worktree } from "../types";
 
 // One row shape for every worktree in the panel: selected rail, branch line,
 // status cluster, and a hover actions button. A context menu alone leaves the
@@ -32,7 +32,8 @@ interface Props {
   /** Porcelain entries, or null when status has not been read yet. Omitted
    *  entirely for rows that never show a cluster (sleeping, discovered). */
   status?: FileStatus[] | null;
-  pinned?: boolean;
+  /** Ahead/behind vs upstream (or main). Null = not read yet; hidden then. */
+  aheadBehind?: AheadBehind | null;
   /** Sleeping rows read quieter without leaving the list. */
   dim?: boolean;
   /** Discovered previews show the branch only: the group header has the dir. */
@@ -45,13 +46,22 @@ export function WorktreeRow({
   onMenu,
   selected = false,
   status,
-  pinned = false,
+  aheadBehind,
   dim = false,
   compact = false,
 }: Props) {
-  const plainRow = wt.id.startsWith("plain:");
   const known = status !== undefined && status !== null;
   const dirty = status?.length ?? 0;
+  const abAhead = aheadBehind?.ahead ?? 0;
+  const abBehind = aheadBehind?.behind ?? 0;
+  const showAb = aheadBehind != null && (abAhead > 0 || abBehind > 0);
+
+  // Status dot color: green for clean, amber for dirty, grey for unknown
+  const statusColor = !known
+    ? "var(--gm-ink-faint)"
+    : dirty > 0
+      ? "var(--gm-amber)"
+      : "var(--gm-green)";
 
   return (
     <div
@@ -59,7 +69,7 @@ export function WorktreeRow({
       tabIndex={0}
       aria-pressed={selected}
       data-selected={selected}
-      className={`gm-row gm-rail group/row cursor-pointer px-2.5 py-1.5 ${dim ? "opacity-60 hover:opacity-100" : ""}`}
+      className={`gm-row gm-wt-row group/row cursor-pointer px-3 py-2 ${dim ? "opacity-60 hover:opacity-100" : ""}`}
       onClick={onOpen}
       onKeyDown={rowKey(onOpen)}
       onContextMenu={(e) => {
@@ -69,38 +79,38 @@ export function WorktreeRow({
       }}
       title={`${wt.branch}\n${wt.path}\nRight-click, or use the row button, for actions.`}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2">
+        {/* Status dot */}
         <span
-          className={`min-w-0 flex-1 truncate text-[13px] ${
-            selected ? "font-semibold text-ink-100" : "font-medium text-ink-200"
+          className="h-2 w-2 flex-none rounded-full"
+          style={{ backgroundColor: statusColor }}
+          title={!known ? "Status not read yet" : dirty > 0 ? `${dirty} changed ${dirty === 1 ? "file" : "files"}` : "Clean"}
+        />
+        <span
+          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
+            selected ? "text-ink-100" : "text-ink-200"
           }`}
         >
           {wt.branch}
-          {!plainRow && wt.is_main && <span className="font-normal text-ink-500"> · main</span>}
-          {pinned && <span className="font-normal text-ink-500"> · pinned</span>}
         </span>
-        {status !== undefined && (
-          <span className="flex-none text-[11px]">
-            {!known ? (
-              <span className="gm-meta tnum" title="Status not read yet">
-                …
-              </span>
-            ) : dirty > 0 ? (
-              <span className="tnum font-semibold" style={{ color: "var(--gm-amber)" }}>
-                {dirty}
-              </span>
-            ) : (
-              <span className="gm-meta tnum">clean</span>
-            )}
+        {dirty > 0 && (
+          <span className="tnum flex-none text-[11px] font-medium" style={{ color: "var(--gm-amber)" }}>
+            {dirty}
+          </span>
+        )}
+        {showAb && (
+          <span
+            className="tnum flex-none text-[11px] text-ink-500"
+            title={abBehind > 0 ? `${abAhead} ahead, ${abBehind} behind` : `${abAhead} ahead`}
+          >
+            {abAhead > 0 ? `↑${abAhead}` : ""}{abAhead > 0 && abBehind > 0 ? " " : ""}{abBehind > 0 ? `↓${abBehind}` : ""}
           </span>
         )}
         <button
-          className="gm-icon-btn gm-icon-btn--sm -my-0.5 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+          className={`gm-icon-btn gm-icon-btn--sm -my-0.5 focus-visible:opacity-100 ${selected ? "opacity-100" : "opacity-0 group-hover/row:opacity-100"}`}
           aria-label={`Actions for ${wt.branch}`}
           aria-haspopup="menu"
           onClick={(e: MouseEvent<HTMLButtonElement>) => {
-            // The row itself is a button: without this, opening the menu also
-            // opens the worktree.
             e.stopPropagation();
             const r = e.currentTarget.getBoundingClientRect();
             onMenu({ x: r.right, y: r.bottom + 4 });
@@ -112,7 +122,7 @@ export function WorktreeRow({
         </button>
       </div>
       {!compact && (
-        <div className="gm-meta mono mt-0.5 truncate" title={slash(wt.path)}>
+        <div className="mt-1 truncate pl-4 text-[11.5px] text-ink-500" title={slash(wt.path)}>
           {shortPath(wt.path, wt.is_main)}
         </div>
       )}

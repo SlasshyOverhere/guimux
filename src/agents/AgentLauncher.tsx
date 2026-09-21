@@ -3,9 +3,10 @@ import { Plus, X } from "lucide-react";
 import { useStore } from "../store";
 import { errorDialog } from "../dialogs";
 
-// TUIs need width: past ~4 tiles panes drop below ~50 cols and agent
-// interfaces truncate. Cap per-agent and warn past 4 total (see below).
-const MAX_PER_AGENT = 4;
+// Tiles lay out at most 2 across and cap at 12 per worktree (see
+// launchAgents), so width never collapses: allow up to 6 per agent here to
+// match the per-item clamp downstream.
+const MAX_PER_AGENT = 6;
 
 function Stepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
   const btn =
@@ -275,7 +276,7 @@ export function AgentLauncher() {
           style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
         >
           <span className="gm-meta pr-2 text-[11px]">
-            4+ tiles get cramped. Prefer up to 4 per launch.
+            Up to 6 per agent, 12 tiles per worktree.
           </span>
           <span className="flex shrink-0 items-center gap-2">
           <button

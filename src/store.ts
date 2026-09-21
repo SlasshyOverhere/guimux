@@ -30,6 +30,42 @@ export type PaneNode = Pane | Split;
 let counter = 0;
 export const nextId = () => `n${++counter}-${Date.now().toString(36)}`;
 
+// Restored pane ids embed the old counter (`n12-…`): resume past the max so
+// fresh splits never collide with a persisted tree.
+function syncIdCounter(layouts: Record<string, PaneNode>, extraId: string | null = null) {
+  const scan = (node: PaneNode) => {
+    const m = /^n(\d+)-/.exec(node.id);
+    if (m) counter = Math.max(counter, parseInt(m[1], 10));
+    if (node.kind === "split") {
+      const sm = /^n(\d+)-/.exec(node.id);
+      if (sm) counter = Math.max(counter, parseInt(sm[1], 10));
+      scan(node.first);
+      scan(node.second);
+    }
+  };
+  for (const node of Object.values(layouts)) scan(node);
+  if (extraId) {
+    const m = /^n(\d+)-/.exec(extraId);
+    if (m) counter = Math.max(counter, parseInt(m[1], 10));
+  }
+}
+
+// Defense in depth: persisted trees are sanitized on save, but strip live
+// session state again so a hand-edited guimux.json can never resurrect a
+// dead pty id or re-fire a queued agent command.
+function cleanRestoredNode(node: PaneNode): PaneNode {
+  if (node.kind === "pane") {
+    return { kind: "pane", id: node.id, ptyId: null, cwd: node.cwd ?? null, initCmd: null };
+  }
+  return {
+    ...node,
+    direction: node.direction === "v" ? "v" : "h",
+    ratio: Math.min(0.9, Math.max(0.1, node.ratio)),
+    first: cleanRestoredNode(node.first),
+    second: cleanRestoredNode(node.second),
+  };
+}
+
 // Path prefix must land on a separator: "C:/proj" also prefixes "C:/proj-old",
 // which seeded another project's worktree and spawned a shell in it.
 function underRoot(root: string | null, path: string): boolean {
@@ -179,6 +215,7 @@ interface AppState {
   // editor
   editorOpen: boolean;
   editorPath: string | null;
+  editorTabs: string[];
   diffMode: boolean;
 
   // palette
@@ -189,7 +226,7 @@ interface AppState {
   settingsOpen: boolean;
 
   // actions
-  hydrate: (projects: Project[], activeProjectId: string | null, seed?: { worktrees: Worktree[]; activeWorktreeId: string | null; worktreesByProject?: Record<string, Worktree[]> }) => void;
+  hydrate: (projects: Project[], activeProjectId: string | null, seed?: { worktrees: Worktree[]; activeWorktreeId: string | null; worktreesByProject?: Record<string, Worktree[]>; layouts?: Record<string, PaneNode>; activePaneId?: string | null }) => void;
   addProject: (p: Project) => void;
   updateProject: (id: string, patch: Partial<Project>) => void;
   removeProject: (id: string) => void;
@@ -217,7 +254,8 @@ interface AppState {
   toggleLeft: () => void;
   toggleRight: () => void;
   openEditor: (path: string | null, diff?: boolean) => void;
-  closeEditor: () => void;
+  closeEditor: (path?: string | null) => void;
+  setEditorTabs: (tabs: string[]) => void;
   setPaletteOpen: (open: boolean) => void;
   setSettings: (patch: Partial<Settings>) => void;
   hydrateSettings: (s: Settings) => void;
@@ -248,6 +286,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   editorOpen: false,
   editorPath: null,
+  editorTabs: [],
   diffMode: false,
 
   paletteOpen: false,
@@ -274,7 +313,23 @@ export const useStore = create<AppState>((set, get) => ({
     const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
       ? seed.activeWorktreeId
       : (seedWts.find((w) => w.is_main) ?? seedWts[0])?.id ?? null;
-    const seedLayout = seedActive ? { kind: "pane", id: nextId(), ptyId: null } as PaneNode : null;
+    // Restored splits: fresh shells mount into the old tree shape, keeping
+    // each pane's last-known cwd. Falls back to a single pane per worktree.
+    const restored: Record<string, PaneNode> = {};
+    if (seed?.layouts) {
+      for (const [wid, node] of Object.entries(seed.layouts)) {
+        if (!node || typeof node !== "object") continue;
+        try {
+          restored[wid] = cleanRestoredNode(node as PaneNode);
+        } catch {
+          /* drop malformed tree */
+        }
+      }
+      syncIdCounter(restored, seed?.activePaneId ?? null);
+    }
+    const seedLayout = seedActive
+      ? (restored[seedActive] ?? ({ kind: "pane", id: nextId(), ptyId: null } as PaneNode))
+      : null;
     // Per-project seeds so the sidebar lists every project at boot, not just
     // the active one. Each list is filtered to its own project root.
     const seedCache: Record<string, Worktree[]> = {};
@@ -288,6 +343,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
     if (active && seedWts.length > 0) seedCache[active] = seedWts;
+    const mergedLayouts = { ...restored };
+    if (seedActive && seedLayout) mergedLayouts[seedActive] = seedLayout;
+    const seedPanes = seedLayout ? collectPanes(seedLayout) : [];
+    const seedActivePane =
+      seed?.activePaneId && seedPanes.includes(seed.activePaneId) ? seed.activePaneId : (seedPanes[0] ?? null);
     set((s) => ({
       projects,
       activeProjectId: active,
@@ -298,8 +358,8 @@ export const useStore = create<AppState>((set, get) => ({
       worktreesByProject: seedCache,
       activeWorktreeId: seedActive,
       layout: seedLayout,
-      layouts: seedActive && seedLayout ? { ...s.layouts, [seedActive]: seedLayout } : s.layouts,
-      activePaneId: seedLayout && seedLayout.kind === "pane" ? seedLayout.id : null,
+      layouts: seedActive && seedLayout ? { ...s.layouts, ...mergedLayouts } : { ...s.layouts, ...restored },
+      activePaneId: seedActivePane,
       maximizedPaneId: null,
     }));
   },
@@ -523,12 +583,11 @@ export const useStore = create<AppState>((set, get) => ({
         ? { maximizedPaneId: null }
         : { maximizedPaneId: paneId, activePaneId: paneId },
     ),
-  // Fan-out APPENDS to the existing layout: wipe-and-retile orphaned the
-  // current session (the old PTY kept running with no pane attached).
-  // Total tiles capped at 12: past that every pane drops below usable TUI
-  // width. The append direction alternates with the current root so repeated
-  // launches halve height and width in turn instead of squeezing width to a
-  // sliver every time (TUIs tolerate short height, not narrow width).
+  // Fan-out keeps every pane object (dropping them orphaned the running PTY)
+  // and retiles the whole set into one equal grid, so launching 4 always
+  // makes 4 equal panes. Total tiles capped at 12: past that every pane
+  // drops below usable TUI width. At most 2 across: TUIs wrap at ~80 cols
+  // and truncate below ~50, so width is sacred and height is spent instead.
   launchAgents: (items) => {
     const { activeWorktreeId, layouts, layout } = get();
     if (!activeWorktreeId) return;
@@ -583,8 +642,8 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
-    const fresh = tileAgents(panes);
     if (!patched) {
+      const fresh = tileAgents(panes);
       set({
         layout: fresh,
         layouts: { ...layouts, [activeWorktreeId]: fresh },
@@ -593,15 +652,10 @@ export const useStore = create<AppState>((set, get) => ({
       });
       return;
     }
-    const live = collectPaneObjs(patched);
-    const node: PaneNode = {
-      kind: "split",
-      id: nextId(),
-      direction: patched.kind === "split" && patched.direction === "h" ? "v" : "h",
-      ratio: Math.max(0.2, Math.min(0.8, live.length / (live.length + panes.length))),
-      first: tileGrid(live),
-      second: fresh,
-    };
+    // Retile everything into one equal grid. Appending the fresh tiles beside
+    // the old tree left lopsided ratios (a reused pane kept 1/4 width while
+    // three fresh shared 3/4), so launching 4 never made 4 equal panes.
+    const node = tileAgents([...collectPaneObjs(patched), ...panes]);
     set({
       layout: node,
       layouts: { ...layouts, [activeWorktreeId]: node },
@@ -693,8 +747,33 @@ export const useStore = create<AppState>((set, get) => ({
       };
     }),
   openEditor: (path, diff = false) =>
-    set({ editorOpen: true, editorPath: path, diffMode: diff }),
-  closeEditor: () => set({ editorOpen: false, editorPath: null }),
+    set((s) => ({
+      editorOpen: true,
+      editorPath: path,
+      editorTabs: path ? [...s.editorTabs.filter((t) => t !== path), path].slice(-10) : s.editorTabs,
+      diffMode: diff,
+    })),
+  // No arg closes the active tab; a path closes that tab, activating the
+  // most recent survivor. Last tab out closes the editor.
+  closeEditor: (path) =>
+    set((s) => {
+      const target = path === undefined ? s.editorPath : path;
+      if (target == null) return { editorOpen: false, editorPath: null, editorTabs: [] };
+      const tabs = s.editorTabs.filter((t) => t !== target);
+      if (tabs.length === 0) return { editorOpen: false, editorPath: null, editorTabs: tabs };
+      const active = target === s.editorPath ? tabs[tabs.length - 1] : (s.editorPath ?? tabs[tabs.length - 1]);
+      return {
+        editorPath: tabs.includes(active) ? active : tabs[tabs.length - 1],
+        editorTabs: tabs,
+      };
+    }),
+  setEditorTabs: (tabs) =>
+    set((s) => {
+      const kept = tabs.filter((t, i) => tabs.indexOf(t) === i).slice(-10);
+      if (kept.length === 0) return { editorOpen: false, editorPath: null, editorTabs: kept };
+      const active = s.editorPath && kept.includes(s.editorPath) ? s.editorPath : kept[kept.length - 1];
+      return { editorPath: active, editorTabs: kept };
+    }),
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   hydrateSettings: (s) => set({ settings: { ...DEFAULT_SETTINGS, ...s } }),

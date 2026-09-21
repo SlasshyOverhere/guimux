@@ -7,7 +7,6 @@ import {
   FolderOpen,
   Folder,
   X,
-  Plus,
   House as HomeIcon,
   Settings as SettingsIcon,
   Bot,
@@ -28,6 +27,7 @@ import { AgentLauncher } from "./agents/AgentLauncher";
 import type { Project, Worktree } from "./types";
 
 import { detectToProject } from "./project";
+import { startOsFileDropBridge } from "./dragFile";
 import { maybeStartStress } from "./terminal/stress";
 import { maybeAutoCheck } from "./updater";
 export { detectToProject };
@@ -76,11 +76,7 @@ function barDoubleClick(e: React.MouseEvent) {
   }).catch(() => {});
 }
 
-function Topbar({ onAdd }: { onAdd: () => void }) {
-  const projects = useStore((s) => s.projects);
-  const activeProjectId = useStore((s) => s.activeProjectId);
-  const setActiveProject = useStore((s) => s.setActiveProject);
-  const removeProject = useStore((s) => s.removeProject);
+function Topbar() {
   const worktrees = useStore((s) => s.worktrees);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
@@ -89,35 +85,7 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
   const rightVisible = useStore((s) => s.rightVisible);
   const toggleLeft = useStore((s) => s.toggleLeft);
   const toggleRight = useStore((s) => s.toggleRight);
-  const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
-  const [projOpen, setProjOpen] = useState(false);
-
-  // Escape + pointer-down-outside close the project dropdown.
-  // pointerdown (not click): a real click-outside that works even when the
-  // click itself is swallowed, and it closes before the row's click fires.
-  useEffect(() => {
-    if (!projOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setProjOpen(false);
-    };
-    // mousedown (not pointerdown): synthetic PointerEvents dispatched via
-    // JS do not trigger real pointerdown listeners in this WebView, but
-    // real mousedown always fires for real clicks, so gate on that.
-    const onDown = (e: MouseEvent) => {
-      // The click-outside overlay covers the screen but lives INSIDE the
-      // menu root, so exempt it: a press on it is definitionally outside.
-      const t = e.target as HTMLElement;
-      if (t.closest("[data-menu-root]") && !t.closest("[data-outside]")) return;
-      setProjOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onDown, true);
-    };
-  }, [projOpen]);
 
   return (
     <div
@@ -150,97 +118,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       >
         {leftVisible ? <PanelLeftClose size={14} strokeWidth={2} /> : <PanelLeftOpen size={14} strokeWidth={2} />}
       </button>
-
-      {/* project picker, left */}
-      <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
-        <button
-          className="gm-icon-btn h-[30px] max-w-[220px] gap-2 px-2 text-[12.5px] font-medium text-ink-200"
-          style={{ width: "auto" }}
-          onClick={() => setProjOpen(!projOpen)}
-          title={proj?.path ?? "No project open"}
-          aria-haspopup="menu"
-          aria-expanded={projOpen}
-        >
-          {proj?.isGit ? (
-            <GitBranch size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
-          ) : (
-            <Folder size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
-          )}
-          <span className="truncate">{proj ? proj.name : "No project"}</span>
-        </button>
-        {projOpen && (
-          <>
-            <div className="fixed inset-0 z-30" data-no-drag data-outside />
-            <div
-              className="gm-menu absolute left-0 top-9 z-40 w-80"
-            >
-              <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-ink-400">
-                Projects
-              </div>
-              {projects.map((p) => (
-                <div
-                  key={p.id}
-                  role="button"
-                  tabIndex={0}
-                  data-selected={p.id === activeProjectId}
-                  className="gm-row group mx-1 flex cursor-pointer items-center gap-2.5 px-2 py-2"
-                  onClick={() => {
-                    setActiveProject(p.id);
-                    setProjOpen(false);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setActiveProject(p.id);
-                      setProjOpen(false);
-                    }
-                  }}
-                >
-                  {p.isGit ? (
-                    <GitBranch
-                      size={14}
-                      strokeWidth={2}
-                      className="shrink-0 text-ink-400"
-                    />
-                  ) : (
-                    <Folder size={14} strokeWidth={2} className="shrink-0 text-ink-400" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={`truncate text-[12.5px] ${
-                        p.id === activeProjectId ? "font-semibold text-ink-100" : "font-medium text-ink-200"
-                      }`}
-                    >
-                      {p.name}
-                    </div>
-                    <div className="truncate text-[11px] text-ink-500">{p.path}</div>
-                  </div>
-                  <button
-                    title="Remove project"
-                    className="hidden shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-clay-400 group-hover:block"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeProject(p.id);
-                    }}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
-              <button
-                className="gm-menu-item mt-1 text-[12.5px]"
-                style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
-                onClick={() => {
-                  setProjOpen(false);
-                  onAdd();
-                }}
-              >
-                <Plus size={14} strokeWidth={2} className="text-ink-400" /> Open folder or repository
-              </button>
-            </div>
-          </>
-        )}
-      </div>
 
       {/* session title: centered worktree, the document of this app */}
       {wt ? (
@@ -423,6 +300,13 @@ export default function App() {
     maybeStartStress();
   }, []);
 
+  // OS file drops arrive as Tauri drag events, never HTML5: bridge them onto
+  // the pane paste bus once for the whole window.
+  useEffect(() => {
+    const dispose = startOsFileDropBridge();
+    return dispose;
+  }, []);
+
   // Restore persisted projects once on startup, then persist on every change.
   useEffect(() => {
     let cancelled = false;
@@ -442,7 +326,7 @@ export default function App() {
         // seeded shell mounts at once; re-detect + loader correct it after.
         const seedWts = saved.worktrees ?? [];
         const seedActive = saved.activeWorktreeId ?? null;
-        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject });
+        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject, layouts: saved.layouts, activePaneId: saved.activePaneId });
         // Re-detect refreshes branch/gitRoot and drops deleted folders.
         const settled = await Promise.all(
           saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
@@ -475,10 +359,12 @@ export default function App() {
 
   const settings = useStore((s) => s.settings);
   const worktreesByProject = useStore((s) => s.worktreesByProject);
+  const layouts = useStore((s) => s.layouts);
+  const activePaneId = useStore((s) => s.activePaneId);
   useEffect(() => {
     if (!hydrated) return;
-    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings });
-  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings]);
+    savePersisted({ projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, layouts, activePaneId, settings });
+  }, [hydrated, projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, layouts, activePaneId, settings]);
 
   // App-wide zoom: CSS `zoom` on <html> scales all chrome (topbar, sidebar,
   // explorer, dialogs). Terminals refit through their ResizeObserver.
@@ -721,7 +607,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <Topbar onAdd={addFolder} />
+      <Topbar />
       {repoError && (
         <div
           className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-[11.5px]"

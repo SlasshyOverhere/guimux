@@ -1,8 +1,12 @@
 // Removing a worktree runs `git worktree remove --force` plus `branch -D`, so
 // it can discard two different kinds of work. The backend refuses and names
 // what would be lost; this turns that refusal into the facts the confirm dialog
-// needs. Anything else, such as a locked file or a stale entry, returns null
-// and must be reported as an error, never escalated into a destructive retry.
+// needs. Anything else, such as a locked file, returns null and must be
+// reported as an error, never escalated into a destructive retry.
+//
+// A stale entry (git forgot the path) is NOT a guard refusal: it carries a
+// GUIMUX_STALE_* marker with the canonical path and must go through
+// parseRemoveStale, never the force-retry below.
 //
 // Sentinels are matched on the phrase the backend appends to every guard, so a
 // reworded list of reasons still escalates correctly.
@@ -39,4 +43,23 @@ export function parseRemoveGuard(e: unknown): RemoveGuard | null {
     base,
     summary: parts.length > 0 ? `has ${parts.join(" and ")}` : "has work that would be lost",
   };
+}
+
+export interface RemoveStale {
+  kind: "inside" | "outside";
+  path: string;
+  repo: string;
+}
+
+export function parseRemoveStale(e: unknown): RemoveStale | null {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  const kind = msg.includes("GUIMUX_STALE_INSIDE")
+    ? ("inside" as const)
+    : msg.includes("GUIMUX_STALE_OUTSIDE")
+      ? ("outside" as const)
+      : null;
+  if (!kind) return null;
+  const p = /path=(\S+)/.exec(msg)?.[1] ?? "";
+  const r = /repo=(\S+)/.exec(msg)?.[1] ?? "";
+  return { kind, path: p, repo: r };
 }

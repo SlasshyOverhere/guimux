@@ -285,6 +285,78 @@ pub fn git_branches(repo_root: String) -> Result<Vec<String>, String> {
     Ok(branches)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AheadBehind {
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+fn counterpart(repo: &Path) -> Option<String> {
+    // Upstream first: the branch's own tracking ref when it has one.
+    if let Ok(out) = git(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) {
+        let u = out.trim().to_string();
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    // No upstream (typical for guimux/ branches): fall back to main/master
+    // so the badge still reads as commits unique to this worktree.
+    for cand in ["main", "master"] {
+        if git(repo, &["show-ref", "--verify", &format!("refs/heads/{cand}")]).is_ok() {
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
+#[command]
+pub fn git_ahead_behind(path: String) -> Result<AheadBehind, String> {
+    let repo = PathBuf::from(&path);
+    let Some(base) = counterpart(&repo) else {
+        return Ok(AheadBehind { ahead: 0, behind: 0 });
+    };
+    let spec = format!("HEAD...{base}");
+    match git(&repo, &["rev-list", "--left-right", "--count", &spec]) {
+        Ok(out) => {
+            let mut it = out.split_whitespace();
+            let ahead = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let behind = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            Ok(AheadBehind { ahead, behind })
+        }
+        // Empty repo (no HEAD yet): nothing to be ahead of.
+        Err(_) => Ok(AheadBehind { ahead: 0, behind: 0 }),
+    }
+}
+
+#[command]
+pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Result<String, String> {
+    let repo = PathBuf::from(&path);
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err("commit message is empty".into());
+    }
+    if msg.contains('\0') {
+        return Err("invalid commit message".into());
+    }
+    let msg: String = msg.chars().take(2000).collect();
+    if stage_all.unwrap_or(false) {
+        git(&repo, &["add", "-A"])?;
+    }
+    git(&repo, &["commit", "-m", &msg])
+}
+
+#[command]
+pub fn git_push(path: String) -> Result<String, String> {
+    let repo = PathBuf::from(&path);
+    git(&repo, &["push"])
+}
+
+#[command]
+pub fn git_fetch(path: String) -> Result<String, String> {
+    let repo = PathBuf::from(&path);
+    git(&repo, &["fetch", "--prune"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +387,32 @@ mod tests {
         let diff = git_diff(dir.to_string_lossy().to_string(), None).unwrap();
         assert!(diff.contains("-hello"));
         assert!(diff.contains("+changed"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_and_ahead_behind() {
+        let dir = std::env::temp_dir().join(format!("guimux-git-wr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&dir).output().unwrap();
+        }
+        let root = dir.to_string_lossy().to_string();
+        assert!(git_commit(root.clone(), "   ".into(), None).is_err());
+        fs::write(dir.join("a.txt"), "hello").unwrap();
+        git_commit(root.clone(), "init".into(), Some(true)).unwrap();
+        let ab = git_ahead_behind(root.clone()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 0));
+        Command::new("git").args(["checkout", "-b", "feature"]).current_dir(&dir).output().unwrap();
+        fs::write(dir.join("b.txt"), "work").unwrap();
+        git_commit(root.clone(), "wt change".into(), Some(true)).unwrap();
+        let ab = git_ahead_behind(root.clone()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (1, 0));
         let _ = fs::remove_dir_all(&dir);
     }
 }

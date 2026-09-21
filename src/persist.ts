@@ -1,5 +1,6 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import { DEFAULT_SETTINGS, type Project, type Settings, type Worktree } from "./types";
+import type { PaneNode } from "./store";
 
 export interface PersistedState {
   projects: Project[];
@@ -9,6 +10,10 @@ export interface PersistedState {
   worktrees?: Worktree[];
   activeWorktreeId?: string | null;
   worktreesByProject?: Record<string, Worktree[]>;
+  // Split trees per worktree id. Runtime fields are stripped on save
+  // (ptyId -> null, dirty/initCmd dropped); cwd is kept for split inherit.
+  layouts?: Record<string, PaneNode>;
+  activePaneId?: string | null;
   settings?: Settings;
 }
 
@@ -81,6 +86,53 @@ function sanitizeWorktrees(wts: unknown): Worktree[] | undefined {
   return clean.length > 0 ? clean.slice(0, 50) : undefined;
 }
 
+// Persisted layouts must be small static trees: strip runtime session state
+// so a restart spawns fresh shells instead of attaching to dead pty ids or
+// re-firing a queued agent command.
+function sanitizeLayoutNode(node: unknown, depth = 0, seen = { n: 0 }): PaneNode | null {
+  if (!node || typeof node !== "object" || depth > 10 || seen.n > 24) return null;
+  const v = node as Record<string, unknown>;
+  if (v.kind === "pane") {
+    if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;
+    seen.n += 1;
+    const cwd = typeof v.cwd === "string" && v.cwd.length > 0 && v.cwd.length <= 500 ? v.cwd : null;
+    return { kind: "pane", id: v.id, ptyId: null, cwd, initCmd: null };
+  }
+  if (v.kind === "split") {
+    if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;
+    const direction = v.direction === "v" ? "v" : "h";
+    const ratio =
+      typeof v.ratio === "number" && Number.isFinite(v.ratio)
+        ? Math.min(0.9, Math.max(0.1, v.ratio))
+        : 0.5;
+    const first = sanitizeLayoutNode(v.first, depth + 1, seen);
+    const second = sanitizeLayoutNode(v.second, depth + 1, seen);
+    if (!first || !second) return null;
+    return { kind: "split", id: v.id, direction, ratio, first, second };
+  }
+  return null;
+}
+
+function collectLayoutPaneIds(node: PaneNode, out: Set<string>) {
+  if (node.kind === "pane") out.add(node.id);
+  else {
+    collectLayoutPaneIds(node.first, out);
+    collectLayoutPaneIds(node.second, out);
+  }
+}
+
+function sanitizeLayouts(input: unknown): Record<string, PaneNode> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const out: Record<string, PaneNode> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (Object.keys(out).length >= 50) break;
+    if (!key || key.length > 500) continue;
+    const clean = sanitizeLayoutNode(value);
+    if (clean) out[key] = clean;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function sanitize(s: PersistedState | null | undefined): PersistedState | null {
   if (!s || !Array.isArray(s.projects)) return null;
   const projects = s.projects.filter(
@@ -103,7 +155,14 @@ function sanitize(s: PersistedState | null | undefined): PersistedState | null {
     }
     if (Object.keys(worktreesByProject).length === 0) worktreesByProject = undefined;
   }
-  return { projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, settings: cleanSettings(s.settings) };
+  const layouts = sanitizeLayouts(s.layouts);
+  let activePaneId: string | null | undefined;
+  if (typeof s.activePaneId === "string" && s.activePaneId && layouts) {
+    const live = new Set<string>();
+    for (const node of Object.values(layouts)) collectLayoutPaneIds(node, live);
+    if (live.has(s.activePaneId)) activePaneId = s.activePaneId;
+  }
+  return { projects, activeProjectId, worktrees, activeWorktreeId, worktreesByProject, layouts, activePaneId, settings: cleanSettings(s.settings) };
 }
 
 export async function loadPersisted(): Promise<PersistedState | null> {

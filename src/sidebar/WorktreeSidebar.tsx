@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, MoreHorizontal, Search, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { ChevronRight, MoreHorizontal, Search, X, Bell, Settings, FolderPlus, Plus } from "lucide-react";
 // Ledger sidebar: typographic rows with no status dots. Status reads as a word,
 // such as "3" or "clean". Actions sit behind the row's own menu button and the
 // right-click menu. Rows come from WorktreeRow, so the active project, other
@@ -8,23 +9,23 @@ import { ChevronRight, MoreHorizontal, Search, X } from "lucide-react";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { createSingleFlight } from "../singleFlight";
-import { PREF, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
+import { PREF, boolFlagMap, flagMap, numIn, readPref, stringArrayMap, writePref } from "../uiPrefs";
 import { DiscoveredBlock } from "./DiscoveredBlock";
 import { CreateWorktreeForm } from "./CreateWorktreeForm";
 import { RowMenu, type MenuItem } from "./RowMenu";
 import { WorktreeRow } from "./WorktreeRow";
-import { parseRemoveGuard } from "./removeGuard";
+import { parseRemoveGuard, parseRemoveStale } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { confirmDialog, errorDialog } from "../dialogs";
-import type { Project, Worktree } from "../types";
+import type { AheadBehind, Project, Worktree } from "../types";
 
 // One listing at a time: two in-flight `worktree_list` calls race to write the
 // same store slice, and the loser is whichever finished last.
 const listGuard = createSingleFlight();
 
 // Menu boxes, sized to their item count, used to keep them inside the viewport.
-const ROW_MENU_SIZE = { w: 192, h: 214 };
+const ROW_MENU_SIZE = { w: 192, h: 278 };
 const PROJECT_MENU_SIZE = { w: 216, h: 126 };
 
 // One popover serves both menus: a worktree row's actions, and a project's.
@@ -45,7 +46,6 @@ export function WorktreeSidebar() {
   const setActiveWorktree = useStore((s) => s.setActiveWorktree);
   const openProjectWorktree = useStore((s) => s.openProjectWorktree);
   const setWorktrees = useStore((s) => s.setWorktrees);
-  const updateProject = useStore((s) => s.updateProject);
   const openEditor = useStore((s) => s.openEditor);
 
   // Unvisited projects have no cached list yet, so fill them in once per repo
@@ -87,23 +87,23 @@ export function WorktreeSidebar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.length, cacheKeys]);
 
-  const [creating, setCreating] = useState(false);
+  const [creatingPid, setCreatingPid] = useState<string | null>(null);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
-  // Other projects start collapsed: one line each until opened. Active project
-  // is always expanded. Persisted so the list stays calm.
-  const [projOpen, setProjOpen] = useState<Record<string, true>>(() =>
-    readPref<Record<string, true>>(PREF.expandedProjects, {}, flagMap),
+  // Projects default open/closed based on active state. Persisted so the list
+  // stays calm. Active project defaults open; others default collapsed.
+  const [projOpen, setProjOpen] = useState<Record<string, boolean>>(() =>
+    readPref<Record<string, boolean>>(PREF.expandedProjects, {}, boolFlagMap),
   );
   const toggleProjOpen = (pid: string) => {
     setProjOpen((c) => {
       const next = { ...c };
-      if (next[pid]) delete next[pid];
-      else next[pid] = true as const;
+      const wasOpen = pid === activeProjectId ? next[pid] !== false : !!next[pid];
+      next[pid] = !wasOpen;
       writePref(PREF.expandedProjects, next);
       return next;
     });
@@ -165,10 +165,86 @@ export function WorktreeSidebar() {
 
   const proj: Project | null = projects.find((p) => p.id === activeProjectId) ?? null;
   const isGit = proj?.isGit ?? false;
-  const isPlain = proj ? !proj.isGit : false;
   // Must run before any conditional return and after isGit exists: `empty` is
   // not `clean`, so the panel needs to know whether status has landed.
   const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
+
+  // Ahead/behind vs upstream (or main): read once per repo, not on the 8s
+  // status tick — it only moves on commit/push/fetch/merge. Unknown rows
+  // stay badge-less rather than claiming 0.
+  const [aheadBehind, setAheadBehind] = useState<Record<string, AheadBehind>>({});
+  const [gitBusy, setGitBusy] = useState<string | null>(null);
+  const [commitMsg, setCommitMsg] = useState("");
+  const refreshAheadBehind = async () => {
+    const st = useStore.getState();
+    const rows = st.worktrees.filter((wt) => !wt.id.startsWith("plain:"));
+    if (rows.length === 0) return;
+    const next: Record<string, AheadBehind> = {};
+    for (const [i, wt] of rows.entries()) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 100));
+      try {
+        next[wt.id] = await invoke<AheadBehind>("git_ahead_behind", { path: wt.path });
+      } catch {
+        /* unreadable row: leave it badge-less */
+      }
+    }
+    setAheadBehind((prev) => ({ ...prev, ...next }));
+  };
+
+  useEffect(() => {
+    setAheadBehind({});
+    if (!repoRoot || !isGit) return;
+    let cancelled = false;
+    // Status owns the startup window; ahead/behind catches up after.
+    const t = setTimeout(() => {
+      if (!cancelled && !document.hidden) void refreshAheadBehind();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot, isGit]);
+
+  const pushPath = async (path: string) => {
+    setGitBusy(`push:${path}`);
+    try {
+      await invoke("git_push", { path });
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`push failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
+
+  const fetchPath = async (path: string) => {
+    setGitBusy(`fetch:${path}`);
+    try {
+      await invoke("git_fetch", { path });
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`fetch failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
+
+  const commitActive = async () => {
+    const wt = useStore.getState().worktrees.find((w) => w.id === useStore.getState().activeWorktreeId);
+    const msg = commitMsg.trim();
+    if (!wt || !msg) return;
+    setGitBusy(`commit:${wt.id}`);
+    try {
+      await invoke("git_commit", { path: wt.path, message: msg, stageAll: true });
+      setCommitMsg("");
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`commit failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
 
   // `immediate` skips the deferral below, because an explicit user action such
   // as create or remove is not racing App's loader and should not wait 1.5s to
@@ -241,48 +317,51 @@ export function WorktreeSidebar() {
     }
   };
 
-  const openCreate = async () => {
-    setCreating(true);
-    if (!repoRoot) return;
+  const openCreate = async (pid: string) => {
+    setCreatingPid(pid);
+    const root = rootOf(pid);
+    if (!root) {
+      setBranches([]);
+      return;
+    }
     try {
-      const list: string[] = await invoke("git_branches", { repoRoot });
+      const list: string[] = await invoke("git_branches", { repoRoot: root });
       setBranches(list);
     } catch {
       setBranches([]);
     }
   };
 
-  const create = async (values: { name: string; base: string }) => {
-    if (!repoRoot || !isGit) return;
-    setCreating(false);
+  const create = async (pid: string, values: { name: string; base: string }) => {
+    const st0 = useStore.getState();
+    const p = st0.projects.find((x) => x.id === pid);
+    const root = p && p.isGit ? (p.gitRoot ?? p.path) : null;
+    if (!root) return;
+    setCreatingPid(null);
     // Optimistic progress row: the form closes at once and creation runs
     // underneath while the user keeps working.
     setPending(values.name || "worktree");
     try {
       const created: Worktree = await invoke("worktree_create", {
-        repoRoot,
+        repoRoot: root,
         name: values.name || null,
         base: values.base || null,
       });
-      // Mount the new shell at once; the re-list below reconciles in background.
-      setWorktrees([...useStore.getState().worktrees, created]);
-      setActiveWorktree(created.id);
-      await refreshList(true);
+      const st = useStore.getState();
+      if (pid === st.activeProjectId) {
+        // Mount the new shell at once; the re-list below reconciles in background.
+        setWorktrees([...st.worktrees, created]);
+        setActiveWorktree(created.id);
+        await refreshList(true);
+      } else {
+        st.setProjectWorktrees(pid, [...(st.worktreesByProject[pid] ?? []), created]);
+        st.openProjectWorktree(pid, created.id);
+        await refreshProjectList(pid, root);
+      }
     } catch (e) {
       void errorDialog(`worktree create failed: ${e}`);
     } finally {
       setPending(null);
-    }
-  };
-
-  const initGit = async () => {
-    if (!proj || isGit) return;
-    try {
-      await invoke("git_init", { path: proj.path, branch: "main" });
-      const re = await detectToProject(proj.path);
-      updateProject(proj.id, { isGit: true, gitRoot: re.gitRoot, branch: re.branch });
-    } catch (e) {
-      void errorDialog(`git init failed: ${e}`);
     }
   };
 
@@ -293,6 +372,28 @@ export function WorktreeSidebar() {
       return;
     const root = pid ? rootOf(pid) : repoRoot;
     if (!root) return;
+    // Pre-flight: the row may be stale (moved folder, deleted
+    // `.git/worktrees` metadata, external remove without refresh). Re-list
+    // and abort with a notice instead of deleting the wrong thing.
+    try {
+      const fresh: Worktree[] = await invoke("worktree_list", { repoRoot: root });
+      if (fresh.length > 0 && !fresh.some((w) => w.id === wt.id)) {
+        if (pid && pid !== useStore.getState().activeProjectId) {
+          await refreshProjectList(pid, root);
+        } else {
+          await refreshList(true);
+        }
+        void errorDialog(`Worktree is gone, list refreshed.\nPath: ${wt.path}`);
+        return;
+      }
+    } catch {
+      /* list failed: fall through to remove, backend reports the truth */
+    }
+    const dropShells = () => {
+      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pty }).catch(() => {});
+      }
+    };
     const runRemove = async (force: boolean) => {
       await invoke("worktree_remove", {
         repoRoot: root,
@@ -301,18 +402,67 @@ export function WorktreeSidebar() {
         force,
       });
       // Orphaned shells no longer die on unmount, so reap them explicitly.
-      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
-        invoke("pty_kill", { id: pty }).catch(() => {});
-      }
+      dropShells();
       if (pid && pid !== useStore.getState().activeProjectId) {
         await refreshProjectList(pid, root);
       } else {
         await refreshList(true);
       }
     };
+    // Stale entry (git forgot the path): show the full path + repo, copy the
+    // path, offer reveal + prune. plugin-dialog has no 4-button row, so this
+    // is sequential confirms after the detail message — never a dead-end.
+    const handleStale = async (kind: "inside" | "outside", canonPath: string, repo: string) => {
+      const path = canonPath || wt.path;
+      const detail =
+        kind === "inside"
+          ? `Worktree is not registered with git.\nPath: ${path}\nRepo: ${repo || root}\nFolder is inside the managed dir and can be deleted safely.`
+          : `Worktree is not registered with git.\nPath: ${path}\nRepo: ${repo || root}\nOutside the managed dir, so it will not be deleted. Run \`git worktree prune\` to drop the stale entry or \`git worktree repair\` to re-register it.`;
+      void errorDialog(detail);
+      try {
+        await navigator.clipboard.writeText(path);
+      } catch {
+        /* clipboard unavailable */
+      }
+      if (await confirmDialog(`Reveal folder in explorer?\n${path}`)) {
+        try {
+          await invoke("fs_reveal", { path });
+        } catch (e) {
+          void errorDialog(`reveal failed: ${e}`);
+        }
+      }
+      if (kind === "inside") {
+        if (await confirmDialog(`Delete folder and prune now?\n${path}`)) {
+          try {
+            await runRemove(true);
+          } catch (e2) {
+            void errorDialog(`remove failed: ${e2}`);
+          }
+        }
+      } else {
+        if (await confirmDialog(`Prune stale entry now? Runs \`git worktree prune\` in ${repo || root}.`)) {
+          try {
+            await invoke("worktree_prune", { repoRoot: root });
+            dropShells();
+            if (pid && pid !== useStore.getState().activeProjectId) {
+              await refreshProjectList(pid, root);
+            } else {
+              await refreshList(true);
+            }
+          } catch (e2) {
+            void errorDialog(`prune failed: ${e2}`);
+          }
+        }
+      }
+    };
     try {
       await runRemove(false);
     } catch (e) {
+      const stale = parseRemoveStale(e);
+      if (stale) {
+        await handleStale(stale.kind, stale.path, stale.repo);
+        return;
+      }
       // The backend refuses to discard real work and names what is at stake:
       // uncommitted changes, unmerged commits, or both. Anything else is an
       // ordinary failure, not a reason to retry with force.
@@ -326,8 +476,32 @@ export function WorktreeSidebar() {
       try {
         await runRemove(true);
       } catch (e2) {
+        const stale2 = parseRemoveStale(e2);
+        if (stale2) {
+          await handleStale(stale2.kind, stale2.path, stale2.repo);
+          return;
+        }
         void errorDialog(`remove failed: ${e2}`);
       }
+    }
+  };
+
+  const pruneDiscovered = async (wt: Worktree, pid?: string) => {
+    const root = pid ? rootOf(pid) : repoRoot;
+    if (!root) return;
+    if (!(await confirmDialog(`Prune stale entry for "${wt.branch}"? Runs \`git worktree prune\`.`))) return;
+    try {
+      await invoke("worktree_prune", { repoRoot: root });
+      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pty }).catch(() => {});
+      }
+      if (pid && pid !== useStore.getState().activeProjectId) {
+        await refreshProjectList(pid, root);
+      } else {
+        await refreshList(true);
+      }
+    } catch (e) {
+      void errorDialog(`prune failed: ${e}`);
     }
   };
 
@@ -341,6 +515,7 @@ export function WorktreeSidebar() {
       } else {
         await refreshList(true);
       }
+      await refreshAheadBehind();
     } catch (e) {
       void errorDialog(`merge failed: ${e}`);
     }
@@ -355,6 +530,7 @@ export function WorktreeSidebar() {
       } else {
         await refreshList(true);
       }
+      await refreshAheadBehind();
     } catch (e) {
       void errorDialog(`abort failed: ${e}`);
     }
@@ -365,6 +541,18 @@ export function WorktreeSidebar() {
       await navigator.clipboard.writeText(path);
     } catch {
       /* clipboard unavailable: no-op */
+    }
+  };
+
+  const openProject = async () => {
+    try {
+      const raw = await open({ directory: true, multiple: false });
+      if (!raw) return;
+      const path = Array.isArray(raw) ? raw[0] : raw;
+      const p = await detectToProject(path);
+      useStore.getState().addProject(p);
+    } catch {
+      /* dialog cancelled or failed */
     }
   };
 
@@ -453,10 +641,11 @@ export function WorktreeSidebar() {
   const activePid = activeProjectId ?? "";
   const shownLive = visibleRows(live, activePid);
   const shownSettled = visibleRows(settled, activePid);
-  // Every other project, below the active one: project name, then its cached
-  // worktrees. Plain folders have no worktrees, so they show one shell row.
-  const otherProjects = projects.filter((p) => p.id !== activeProjectId);
-  const otherRows = (p: Project) => {
+  // All projects in their natural order. The active one is expanded in place;
+  // clicking a worktree in another project expands it here, not at the top.
+  const allProjects = projects;
+  const projRows = (p: Project) => {
+    if (p.id === activeProjectId) return shownLive;
     if (!p.isGit)
       return [{ id: `plain:${p.id}`, path: p.path, branch: p.name, is_main: true } as Worktree];
     return worktreesByProject[p.id] ?? [];
@@ -475,11 +664,24 @@ export function WorktreeSidebar() {
       { label: pinned[wt.id] ? "Unpin" : "Pin to top", onSelect: () => togglePin(wt.id) },
       { label: "Copy path", onSelect: () => void copyPath(wt.path) },
     ];
+    if (!wt.id.startsWith("plain:")) {
+      items.push(
+        { label: "Push", onSelect: () => void pushPath(wt.path) },
+        { label: "Fetch", onSelect: () => void fetchPath(wt.path) },
+      );
+    }
     if (!wt.is_main && !wt.id.startsWith("plain:")) {
+      // Discovered rows outside our managed dir cannot be safely deleted, so
+      // offer prune instead of remove until repair succeeds.
+      const outsideManaged =
+        !wt.branch.startsWith("guimux/") &&
+        !wt.path.toLowerCase().includes(".guimux/worktrees");
       items.push(
         { label: "Merge into base", onSelect: () => void merge(wt, pid) },
         { label: "Abort merge", onSelect: () => void abortMerge(wt, pid) },
-        { label: "Remove worktree", onSelect: () => void remove(wt, pid) },
+        outsideManaged
+          ? { label: "Prune entry", onSelect: () => void pruneDiscovered(wt, pid) }
+          : { label: "Remove worktree", onSelect: () => void remove(wt, pid) },
       );
     }
     return items;
@@ -495,7 +697,7 @@ export function WorktreeSidebar() {
   const projectMenuItems = (pid: string): MenuItem[] => {
     const st = useStore.getState();
     const p = projects.find((x) => x.id === pid);
-    const rows = pid === st.activeProjectId ? gitRows : p ? otherRows(p) : [];
+    const rows = pid === st.activeProjectId ? gitRows : p ? projRows(p) : [];
     const items: MenuItem[] = [];
     if (pid !== st.activeProjectId) {
       items.push({ label: "Switch to project", onSelect: () => st.setActiveProject(pid) });
@@ -532,16 +734,36 @@ export function WorktreeSidebar() {
     </button>
   );
 
+  /** Hover-revealed new-worktree button on a git project header. */
+  const newWorktreeBtn = (p: Project) => {
+    if (!p.isGit) return null;
+    return (
+      <button
+        className="gm-icon-btn gm-icon-btn--sm shrink-0 opacity-0 group-hover/proj:opacity-100 focus-visible:opacity-100"
+        aria-label={`New worktree in ${p.name}`}
+        title={`New worktree in ${p.name}`}
+        onClick={(e) => {
+          // The header itself expands or collapses: never both.
+          e.stopPropagation();
+          void openCreate(p.id);
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        <Plus size={14} strokeWidth={2} />
+      </button>
+    );
+  };
+
   /** Shared wiring for every row in the panel. */
   const row = (wt: Worktree, pid?: string) => (
     <WorktreeRow
       key={wt.id}
       wt={wt}
       selected={wt.id === activeWorktreeId}
-      pinned={!!pinned[wt.id]}
       // Other projects' status is never read here: omit the cluster rather
       // than claim anything about rows we have not looked at.
       status={pid ? undefined : statuses[wt.id] ?? null}
+      aheadBehind={pid ? undefined : (aheadBehind[wt.id] ?? null)}
       onOpen={() => (pid ? openProjectWorktree(pid, wt.id) : setActiveWorktree(wt.id))}
       onMenu={(at) => setMenu({ kind: "row", ...at, wt, pid })}
     />
@@ -580,9 +802,41 @@ export function WorktreeSidebar() {
       </div>
 
       {/* header: the panel's only heading, plus its total */}
-      <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
-        <span className="gm-sect">Worktrees</span>
-        {isGit && <span className="tnum gm-meta">{live.length + settled.length}</span>}
+      <div className="flex items-center justify-between px-4 pb-1 pt-3">
+        <span className="gm-sect">Projects</span>
+        <div className="flex items-center gap-0.5">
+          <button
+            className="gm-icon-btn gm-icon-btn--sm"
+            title="Notifications"
+            aria-label="Notifications"
+          >
+            <Bell size={14} strokeWidth={2} />
+          </button>
+          <button
+            className="gm-icon-btn gm-icon-btn--sm"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => useStore.getState().setSettingsOpen(true)}
+          >
+            <Settings size={14} strokeWidth={2} />
+          </button>
+          <button
+            className="gm-icon-btn gm-icon-btn--sm"
+            title="Open folder"
+            aria-label="Open folder"
+            onClick={() => void openProject()}
+          >
+            <FolderPlus size={14} strokeWidth={2} />
+          </button>
+          <button
+            className="gm-icon-btn gm-icon-btn--sm"
+            title="Add project"
+            aria-label="Add project"
+            onClick={() => void openProject()}
+          >
+            <Plus size={14} strokeWidth={2} />
+          </button>
+        </div>
       </div>
 
       {/* filter: underline, not a box */}
@@ -620,20 +874,11 @@ export function WorktreeSidebar() {
       </div>
 
       {tab === "worktrees" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
           {!proj && (
             <div className="px-3 py-8 text-center">
               <div className="text-[12px] text-ink-300">No projects yet.</div>
               <div className="gm-meta mt-1">Open a folder or repository from the switcher above.</div>
-            </div>
-          )}
-
-          {isPlain && (
-            <div className="px-1 py-1 text-[12px] leading-5 text-ink-300">
-              Terminals and files work now; worktrees appear after init.{" "}
-              <button className="font-semibold text-ink-100 hover:underline" onClick={initGit}>
-                Init git here
-              </button>
             </div>
           )}
 
@@ -647,136 +892,129 @@ export function WorktreeSidebar() {
             </div>
           )}
 
-          {/* Active project gets its own labeled section so its rows never
-              blend into the projects below. */}
-          {proj && (shownLive.length > 0 || q) && (
-            <div
-              className="group/proj flex items-center gap-1 px-2.5 pb-1 pt-2"
-              title={proj.path}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: activePid });
-              }}
-            >
-              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink-100">
-                {proj.name}
-              </span>
-              <span className="tnum gm-meta flex-none">{shownLive.length}</span>
-              {projActions(activePid, proj.name)}
-            </div>
-          )}
-
-          {shownLive.map((wt) => row(wt))}
-
-          {isGit && (
-            <DiscoveredBlock
-              // A search goes through every row, so the line has nothing to
-              // announce while one is active.
-              fresh={q ? [] : toAnnounce(gitRows, activePid)}
-              expanded={!!disExpanded[activePid]}
-              onToggle={() => toggle(setDisExpanded, activePid, !!disExpanded[activePid])}
-              onKeepHidden={() => dismissDiscovered(activePid, gitRows)}
-              onShowInList={() => showDiscovered(activePid, gitRows)}
-              groups={disGroups}
-              onToggleGroup={(key) => toggle(setDisGroups, key, !!disGroups[key])}
-              groupKey={(dir) => `${activePid}::${dir.toLowerCase()}`}
-              renderRow={(wt) => discoveredRow(wt)}
-            />
-          )}
-
-          {q && shownLive.length === 0 && shownSettled.length === 0 && (
-            <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">No worktrees match.</div>
-          )}
-          {isGit && !q && shownLive.length === 0 && (
-            <div className="gm-meta px-2.5 py-3 leading-5">
-              No worktrees yet. Create one below, or pull a branch in with git.
-            </div>
-          )}
-
-          {/* Other projects: one labeled line each. Chevron expands; rows jump
-              straight to that project's worktree. */}
-          {!q && otherProjects.length > 0 && (
-            <div className="mx-2.5 mb-1 mt-3" style={{ borderTop: "1px solid var(--gm-hairline-soft)" }} />
-          )}
-          {!q &&
-            otherProjects.map((p) => {
-              const all = otherRows(p);
-              if (all.length === 0) return null;
-              const rows = visibleRows(all, p.id);
-              const open = !!projOpen[p.id];
-              return (
-                <div key={p.id} className="mt-0.5">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={open}
-                    className="gm-row group/proj flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2"
-                    onClick={() => toggleProjOpen(p.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        toggleProjOpen(p.id);
-                      }
-                    }}
-                    onContextMenu={(e) => {
+          {/* All projects in their natural order. Active project is expanded
+              in place; others collapse with a chevron. No project moves to the
+              top when clicked. */}
+          {!q && allProjects.map((p) => {
+            const isActive = p.id === activeProjectId;
+            const rows = projRows(p);
+            if (rows.length === 0 && !isActive) return null;
+            const visible = isActive ? shownLive : visibleRows(rows, p.id);
+            // Active project defaults open but can be collapsed via projOpen.
+            const open = isActive ? projOpen[p.id] !== false : !!projOpen[p.id];
+            return (
+              <div key={p.id} className={isActive ? "" : "mt-1"}>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={open}
+                  className="gm-row group/proj flex w-full cursor-pointer items-center gap-2 px-2.5 py-2"
+                  onClick={() => toggleProjOpen(p.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
-                    }}
-                    title={`${p.path}\nExpand to browse, right-click for the project menu.`}
+                      toggleProjOpen(p.id);
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
+                  }}
+                  title={isActive ? p.path : `${p.name}\n${p.path}\nClick to expand, right-click for project menu.`}
+                >
+                  <ChevronRight
+                    size={12}
+                    strokeWidth={2}
+                    className={`shrink-0 text-ink-500 transition-transform ${open ? "rotate-90" : ""}`}
+                  />
+                  <span
+                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                    aria-hidden
                   >
-                    <ChevronRight
-                      size={12}
-                      strokeWidth={2}
-                      className={`shrink-0 text-ink-500 transition-transform ${open ? "rotate-90" : ""}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink-100">
-                      {p.name}
-                    </span>
-                    <span className="tnum gm-meta flex-none">{rows.length}</span>
-                    {projActions(p.id, p.name)}
-                  </div>
-                  {open && (
-                    <div className="pb-0.5 pl-4">
-                      {rows.map((wt) => row(wt, p.id))}
+                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink-100">
+                    {p.name}
+                  </span>
+                  <span className="tnum gm-meta flex-none">{visible.length}</span>
+                  {newWorktreeBtn(p)}
+                  {projActions(p.id, p.name)}
+                </div>
+                {open && (
+                  <div className={`space-y-[3px] ${isActive ? "" : "pb-0.5 pl-4"}`}>
+                    {visible.map((wt) => row(wt, isActive ? undefined : p.id))}
+                    {isActive && isGit && (
                       <DiscoveredBlock
-                        fresh={q ? [] : toAnnounce(all, p.id)}
+                        fresh={q ? [] : toAnnounce(gitRows, activePid)}
+                        expanded={!!disExpanded[activePid]}
+                        onToggle={() => toggle(setDisExpanded, activePid, !!disExpanded[activePid])}
+                        onKeepHidden={() => dismissDiscovered(activePid, gitRows)}
+                        onShowInList={() => showDiscovered(activePid, gitRows)}
+                        groups={disGroups}
+                        onToggleGroup={(key) => toggle(setDisGroups, key, !!disGroups[key])}
+                        groupKey={(dir) => `${activePid}::${dir.toLowerCase()}`}
+                        renderRow={(wt) => discoveredRow(wt)}
+                      />
+                    )}
+                    {!isActive && (
+                      <DiscoveredBlock
+                        fresh={q ? [] : toAnnounce(rows, p.id)}
                         expanded={!!disExpanded[p.id]}
                         onToggle={() => toggle(setDisExpanded, p.id, !!disExpanded[p.id])}
-                        onKeepHidden={() => dismissDiscovered(p.id, all)}
-                        onShowInList={() => showDiscovered(p.id, all)}
+                        onKeepHidden={() => dismissDiscovered(p.id, rows)}
+                        onShowInList={() => showDiscovered(p.id, rows)}
                         groups={disGroups}
                         onToggleGroup={(key) => toggle(setDisGroups, key, !!disGroups[key])}
                         groupKey={(dir) => `${p.id}::${dir.toLowerCase()}`}
                         renderRow={(wt) => discoveredRow(wt, p.id)}
                       />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-          {q &&
-            otherProjects.map((p) => {
-              const rows = otherRows(p).filter(matches);
-              if (rows.length === 0) return null;
-              return (
-                <div key={p.id} className="mt-1">
-                  <div
-                    className="group/proj flex items-center gap-1 px-2.5 pb-0.5 pt-2 text-[12px] font-semibold text-ink-100"
-                    title={p.path}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
-                    }}
-                  >
-                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                    <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
-                    {projActions(p.id, p.name)}
+                    )}
                   </div>
-                  {rows.map((wt) => row(wt, p.id))}
+                )}
+              </div>
+            );
+          })}
+
+          {/* Search: show matching rows from all projects */}
+          {q && allProjects.map((p) => {
+            const rows = projRows(p).filter(matches);
+            if (rows.length === 0) return null;
+            return (
+              <div key={p.id} className="mt-1">
+                <div
+                  className="group/proj flex items-center gap-2 px-2.5 pb-1 pt-2 text-[12.5px] font-semibold text-ink-100"
+                  title={p.path}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
+                  }}
+                >
+                  <span
+                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                    aria-hidden
+                  >
+                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                  <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
+                  {newWorktreeBtn(p)}
+                  {projActions(p.id, p.name)}
                 </div>
-              );
-            })}
+                {rows.map((wt) => row(wt, p.id === activeProjectId ? undefined : p.id))}
+              </div>
+            );
+          })}
+
+          {q && allProjects.every((p) => projRows(p).filter(matches).length === 0) && (
+            <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">No worktrees match.</div>
+          )}
+          {!q && isGit && allProjects.some((p) => p.id === activeProjectId) && shownLive.length === 0 && (
+            <div className="gm-meta px-2.5 py-3 leading-5">
+              No worktrees yet. Hover the project name and hit + to create one.
+            </div>
+          )}
 
           {shownSettled.length > 0 && (
             <div className="mt-1">
@@ -800,7 +1038,6 @@ export function WorktreeSidebar() {
                     <WorktreeRow
                       wt={wt}
                       dim
-                      pinned={!!pinned[wt.id]}
                       onOpen={() => revive(wt.id)}
                       onMenu={(at) => setMenu({ kind: "row", ...at, wt })}
                     />
@@ -820,7 +1057,52 @@ export function WorktreeSidebar() {
                   : activeStatuses.length === 0
                     ? "is clean."
                     : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
+                {(() => {
+                  const ab = aheadBehind[activeWt.id];
+                  if (!ab || (ab.ahead === 0 && ab.behind === 0)) return "";
+                  return ` · ${ab.ahead > 0 ? `↑${ab.ahead}` : ""}${ab.ahead > 0 && ab.behind > 0 ? " " : ""}${ab.behind > 0 ? `↓${ab.behind}` : ""}`;
+                })()}
               </span>
+            </div>
+          )}
+          {isGit && activeWt && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+              <input
+                value={commitMsg}
+                onChange={(e) => setCommitMsg(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void commitActive();
+                }}
+                placeholder="Commit message — stages all"
+                aria-label="Commit message"
+                className="mono min-w-0 flex-1 rounded border bg-ink-950 px-1.5 py-1 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+                style={{ borderColor: "var(--gm-hairline)" }}
+              />
+              <button
+                title="Stage all and commit"
+                disabled={!commitMsg.trim() || gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
+                style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
+                onClick={() => void commitActive()}
+              >
+                {gitBusy?.startsWith("commit:") ? "…" : "Commit"}
+              </button>
+              <button
+                title="Push current branch"
+                disabled={gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
+                onClick={() => void pushPath(activeWt.path)}
+              >
+                {gitBusy?.startsWith("push:") ? "…" : "Push"}
+              </button>
+              <button
+                title="Fetch and prune"
+                disabled={gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
+                onClick={() => void fetchPath(activeWt.path)}
+              >
+                {gitBusy?.startsWith("fetch:") ? "…" : "Fetch"}
+              </button>
             </div>
           )}
           {isGit && !activeWt && <div className="gm-meta px-2.5 py-2">No active worktree.</div>}
@@ -857,23 +1139,26 @@ export function WorktreeSidebar() {
         </div>
       )}
 
-      {/* footer: new worktree is a quiet line in the panel, not a box */}
-      {tab === "worktrees" && isGit && (
-        <div className="px-4 pb-3">
-          {creating ? (
+      {/* new worktree: per-project hover plus opens a modal, not a footer line */}
+      {creatingPid && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setCreatingPid(null)}
+        >
+          <div
+            className="w-[400px] max-w-full"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="New worktree"
+          >
             <CreateWorktreeForm
               branches={branches}
-              onSubmit={create}
-              onCancel={() => setCreating(false)}
+              projectName={projects.find((x) => x.id === creatingPid)?.name}
+              onSubmit={(v) => void create(creatingPid, v)}
+              onCancel={() => setCreatingPid(null)}
             />
-          ) : (
-            <button
-              className="w-full pt-2 text-left text-[12px] font-medium text-ink-500 hover:text-ink-100"
-              onClick={() => void openCreate()}
-            >
-              + New worktree
-            </button>
-          )}
+          </div>
         </div>
       )}
 

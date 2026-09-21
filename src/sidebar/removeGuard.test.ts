@@ -1,7 +1,7 @@
 // Run: node --test src/sidebar/removeGuard.test.ts
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseRemoveGuard } from "./removeGuard.ts";
+import { parseRemoveGuard, parseRemoveStale } from "./removeGuard.ts";
 
 const guard = (msg: string) => parseRemoveGuard(new Error(msg));
 
@@ -50,5 +50,33 @@ describe("parseRemoveGuard", () => {
     const g = guard("some future reason, retry to discard them");
     assert.equal(g?.unmerged, 0);
     assert.equal(g?.summary, "has work that would be lost");
+  });
+});
+
+describe("parseRemoveStale", () => {
+  it("reads the outside kind with path and repo", () => {
+    const s = parseRemoveStale(
+      new Error("GUIMUX_STALE_OUTSIDE path=/tmp/outside-wt repo=/repo worktree is not registered"),
+    );
+    assert.deepEqual(s, { kind: "outside", path: "/tmp/outside-wt", repo: "/repo" });
+  });
+
+  it("reads the inside kind", () => {
+    const s = parseRemoveStale("GUIMUX_STALE_INSIDE path=/home/u/.guimux/worktrees/x-wt repo=/repo ...");
+    assert.equal(s?.kind, "inside");
+    assert.equal(s?.path, "/home/u/.guimux/worktrees/x-wt");
+  });
+
+  it("returns null for guard refusals and ordinary failures", () => {
+    assert.equal(parseRemoveStale(new Error("worktree has uncommitted changes. retry to discard them")), null);
+    assert.equal(parseRemoveStale("remove failed: permission denied"), null);
+    assert.equal(parseRemoveStale(undefined), null);
+  });
+
+  it("stale markers never escalate through the guard parser", () => {
+    assert.equal(
+      guard("GUIMUX_STALE_OUTSIDE path=/tmp/x repo=/r worktree is not registered"),
+      null,
+    );
   });
 });

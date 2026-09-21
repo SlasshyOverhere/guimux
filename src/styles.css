@@ -235,6 +235,19 @@ textarea,
   box-shadow: inset 2px 0 0 var(--gm-ink-mute);
 }
 
+/* Sidebar worktree rows: card rows with a transparent border, so the selected
+   state can carry a hairline without shifting layout on select. */
+.gm-wt-row {
+  border: 1px solid transparent;
+}
+.gm-wt-row[data-selected="true"] {
+  background: var(--gm-panel);
+  border-color: var(--gm-hairline);
+}
+.gm-wt-row[data-selected="true"]:hover {
+  background: var(--gm-panel);
+}
+
 /* Panel section label: the one heading style in a list panel. */
 .gm-sect {
   font-size: 10.5px;
@@ -299,6 +312,145 @@ textarea,
   padding: 0 5px;
   line-height: 1.6;
   white-space: nowrap;
+}
+
+/* Markdown preview pane */
+.gm-md-preview {
+  padding: 16px 20px;
+  overflow-y: auto;
+  user-select: text;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--gm-ink-dim);
+}
+.gm-md-preview h1,
+.gm-md-preview h2,
+.gm-md-preview h3,
+.gm-md-preview h4,
+.gm-md-preview h5,
+.gm-md-preview h6 {
+  margin: 1.2em 0 0.4em;
+  font-weight: 600;
+  color: var(--gm-ink);
+  line-height: 1.3;
+}
+.gm-md-preview h1 { font-size: 1.5em; }
+.gm-md-preview h2 { font-size: 1.3em; }
+.gm-md-preview h3 { font-size: 1.1em; }
+.gm-md-preview p {
+  margin: 0.6em 0;
+}
+.gm-md-preview a {
+  color: #7cb6e8;
+  text-decoration: underline;
+  text-decoration-color: rgba(124, 182, 232, 0.3);
+  text-underline-offset: 2px;
+}
+.gm-md-preview a:hover {
+  text-decoration-color: rgba(124, 182, 232, 0.6);
+}
+.gm-md-preview code {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.gm-md-preview pre {
+  margin: 0.8em 0;
+  padding: 10px 14px;
+  background: var(--gm-canvas);
+  border-radius: var(--gm-r-ctl);
+  border: 1px solid var(--gm-hairline-soft);
+  overflow-x: auto;
+}
+.gm-md-preview pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.gm-md-preview blockquote {
+  margin: 0.6em 0;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--gm-hairline);
+  color: var(--gm-ink-mute);
+}
+.gm-md-preview hr {
+  border: none;
+  border-top: 1px solid var(--gm-hairline-soft);
+  margin: 1em 0;
+}
+.gm-md-preview ul,
+.gm-md-preview ol {
+  margin: 0.5em 0;
+  padding-left: 1.6em;
+}
+.gm-md-preview li {
+  margin: 0.2em 0;
+}
+.gm-md-preview li input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: var(--gm-ink-mute);
+}
+.gm-md-preview table {
+  margin: 0.8em 0;
+  border-collapse: collapse;
+}
+.gm-md-preview th,
+.gm-md-preview td {
+  padding: 4px 10px;
+  border: 1px solid var(--gm-hairline-soft);
+  font-size: 12px;
+}
+.gm-md-preview th {
+  font-weight: 600;
+  color: var(--gm-ink);
+}
+.gm-md-preview strong {
+  font-weight: 600;
+  color: var(--gm-ink);
+}
+.gm-md-preview del {
+  color: var(--gm-ink-faint);
+}
+.gm-md-preview .gm-md-img {
+  display: inline-block;
+  font-style: italic;
+  color: var(--gm-ink-faint);
+  font-size: 12px;
+}
+
+/* Segmented toggle (raw / markdown) */
+.gm-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  border-radius: var(--gm-r-ctl);
+  border: 1px solid var(--gm-hairline);
+  overflow: hidden;
+}
+.gm-seg > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--gm-ink-faint);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.gm-seg > button:hover {
+  color: var(--gm-ink-dim);
+}
+.gm-seg > button[data-active="true"] {
+  background: var(--gm-selected);
+  color: var(--gm-ink);
 }
 
 /* window close button: Windows-standard red on hover */
