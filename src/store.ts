@@ -126,25 +126,6 @@ function removePane(node: PaneNode, paneId: string): PaneNode | null {
   return { ...node, first, second };
 }
 
-// Pane drag-and-drop swaps two leaves: sessions travel with their pane
-// objects, so the dragged terminal keeps its shell.
-function findPane(node: PaneNode, paneId: string): Pane | null {
-  if (node.kind === "pane") return node.id === paneId ? node : null;
-  return findPane(node.first, paneId) ?? findPane(node.second, paneId);
-}
-
-// Single pass: swapping by id in two passes corrupts (the moved copy carries
-// the other id, so the second pass replaces both leaves and duplicates the
-// dragged pane while killing the target session). Map each leaf once.
-function swapPaneNodes(node: PaneNode, aId: string, aNode: Pane, bId: string, bNode: Pane): PaneNode {
-  if (node.kind === "pane") {
-    if (node.id === aId) return bNode;
-    if (node.id === bId) return aNode;
-    return node;
-  }
-  return { ...node, first: swapPaneNodes(node.first, aId, aNode, bId, bNode), second: swapPaneNodes(node.second, aId, aNode, bId, bNode) };
-}
-
 // Balanced tiling for agent fan-out: split the list in half, alternate h/v
 // per depth. 2 = side by side, 3 = one left + two stacked right, 4 = 2x2.
 function tileGrid(panes: Pane[], depth = 0): PaneNode {
@@ -260,7 +241,6 @@ interface AppState {
   setSplitRatio: (worktreeId: string, splitId: string, ratio: number) => void;
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
-  movePane: (dragId: string, dropId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
   launchAgents: (items: { command: string; count: number }[]) => void;
   dropWorktreeLayout: (id: string) => number[];
@@ -603,20 +583,6 @@ export const useStore = create<AppState>((set, get) => ({
         ? { maximizedPaneId: null }
         : { maximizedPaneId: paneId, activePaneId: paneId },
     ),
-  movePane: (dragId, dropId) => {
-    const { layout, activeWorktreeId, layouts } = get();
-    if (!layout || !activeWorktreeId || dragId === dropId) return;
-    const dragNode = findPane(layout, dragId);
-    const dropNode = findPane(layout, dropId);
-    if (!dragNode || !dropNode) return;
-    const next = swapPaneNodes(layout, dragId, dragNode, dropId, dropNode);
-    set({
-      layout: next,
-      layouts: { ...layouts, [activeWorktreeId]: next },
-      activePaneId: dragId,
-      maximizedPaneId: null,
-    });
-  },
   // Fan-out keeps every pane object (dropping them orphaned the running PTY)
   // and retiles the whole set into one equal grid, so launching 4 always
   // makes 4 equal panes. Total tiles capped at 12: past that every pane

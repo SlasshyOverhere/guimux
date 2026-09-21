@@ -63,9 +63,61 @@ function persistScrollback(paneId: string, state: string) {
   }
 }
 
-// Pane rearrangement is pointer-based: HTML5 DnD never dispatches dragover in
-// this webview, so a grip drag tracks the pointer and swaps on release.
-export const paneDrag = { id: null as string | null };
+// Toolbar chip position per pane id: the chip floats over the grid and can
+// cover TUI content, so the user can drag it anywhere in the pane. Written
+// on drag end only; survives switches and restarts via the persisted pane id.
+const LS_TOOLS_POS = "guimux-pane-tools-pos";
+const toolsPosCache = new Map<string, { x: number; y: number }>();
+
+function readToolsPos(paneId: string): { x: number; y: number } | null {
+  const hit = toolsPosCache.get(paneId);
+  if (hit) return hit;
+  try {
+    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
+      string,
+      { x: number; y: number }
+    >;
+    const p = all[paneId];
+    if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+      const pos = { x: Math.max(0, Math.min(2000, p.x)), y: Math.max(0, Math.min(2000, p.y)) };
+      toolsPosCache.set(paneId, pos);
+      return pos;
+    }
+  } catch {
+    /* corrupt: fall back to the corner */
+  }
+  return null;
+}
+
+function writeToolsPos(paneId: string, pos: { x: number; y: number }) {
+  toolsPosCache.set(paneId, pos);
+  try {
+    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
+      string,
+      { x: number; y: number }
+    >;
+    all[paneId] = pos;
+    const keys = Object.keys(all);
+    while (keys.length > 100) delete all[keys.shift()!];
+    localStorage.setItem(LS_TOOLS_POS, JSON.stringify(all));
+  } catch {
+    /* quota */
+  }
+}
+
+function clearToolsPos(paneId: string) {
+  toolsPosCache.delete(paneId);
+  try {
+    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
+      string,
+      { x: number; y: number }
+    >;
+    delete all[paneId];
+    localStorage.setItem(LS_TOOLS_POS, JSON.stringify(all));
+  } catch {
+    /* quota */
+  }
+}
 
 interface Props {
   paneId: string;
@@ -1127,55 +1179,49 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // quoted path through its own live terminal input (same path typed keys
   // use). The acceptDrag/handleDrop handlers below stay as the fallback
   // for OS file drops if the webview ever dispatches real drop events.
-  // Grip drag: press and drag onto any other pane to swap the two. Pointer
-  // events only (no dataTransfer); Escape cancels mid-drag. Window listeners
-  // run in the capture phase so nothing between the target and the window
-  // can swallow the move/up stream.
-  const [dragging, setDragging] = useState(false);
-  const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null);
-  const startPaneDrag = (e: React.MouseEvent) => {
+  // Toolbar chip drag: press the grip and drop the chip anywhere in the pane.
+  // Pointer events only (no dataTransfer); clamped inside the pane, position
+  // remembered per pane. Double-click the grip to snap back to the corner.
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const [toolsPos, setToolsPos] = useState<{ x: number; y: number } | null>(() =>
+    readToolsPos(paneId),
+  );
+  const moveToolsDrag = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    setActivePane(paneId);
-    paneDrag.id = paneId;
-    setDragging(true);
+    const barEl = toolsRef.current;
+    if (!barEl) return;
+    const barRect = barEl.getBoundingClientRect();
+    const dx = e.clientX - barRect.left;
+    const dy = e.clientY - barRect.top;
     document.body.style.cursor = "grabbing";
     document.body.style.userSelect = "none";
-    let over: string | null = null;
+    let last: { x: number; y: number } | null = null;
     let done = false;
-    const finish = (cancelled: boolean) => {
+    const finish = () => {
       if (done) return;
       done = true;
       window.removeEventListener("mousemove", move, true);
       window.removeEventListener("mouseup", up, true);
-      window.removeEventListener("keydown", onKey, true);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
-      window.dispatchEvent(new CustomEvent("gm-pane-drag-end"));
-      const target = cancelled ? null : over;
-      paneDrag.id = null;
-      setDragging(false);
-      setGhost(null);
-      if (target) useStore.getState().movePane(paneId, target);
+      if (last) writeToolsPos(paneId, last);
     };
     const move = (ev: MouseEvent) => {
-      const el = document.elementFromPoint(ev.clientX, ev.clientY);
-      const host = el?.closest?.("[data-pane-id]") as HTMLElement | null;
-      const id = host?.dataset.paneId ?? null;
-      over = id && id !== paneId ? id : null;
-      setGhost({ x: ev.clientX, y: ev.clientY });
-      window.dispatchEvent(
-        new CustomEvent("gm-pane-drag-over", { detail: { dragId: paneId, overId: over } }),
-      );
+      const r = paneRef.current?.getBoundingClientRect();
+      if (!r || r.width <= 0) return;
+      const bw = barEl.offsetWidth;
+      const bh = barEl.offsetHeight;
+      last = {
+        x: Math.min(Math.max(4, ev.clientX - r.left - dx), Math.max(4, r.width - bw - 4)),
+        y: Math.min(Math.max(4, ev.clientY - r.top - dy), Math.max(4, r.height - bh - 4)),
+      };
+      setToolsPos(last);
     };
-    const up = () => finish(false);
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === "Escape") finish(true);
-    };
+    const up = () => finish();
     window.addEventListener("mousemove", move, true);
     window.addEventListener("mouseup", up, true);
-    window.addEventListener("keydown", onKey, true);
   };
   const dragDepth = useRef(0);
   const [dropHot, setDropHot] = useState(false);
@@ -1215,21 +1261,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       window.removeEventListener("gm-file-drag-over", onOver);
       window.removeEventListener("gm-file-drag-leave", onLeave);
-    };
-  }, [paneId]);
-  // Drop highlight for an incoming pane drag (see the grip below).
-  const [moveHot, setMoveHot] = useState(false);
-  useEffect(() => {
-    const onOver = (ev: Event) => {
-      const { overId } = (ev as CustomEvent<{ overId: string | null }>).detail ?? {};
-      setMoveHot(overId === paneId);
-    };
-    const onEnd = () => setMoveHot(false);
-    window.addEventListener("gm-pane-drag-over", onOver);
-    window.addEventListener("gm-pane-drag-end", onEnd);
-    return () => {
-      window.removeEventListener("gm-pane-drag-over", onOver);
-      window.removeEventListener("gm-pane-drag-end", onEnd);
     };
   }, [paneId]);
   const acceptDrag = (e: React.DragEvent) => {
@@ -1280,17 +1311,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     <div
       ref={paneRef}
       className="relative h-full w-full"
-      data-drop-hot={dropHot || moveHot}
+      data-drop-hot={dropHot}
       data-pane-drop
-      data-pane-id={paneId}
       data-pty-id={sessionRef.current ?? undefined}
-      style={
-        dragging
-          ? { opacity: 0.55 }
-          : dropHot || moveHot
-            ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" }
-            : undefined
-      }
+      style={dropHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
       onMouseDown={() => {
         setActivePane(paneId);
         // Clicking pane chrome (toolbar, gutters) parks focus on a button or
@@ -1308,7 +1332,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       onDrop={handleDrop}
     >
       <div
-        className={`absolute right-2 top-2 z-10 flex items-center transition-opacity duration-150 ${dragging ? "opacity-100" : "opacity-0 group-hover/pane:opacity-100 focus-within:opacity-100"}`}
+        ref={toolsRef}
+        className="absolute right-2 top-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
+        style={toolsPos ? { left: toolsPos.x, top: toolsPos.y, right: "auto" } : undefined}
       >
         {!webgl && (
           <span
@@ -1321,10 +1347,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         )}
         <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
           <button
-            title="Drag to move pane"
-            aria-label="Drag to move pane"
+            title="Drag to move toolbar, double-click to reset"
+            aria-label="Drag to move toolbar"
             className="cursor-grab active:cursor-grabbing"
-            onMouseDown={startPaneDrag}
+            onMouseDown={moveToolsDrag}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setToolsPos(null);
+              clearToolsPos(paneId);
+            }}
           >
             <GripVertical size={13} strokeWidth={2} />
           </button>
@@ -1365,19 +1396,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           </button>
         </div>
       </div>
-      {dragging && ghost && (
-        <div
-          className="pointer-events-none fixed z-[60] rounded-md px-2.5 py-1.5 text-[12px] font-medium text-ink-100"
-          style={{
-            left: ghost.x + 12,
-            top: ghost.y + 12,
-            background: "var(--gm-overlay)",
-            border: "1px solid var(--gm-hairline)",
-          }}
-        >
-          Move pane
-        </div>
-      )}
       {pasteHint && (
         <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center">
           <div
