@@ -1128,13 +1128,18 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // use). The acceptDrag/handleDrop handlers below stay as the fallback
   // for OS file drops if the webview ever dispatches real drop events.
   // Grip drag: press and drag onto any other pane to swap the two. Pointer
-  // events only (no dataTransfer); Escape cancels mid-drag.
+  // events only (no dataTransfer); Escape cancels mid-drag. Window listeners
+  // run in the capture phase so nothing between the target and the window
+  // can swallow the move/up stream.
+  const [dragging, setDragging] = useState(false);
+  const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null);
   const startPaneDrag = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     setActivePane(paneId);
     paneDrag.id = paneId;
+    setDragging(true);
     document.body.style.cursor = "grabbing";
     document.body.style.userSelect = "none";
     let over: string | null = null;
@@ -1142,14 +1147,16 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const finish = (cancelled: boolean) => {
       if (done) return;
       done = true;
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      window.removeEventListener("mousemove", move, true);
+      window.removeEventListener("mouseup", up, true);
       window.removeEventListener("keydown", onKey, true);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.dispatchEvent(new CustomEvent("gm-pane-drag-end"));
       const target = cancelled ? null : over;
       paneDrag.id = null;
+      setDragging(false);
+      setGhost(null);
       if (target) useStore.getState().movePane(paneId, target);
     };
     const move = (ev: MouseEvent) => {
@@ -1157,6 +1164,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       const host = el?.closest?.("[data-pane-id]") as HTMLElement | null;
       const id = host?.dataset.paneId ?? null;
       over = id && id !== paneId ? id : null;
+      setGhost({ x: ev.clientX, y: ev.clientY });
       window.dispatchEvent(
         new CustomEvent("gm-pane-drag-over", { detail: { dragId: paneId, overId: over } }),
       );
@@ -1165,8 +1173,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") finish(true);
     };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    window.addEventListener("mousemove", move, true);
+    window.addEventListener("mouseup", up, true);
     window.addEventListener("keydown", onKey, true);
   };
   const dragDepth = useRef(0);
@@ -1276,7 +1284,13 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       data-pane-drop
       data-pane-id={paneId}
       data-pty-id={sessionRef.current ?? undefined}
-      style={dropHot || moveHot ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" } : undefined}
+      style={
+        dragging
+          ? { opacity: 0.55 }
+          : dropHot || moveHot
+            ? { boxShadow: "inset 0 0 0 2px var(--gm-accent)" }
+            : undefined
+      }
       onMouseDown={() => {
         setActivePane(paneId);
         // Clicking pane chrome (toolbar, gutters) parks focus on a button or
@@ -1294,7 +1308,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       onDrop={handleDrop}
     >
       <div
-        className="absolute right-2 top-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
+        className={`absolute right-2 top-2 z-10 flex items-center transition-opacity duration-150 ${dragging ? "opacity-100" : "opacity-0 group-hover/pane:opacity-100 focus-within:opacity-100"}`}
       >
         {!webgl && (
           <span
@@ -1351,6 +1365,19 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           </button>
         </div>
       </div>
+      {dragging && ghost && (
+        <div
+          className="pointer-events-none fixed z-[60] rounded-md px-2.5 py-1.5 text-[12px] font-medium text-ink-100"
+          style={{
+            left: ghost.x + 12,
+            top: ghost.y + 12,
+            background: "var(--gm-overlay)",
+            border: "1px solid var(--gm-hairline)",
+          }}
+        >
+          Move pane
+        </div>
+      )}
       {pasteHint && (
         <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center">
           <div

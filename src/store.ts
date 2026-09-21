@@ -133,9 +133,16 @@ function findPane(node: PaneNode, paneId: string): Pane | null {
   return findPane(node.first, paneId) ?? findPane(node.second, paneId);
 }
 
-function replacePane(node: PaneNode, paneId: string, replacement: PaneNode): PaneNode {
-  if (node.kind === "pane") return node.id === paneId ? replacement : node;
-  return { ...node, first: replacePane(node.first, paneId, replacement), second: replacePane(node.second, paneId, replacement) };
+// Single pass: swapping by id in two passes corrupts (the moved copy carries
+// the other id, so the second pass replaces both leaves and duplicates the
+// dragged pane while killing the target session). Map each leaf once.
+function swapPaneNodes(node: PaneNode, aId: string, aNode: Pane, bId: string, bNode: Pane): PaneNode {
+  if (node.kind === "pane") {
+    if (node.id === aId) return bNode;
+    if (node.id === bId) return aNode;
+    return node;
+  }
+  return { ...node, first: swapPaneNodes(node.first, aId, aNode, bId, bNode), second: swapPaneNodes(node.second, aId, aNode, bId, bNode) };
 }
 
 // Balanced tiling for agent fan-out: split the list in half, alternate h/v
@@ -602,7 +609,7 @@ export const useStore = create<AppState>((set, get) => ({
     const dragNode = findPane(layout, dragId);
     const dropNode = findPane(layout, dropId);
     if (!dragNode || !dropNode) return;
-    const next = replacePane(replacePane(layout, dragId, dropNode), dropId, dragNode);
+    const next = swapPaneNodes(layout, dragId, dragNode, dropId, dropNode);
     set({
       layout: next,
       layouts: { ...layouts, [activeWorktreeId]: next },
