@@ -583,12 +583,11 @@ export const useStore = create<AppState>((set, get) => ({
         ? { maximizedPaneId: null }
         : { maximizedPaneId: paneId, activePaneId: paneId },
     ),
-  // Fan-out APPENDS to the existing layout: wipe-and-retile orphaned the
-  // current session (the old PTY kept running with no pane attached).
-  // Total tiles capped at 12: past that every pane drops below usable TUI
-  // width. The append direction alternates with the current root so repeated
-  // launches halve height and width in turn instead of squeezing width to a
-  // sliver every time (TUIs tolerate short height, not narrow width).
+  // Fan-out keeps every pane object (dropping them orphaned the running PTY)
+  // and retiles the whole set into one equal grid, so launching 4 always
+  // makes 4 equal panes. Total tiles capped at 12: past that every pane
+  // drops below usable TUI width. At most 2 across: TUIs wrap at ~80 cols
+  // and truncate below ~50, so width is sacred and height is spent instead.
   launchAgents: (items) => {
     const { activeWorktreeId, layouts, layout } = get();
     if (!activeWorktreeId) return;
@@ -643,8 +642,8 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
-    const fresh = tileAgents(panes);
     if (!patched) {
+      const fresh = tileAgents(panes);
       set({
         layout: fresh,
         layouts: { ...layouts, [activeWorktreeId]: fresh },
@@ -653,15 +652,10 @@ export const useStore = create<AppState>((set, get) => ({
       });
       return;
     }
-    const live = collectPaneObjs(patched);
-    const node: PaneNode = {
-      kind: "split",
-      id: nextId(),
-      direction: patched.kind === "split" && patched.direction === "h" ? "v" : "h",
-      ratio: Math.max(0.2, Math.min(0.8, live.length / (live.length + panes.length))),
-      first: tileGrid(live),
-      second: fresh,
-    };
+    // Retile everything into one equal grid. Appending the fresh tiles beside
+    // the old tree left lopsided ratios (a reused pane kept 1/4 width while
+    // three fresh shared 3/4), so launching 4 never made 4 equal panes.
+    const node = tileAgents([...collectPaneObjs(patched), ...panes]);
     set({
       layout: node,
       layouts: { ...layouts, [activeWorktreeId]: node },
