@@ -28,6 +28,7 @@ import { AgentLauncher } from "./agents/AgentLauncher";
 import type { Project, Worktree } from "./types";
 
 import { detectToProject } from "./project";
+import { startOsFileDropBridge } from "./dragFile";
 import { maybeStartStress } from "./terminal/stress";
 import { maybeAutoCheck } from "./updater";
 export { detectToProject };
@@ -421,6 +422,13 @@ export default function App() {
 
   useEffect(() => {
     maybeStartStress();
+  }, []);
+
+  // OS file drops arrive as Tauri drag events, never HTML5: bridge them onto
+  // the pane paste bus once for the whole window.
+  useEffect(() => {
+    const dispose = startOsFileDropBridge();
+    return dispose;
   }, []);
 
   // Restore persisted projects once on startup, then persist on every change.
