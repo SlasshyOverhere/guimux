@@ -198,16 +198,29 @@ export function ExplorerPane({ root }: { root: string }) {
   // is opened rather than at boot, where it delayed the first shell. The
   // import configures the loader, so it must finish before Editor renders.
   const [monacoReady, setMonacoReady] = useState(false);
+  const [monacoError, setMonacoError] = useState<string | null>(null);
+  const [monacoRetry, setMonacoRetry] = useState(0);
   useEffect(() => {
     if (!editorPath || monacoReady) return;
     let cancelled = false;
-    void import("../monaco").then(() => {
-      if (!cancelled) setMonacoReady(true);
-    });
+    setMonacoError(null);
+    // No catch used to leave monacoReady false forever on failure, so a
+    // rejected chunk (blocked CDN fallback, bad worker resolve) stranded
+    // the pane on "Loading editor…" with no recovery.
+    void import("../monaco").then(
+      () => {
+        if (!cancelled) setMonacoReady(true);
+      },
+      (e) => {
+        if (cancelled) return;
+        console.error("monaco load failed:", e);
+        setMonacoError(e instanceof Error ? e.message : String(e));
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [editorPath, monacoReady]);
+  }, [editorPath, monacoReady, monacoRetry]);
 
   const refreshTree = () => {
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
@@ -320,19 +333,28 @@ export function ExplorerPane({ root }: { root: string }) {
     }
     // Load in diff mode too: "Accept working-tree content" writes this buffer
     // back to disk, so it must hold real file content, never the initial "".
+    // Guarded: switching files mid-read let the stale response overwrite the
+    // new file's content.
+    let cancelled = false;
+    setContentLoaded(false);
     invoke<string>("fs_read", { path: editorPath })
       .then((c) => {
+        if (cancelled) return;
         setContent(c);
         setSavedContent(c);
         setDirty(false);
         setContentLoaded(true);
       })
       .catch((e) => {
+        if (cancelled) return;
         setContent(`// cannot open: ${e}`);
         setSavedContent("");
         setDirty(false);
         setContentLoaded(false);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [editorPath]);
 
   // Ctrl+S anywhere while editing (never from a focused terminal: the
@@ -691,7 +713,16 @@ export function ExplorerPane({ root }: { root: string }) {
             </div>
           </div>
         ) : !monacoReady ? (
-          <div className="gm-meta p-3 text-[12px]">Loading editor…</div>
+          monacoError ? (
+            <div className="gm-meta p-3 text-[12px]">
+              Editor failed to load ({monacoError}).{" "}
+              <button className="underline" onClick={() => setMonacoRetry((n) => n + 1)}>
+                Retry
+              </button>
+            </div>
+          ) : (
+            <div className="gm-meta p-3 text-[12px]">Loading editor…</div>
+          )
         ) : (
           <Editor
             height="100%"
@@ -701,6 +732,7 @@ export function ExplorerPane({ root }: { root: string }) {
             language={language}
             theme="vs-dark"
             value={content}
+            loading={<div className="gm-meta p-3 text-[12px]">Loading editor…</div>}
             onChange={(v) => {
               setContent(v ?? "");
               setDirty(true);
