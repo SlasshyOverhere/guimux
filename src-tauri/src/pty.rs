@@ -87,6 +87,10 @@ fn powershell_bootstrap(cwd: &str) -> String {
          [Console]::InputEncoding = [System.Text.UTF8Encoding]::new(); \
          $OutputEncoding = [Console]::OutputEncoding }} catch {{}}\n\
          try {{ Set-Location -LiteralPath '{safe_cwd}' -ErrorAction Stop }} catch {{}}\n\
+         # Word-kill: PSReadLine defaults leave Ctrl+Backspace / Ctrl+Delete\n\
+         # unbound, so the sequences arrive but do nothing. Guarded so spawn\n\
+         # never fails when PSReadLine is absent (cmd.exe path).\n\
+         try {{ if (Get-Module PSReadLine) {{ Set-PSReadLineKeyHandler -Key 'Ctrl+Backspace' -Function BackwardKillWord -ErrorAction SilentlyContinue; Set-PSReadLineKeyHandler -Key 'Ctrl+Delete' -Function KillWord -ErrorAction SilentlyContinue }} }} catch {{}}\n\
          # Split inherits the live cwd: report it on every prompt via OSC 7\n\
          # (file:// URI) + OSC 9;9 (native path, ConPTY/WT style). Write-Host\n\
          # side-channel keeps the returned prompt string clean for PSReadLine\n\
@@ -382,6 +386,22 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
     });
 }
 
+/// Guimux readline config: binds Ctrl+Delete (ESC[3;5~) to kill-word and
+/// keeps Ctrl+W as backward-kill-word, without touching the user's
+/// `~/.inputrc`. Written once to the temp dir; missing includes are ignored
+/// by readline so a bare container still gets the bindings.
+#[cfg(not(windows))]
+fn ensure_guimux_inputrc() -> PathBuf {
+    let p = std::env::temp_dir().join("guimux-inputrc");
+    if !p.exists() {
+        let _ = std::fs::write(
+            &p,
+            "$include /etc/inputrc\n$include ~/.inputrc\n\"\\e[3;5~\": kill-word\n\"\\e\\x7f\": backward-kill-word\n",
+        );
+    }
+    p
+}
+
 fn spawn_pair(
     app: &AppHandle,
     state: &State<PtyManager>,
@@ -440,6 +460,14 @@ fn spawn_pair(
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "guimux");
+        #[cfg(not(windows))]
+        {
+            // Readline shells (bash) pick this up; other shells ignore it.
+            // Never overrides an explicit user INPUTRC.
+            if std::env::var_os("INPUTRC").is_none() {
+                cmd.env("INPUTRC", ensure_guimux_inputrc());
+            }
+        }
         match pair.slave.spawn_command(cmd) {
             Ok(c) => {
                 if pty_debug() {
@@ -737,5 +765,21 @@ mod tests {
         let c = cached_bootstrap("C:\\y");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn bootstrap_binds_word_kill_guarded() {
+        let b = powershell_bootstrap("C:\\repo");
+        assert!(b.contains("Ctrl+Backspace") && b.contains("BackwardKillWord"), "missing left-word binding");
+        assert!(b.contains("Ctrl+Delete") && b.contains("KillWord"), "missing right-word binding");
+        assert!(b.contains("Get-Module PSReadLine"), "binding must be guarded");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn guimux_inputrc_binds_ctrl_delete() {
+        let p = ensure_guimux_inputrc();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("\\e[3;5~") && text.contains("kill-word"), "missing kill-word: {text}");
     }
 }
