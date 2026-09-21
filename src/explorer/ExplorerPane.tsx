@@ -626,11 +626,8 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
           <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-500">Explorer</span>
           <span className="flex gap-0.5">
-            <button title="Collapse all folders" aria-label="Collapse all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: false, n: b.n + 1 }))}>
-              <ChevronRight size={14} strokeWidth={2} />
-            </button>
-            <button title="Expand all folders" aria-label="Expand all folders" className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: true, n: b.n + 1 }))}>
-              <ChevronDown size={14} strokeWidth={2} />
+            <button title={bulk.open ? "Collapse all folders" : "Expand all folders"} aria-label={bulk.open ? "Collapse all folders" : "Expand all folders"} aria-pressed={bulk.open} data-active={bulk.open} className="gm-icon-btn gm-icon-btn--sm" onClick={() => setBulk((b) => ({ open: !b.open, n: b.n + 1 }))}>
+              {bulk.open ? <ChevronDown size={14} strokeWidth={2} /> : <ChevronRight size={14} strokeWidth={2} />}
             </button>
             <button title="New file" aria-label="New file" className="gm-icon-btn gm-icon-btn--sm" onClick={() => void newFile()}>
               <FilePlus2 size={14} strokeWidth={2} />
