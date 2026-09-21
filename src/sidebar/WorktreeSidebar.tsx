@@ -13,7 +13,7 @@ import { DiscoveredBlock } from "./DiscoveredBlock";
 import { CreateWorktreeForm } from "./CreateWorktreeForm";
 import { RowMenu, type MenuItem } from "./RowMenu";
 import { WorktreeRow } from "./WorktreeRow";
-import { parseRemoveGuard } from "./removeGuard";
+import { parseRemoveGuard, parseRemoveStale } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { confirmDialog, errorDialog } from "../dialogs";
@@ -370,6 +370,28 @@ export function WorktreeSidebar() {
       return;
     const root = pid ? rootOf(pid) : repoRoot;
     if (!root) return;
+    // Pre-flight: the row may be stale (moved folder, deleted
+    // `.git/worktrees` metadata, external remove without refresh). Re-list
+    // and abort with a notice instead of deleting the wrong thing.
+    try {
+      const fresh: Worktree[] = await invoke("worktree_list", { repoRoot: root });
+      if (fresh.length > 0 && !fresh.some((w) => w.id === wt.id)) {
+        if (pid && pid !== useStore.getState().activeProjectId) {
+          await refreshProjectList(pid, root);
+        } else {
+          await refreshList(true);
+        }
+        void errorDialog(`Worktree is gone, list refreshed.\nPath: ${wt.path}`);
+        return;
+      }
+    } catch {
+      /* list failed: fall through to remove, backend reports the truth */
+    }
+    const dropShells = () => {
+      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pty }).catch(() => {});
+      }
+    };
     const runRemove = async (force: boolean) => {
       await invoke("worktree_remove", {
         repoRoot: root,
@@ -378,18 +400,67 @@ export function WorktreeSidebar() {
         force,
       });
       // Orphaned shells no longer die on unmount, so reap them explicitly.
-      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
-        invoke("pty_kill", { id: pty }).catch(() => {});
-      }
+      dropShells();
       if (pid && pid !== useStore.getState().activeProjectId) {
         await refreshProjectList(pid, root);
       } else {
         await refreshList(true);
       }
     };
+    // Stale entry (git forgot the path): show the full path + repo, copy the
+    // path, offer reveal + prune. plugin-dialog has no 4-button row, so this
+    // is sequential confirms after the detail message — never a dead-end.
+    const handleStale = async (kind: "inside" | "outside", canonPath: string, repo: string) => {
+      const path = canonPath || wt.path;
+      const detail =
+        kind === "inside"
+          ? `Worktree is not registered with git.\nPath: ${path}\nRepo: ${repo || root}\nFolder is inside the managed dir and can be deleted safely.`
+          : `Worktree is not registered with git.\nPath: ${path}\nRepo: ${repo || root}\nOutside the managed dir, so it will not be deleted. Run \`git worktree prune\` to drop the stale entry or \`git worktree repair\` to re-register it.`;
+      void errorDialog(detail);
+      try {
+        await navigator.clipboard.writeText(path);
+      } catch {
+        /* clipboard unavailable */
+      }
+      if (await confirmDialog(`Reveal folder in explorer?\n${path}`)) {
+        try {
+          await invoke("fs_reveal", { path });
+        } catch (e) {
+          void errorDialog(`reveal failed: ${e}`);
+        }
+      }
+      if (kind === "inside") {
+        if (await confirmDialog(`Delete folder and prune now?\n${path}`)) {
+          try {
+            await runRemove(true);
+          } catch (e2) {
+            void errorDialog(`remove failed: ${e2}`);
+          }
+        }
+      } else {
+        if (await confirmDialog(`Prune stale entry now? Runs \`git worktree prune\` in ${repo || root}.`)) {
+          try {
+            await invoke("worktree_prune", { repoRoot: root });
+            dropShells();
+            if (pid && pid !== useStore.getState().activeProjectId) {
+              await refreshProjectList(pid, root);
+            } else {
+              await refreshList(true);
+            }
+          } catch (e2) {
+            void errorDialog(`prune failed: ${e2}`);
+          }
+        }
+      }
+    };
     try {
       await runRemove(false);
     } catch (e) {
+      const stale = parseRemoveStale(e);
+      if (stale) {
+        await handleStale(stale.kind, stale.path, stale.repo);
+        return;
+      }
       // The backend refuses to discard real work and names what is at stake:
       // uncommitted changes, unmerged commits, or both. Anything else is an
       // ordinary failure, not a reason to retry with force.
@@ -403,8 +474,32 @@ export function WorktreeSidebar() {
       try {
         await runRemove(true);
       } catch (e2) {
+        const stale2 = parseRemoveStale(e2);
+        if (stale2) {
+          await handleStale(stale2.kind, stale2.path, stale2.repo);
+          return;
+        }
         void errorDialog(`remove failed: ${e2}`);
       }
+    }
+  };
+
+  const pruneDiscovered = async (wt: Worktree, pid?: string) => {
+    const root = pid ? rootOf(pid) : repoRoot;
+    if (!root) return;
+    if (!(await confirmDialog(`Prune stale entry for "${wt.branch}"? Runs \`git worktree prune\`.`))) return;
+    try {
+      await invoke("worktree_prune", { repoRoot: root });
+      for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
+        invoke("pty_kill", { id: pty }).catch(() => {});
+      }
+      if (pid && pid !== useStore.getState().activeProjectId) {
+        await refreshProjectList(pid, root);
+      } else {
+        await refreshList(true);
+      }
+    } catch (e) {
+      void errorDialog(`prune failed: ${e}`);
     }
   };
 
@@ -561,10 +656,17 @@ export function WorktreeSidebar() {
       );
     }
     if (!wt.is_main && !wt.id.startsWith("plain:")) {
+      // Discovered rows outside our managed dir cannot be safely deleted, so
+      // offer prune instead of remove until repair succeeds.
+      const outsideManaged =
+        !wt.branch.startsWith("guimux/") &&
+        !wt.path.toLowerCase().includes(".guimux/worktrees");
       items.push(
         { label: "Merge into base", onSelect: () => void merge(wt, pid) },
         { label: "Abort merge", onSelect: () => void abortMerge(wt, pid) },
-        { label: "Remove worktree", onSelect: () => void remove(wt, pid) },
+        outsideManaged
+          ? { label: "Prune entry", onSelect: () => void pruneDiscovered(wt, pid) }
+          : { label: "Remove worktree", onSelect: () => void remove(wt, pid) },
       );
     }
     return items;

@@ -277,7 +277,52 @@ fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, S
             return Ok(target);
         }
     }
-    Err("worktree is not registered with git and is outside ~/.guimux/worktrees — delete it manually".into())
+    let canon = target.to_string_lossy().to_string();
+    Err(format!(
+        "GUIMUX_STALE_OUTSIDE path={canon} repo={} worktree is not registered with git and is outside the managed dir; will not delete. Run `git worktree prune` to drop the stale entry or `git worktree repair` to re-register it, then retry",
+        canon_root.to_string_lossy()
+    ))
+}
+
+/// Paths git currently knows, slash-normalized for `==` with worktree ids.
+fn registered_paths(root: &Path) -> Vec<String> {
+    let out = match git_cmd()
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(root)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .map(|p| norm_sep(p.to_string()))
+        .collect()
+}
+
+fn is_registered(root: &Path, id: &str) -> bool {
+    let want = norm_sep(id.to_string());
+    #[cfg(windows)]
+    {
+        registered_paths(root)
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&want))
+    }
+    #[cfg(not(windows))]
+    {
+        registered_paths(root).iter().any(|p| p == &want)
+    }
+}
+
+/// Stale classification for an id git no longer lists: canonical path plus
+/// whether it sits inside the managed `~/.guimux/worktrees` tree.
+fn classify_stale(main_root: &Path, path: &Path) -> (bool, String) {
+    let canon = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+    let inside = safe_manual_remove_target(main_root, path).is_ok();
+    (inside, canon)
 }
 
 fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
@@ -336,6 +381,37 @@ pub fn worktree_remove(
         let _ = run_git(&root, &["worktree", "prune"]);
         return Ok(());
     }
+    // Git already forgot this id (moved folder, deleted
+    // `.git/worktrees/<name>`, external `git worktree remove` without a
+    // refresh): fail structured so the UI can show the path, offer prune,
+    // and refresh — never a dead-end "delete it manually".
+    if !is_registered(&root, &id) {
+        let (inside, canon) = classify_stale(&root, &path);
+        let repo = root.to_string_lossy().to_string();
+        if inside {
+            if force {
+                let target = safe_manual_remove_target(&root, &path)?;
+                if let Err(e) = std::fs::remove_dir_all(&target) {
+                    return Err(format!(
+                        "worktree is not registered with git and folder cleanup failed (close terminals using it and retry): {e}"
+                    ));
+                }
+                let _ = run_git(&root, &["worktree", "prune"]);
+                if delete_branch {
+                    if let Some(b) = current_branch(&path).ok() {
+                        delete_branch_guarded(&root, &b, force);
+                    }
+                }
+                return Ok(());
+            }
+            return Err(format!(
+                "GUIMUX_STALE_INSIDE path={canon} repo={repo} worktree is not registered with git; folder is inside the managed dir and can be deleted. Retry with force to delete the folder and prune"
+            ));
+        }
+        return Err(format!(
+            "GUIMUX_STALE_OUTSIDE path={canon} repo={repo} worktree is not registered with git and is outside the managed dir; will not delete. Run `git worktree prune` to drop the stale entry or `git worktree repair` to re-register it, then retry"
+        ));
+    }
     // --force also discards uncommitted work, so refuse it until the caller
     // confirmed the loss. Ignored build output does not count as dirty.
     if !force {
@@ -390,9 +466,15 @@ pub fn worktree_remove(
         }
     }
     if last_err.contains("is not a working tree") {
-        // Git already forgot this path (stale lock/metadata, half-removed dir):
-        // delete the folder ourselves, prune, and drop the branch — but only
-        // inside our own worktrees dir (C-001).
+        // Raced to stale between the pre-check and remove: same structured
+        // path as above, so the UI never sees a dead-end string.
+        let (inside, canon) = classify_stale(&root, &path);
+        let repo = root.to_string_lossy().to_string();
+        if !inside {
+            return Err(format!(
+                "GUIMUX_STALE_OUTSIDE path={canon} repo={repo} worktree is not registered with git and is outside the managed dir; will not delete. Run `git worktree prune` to drop the stale entry or `git worktree repair` to re-register it, then retry"
+            ));
+        }
         let target = safe_manual_remove_target(&root, &path)?;
         if let Err(e) = std::fs::remove_dir_all(&target) {
             return Err(format!(
@@ -408,7 +490,11 @@ pub fn worktree_remove(
         return Ok(());
     }
     if !last_err.is_empty() {
-        return Err(last_err);
+        // Include the canonical path so the dialog never shows a bare id.
+        let canon = std::fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| id.clone());
+        return Err(format!("{} (path={canon})", last_err));
     }
     if delete_branch {
         if let Some(b) = branch {
@@ -417,6 +503,27 @@ pub fn worktree_remove(
         return Ok(());
     }
     Ok(())
+}
+
+#[command]
+pub fn worktree_prune(repo_root: String) -> Result<(), String> {
+    let anchor = PathBuf::from(&repo_root);
+    let root = find_main_worktree(&anchor).unwrap_or(anchor);
+    run_git(&root, &["worktree", "prune"])?;
+    Ok(())
+}
+
+#[command]
+pub fn worktree_repair(repo_root: String, path: Option<String>) -> Result<String, String> {
+    let anchor = PathBuf::from(&repo_root);
+    let root = find_main_worktree(&anchor).unwrap_or(anchor);
+    match path {
+        Some(p) if !p.trim().is_empty() => {
+            reject_git_ref(&p, "path")?;
+            run_git(&root, &["worktree", "repair", "--", p.trim()])
+        }
+        _ => run_git(&root, &["worktree", "repair"]),
+    }
 }
 
 #[command]
@@ -620,6 +727,45 @@ mod tests {
 
         worktree_remove(root.clone(), wt.id.clone(), true, Some(false)).unwrap();
         assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn stale_outside_returns_structured_error_and_keeps_folder() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let outside = std::env::temp_dir().join(format!(
+            "guimux-outside-{}-{}",
+            std::process::id(),
+            ID_CTR.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        let id = outside.to_string_lossy().to_string();
+        let err = worktree_remove(root.clone(), id, false, None).unwrap_err();
+        assert!(err.contains("GUIMUX_STALE_OUTSIDE"), "unexpected error: {err}");
+        assert!(err.contains("path="), "error must carry canonical path: {err}");
+        assert!(outside.exists());
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn missing_dir_prunes_to_ok() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let gone = repo.join("gone-wt");
+        assert!(!gone.exists());
+        worktree_remove(root.clone(), gone.to_string_lossy().to_string(), false, None).unwrap();
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn prune_and_repair_run() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        worktree_prune(root.clone()).unwrap();
+        let _ = worktree_repair(root.clone(), None);
         let _ = fs::remove_dir_all(&repo);
     }
 }
