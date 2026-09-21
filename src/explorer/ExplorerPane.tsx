@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import Editor from "@monaco-editor/react";
+import type { editor as MonacoEditor } from "monaco-editor";
 import { useStore } from "../store";
 import { announceWrite } from "../announceWrite";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { menuPos } from "../menuPos";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
-import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil } from "lucide-react";
-import type { FsNode } from "../types";
+import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
+import type { FsNode, GrepHit } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
 // when the tree needs type scanning at a glance.
@@ -180,6 +182,7 @@ function TreeNode({
 
 export function ExplorerPane({ root }: { root: string }) {
   const editorPath = useStore((s) => s.editorPath);
+  const editorTabs = useStore((s) => s.editorTabs);
   const diffMode = useStore((s) => s.diffMode);
   const openEditor = useStore((s) => s.openEditor);
   const closeEditor = useStore((s) => s.closeEditor);
@@ -194,6 +197,14 @@ export function ExplorerPane({ root }: { root: string }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [bulk, setBulk] = useState({ open: true, n: 0 });
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<GrepHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  // Jump-to-line after opening a search hit: applied once the editor mounts.
+  const [reveal, setReveal] = useState<{ path: string; lineno: number } | null>(null);
+  const [editorInstance, setEditorInstance] =
+    useState<MonacoEditor.IStandaloneCodeEditor | null>(null);
   // Bundled Monaco is most of the app bundle: fetch it the first time a file
   // is opened rather than at boot, where it delayed the first shell. The
   // import configures the loader, so it must finish before Editor renders.
@@ -227,6 +238,70 @@ export function ExplorerPane({ root }: { root: string }) {
       .then((t) => setTree(t))
       .catch(() => setTree(null));
   };
+
+  // External changes (git checkout, agent writes, another editor): the
+  // backend coalesces raw notify events to one `fs-changed` per 600ms of
+  // quiet; this side trails another 750ms so a burst still costs one walk.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    let unlisten: (() => void) | null = null;
+    invoke("fs_watch", { path: root }).catch(() => {});
+    listen<{ root: string }>("fs-changed", (ev) => {
+      if (cancelled || normSep(ev.payload.root) !== normSep(root)) return;
+      if (timer != null) clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        refreshTree();
+      }, 750);
+    })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (timer != null) clearTimeout(timer);
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root]);
+
+  // Content search over the worktree, debounced; needs 2+ chars.
+  useEffect(() => {
+    const q = query.trim();
+    if (!searchOpen || q.length < 2) {
+      setHits([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const t = window.setTimeout(() => {
+      invoke<GrepHit[]>("grep_search", { path: root, query: q })
+        .then((h) => {
+          setHits(h);
+          setSearching(false);
+        })
+        .catch(() => {
+          setHits([]);
+          setSearching(false);
+        });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query, searchOpen, root]);
+
+  // A search hit opens its file first; reveal the line once the editor holds it.
+  useEffect(() => {
+    if (!reveal || editorPath !== reveal.path || !editorInstance) return;
+    try {
+      editorInstance.revealLineInCenter(reveal.lineno);
+      editorInstance.setPosition({ lineNumber: reveal.lineno, column: 1 });
+    } catch {
+      /* disposed mid-open */
+    }
+    setReveal(null);
+  }, [reveal, editorPath, editorInstance]);
 
   // Click anywhere or Escape dismisses the file context menu.
   useEffect(() => {
@@ -309,14 +384,16 @@ export function ExplorerPane({ root }: { root: string }) {
   }, [root]);
 
   // Renaming a file out from under the URL bar input leaves a stale path;
-  // clear the draft when switching roots.
+  // clear the draft when switching roots. Tabs outside the new root drop;
+  // the survivor (if any) stays open instead of bouncing back to the tree.
   useEffect(() => {
     setRenaming(null);
     setMenu(null);
-    // This pane now shows another worktree: an editor still open on the
-    // previous one sits outside the tree with a nonsense relative name.
-    const open = useStore.getState().editorPath;
-    if (open && !inRoot(root, open)) useStore.getState().closeEditor();
+    const st = useStore.getState();
+    const open = st.editorPath;
+    if (open && !inRoot(root, open)) {
+      st.setEditorTabs(st.editorTabs.filter((t) => inRoot(root, t)));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -418,6 +495,10 @@ export function ExplorerPane({ root }: { root: string }) {
     }
     setSavedContent(content);
     setDirty(false);
+    // Own writes land through the watcher too, but a save can also create
+    // the file (untitled flow): refresh at once instead of waiting out the
+    // coalesce window.
+    refreshTree();
   };
   // Monaco's Ctrl+S handler is registered once in onMount, so it reads the
   // current save through a ref instead of a stale closure.
@@ -431,9 +512,22 @@ export function ExplorerPane({ root }: { root: string }) {
     setDirty(false);
   };
 
-  const closeEditorGuarded = async () => {
-    if (dirty && !(await confirmDialog("Discard unsaved changes?"))) return;
-    closeEditor();
+  const closeEditorGuarded = async (path?: string) => {
+    const target = path ?? editorPath;
+    if (!target) return;
+    // Live edits mirror into `buffers` on render; check both so a close
+    // issued between keystroke and mirror still guards.
+    const isDirty = buffers.get(target)?.dirty || (target === editorPath && dirty);
+    if (isDirty && !(await confirmDialog("Discard unsaved changes?"))) return;
+    buffers.delete(target);
+    closeEditor(target);
+  };
+
+  const tabName = (p: string) => {
+    const r = normSep(root);
+    const n = normSep(p);
+    const rel = n.startsWith(r + "/") ? n.slice(r.length + 1) : n;
+    return rel.split("/").pop() ?? rel;
   };
 
   const newFile = async () => {
@@ -536,6 +630,9 @@ export function ExplorerPane({ root }: { root: string }) {
             <button title="New file" aria-label="New file" className="gm-icon-btn gm-icon-btn--sm" onClick={() => void newFile()}>
               <FilePlus2 size={14} strokeWidth={2} />
             </button>
+            <button title="Search file contents" aria-label="Search file contents" aria-pressed={searchOpen} data-active={searchOpen} className="gm-icon-btn gm-icon-btn--sm" onClick={() => setSearchOpen((o) => !o)}>
+              <Search size={14} strokeWidth={2} />
+            </button>
             <button title="Refresh file tree" aria-label="Refresh file tree" className="gm-icon-btn gm-icon-btn--sm" onClick={refreshTree}>
               <RotateCcw size={13} strokeWidth={2} />
             </button>
@@ -544,8 +641,80 @@ export function ExplorerPane({ root }: { root: string }) {
         <div className="gm-meta tnum truncate px-4 pb-2" title={root}>
           {root}
         </div>
+        {searchOpen && (
+          <div className="mx-4 mb-1 flex items-center gap-1.5" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
+            <Search size={13} strokeWidth={2} className="shrink-0 text-ink-500" />
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setSearchOpen(false);
+                  setQuery("");
+                }
+              }}
+              placeholder="Search contents (2+ chars)"
+              aria-label="Search file contents"
+              className="w-full bg-transparent py-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+            />
+            {query && (
+              <button
+                className="gm-icon-btn gm-icon-btn--sm"
+                onClick={() => setQuery("")}
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                <X size={12} strokeWidth={2} />
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto px-2 pb-2">
-          {tree?.children?.length ? (
+          {searchOpen && query.trim().length >= 2 ? (
+            searching && hits.length === 0 ? (
+              <div className="px-2.5 py-2 text-[12px] text-ink-400">Searching…</div>
+            ) : hits.length > 0 ? (
+              <>
+                <div className="gm-meta tnum px-2.5 py-1">
+                  {hits.length}{hits.length >= 100 ? "+" : ""} match{hits.length === 1 ? "" : "es"}
+                </div>
+                {hits.map((h, i) => {
+                  const rel = normSep(h.path).startsWith(normSep(root) + "/")
+                    ? normSep(h.path).slice(normSep(root).length + 1)
+                    : h.path;
+                  const openHit = () => {
+                    openEditor(h.path, false);
+                    setReveal({ path: h.path, lineno: h.lineno });
+                  };
+                  return (
+                    <div
+                      key={`${h.path}:${h.lineno}:${i}`}
+                      role="button"
+                      tabIndex={0}
+                      className="gm-row cursor-pointer px-2.5 py-[5px]"
+                      onClick={openHit}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openHit();
+                        }
+                      }}
+                      title={`${h.path}:${h.lineno}`}
+                    >
+                      <div className="mono truncate text-[12px] text-ink-200">
+                        {rel}
+                        <span className="text-ink-500">:{h.lineno}</span>
+                      </div>
+                      <div className="mono truncate text-[11px] text-ink-400">{h.text}</div>
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              <div className="px-2.5 py-2 text-[12px] text-ink-400">No matches</div>
+            )
+          ) : tree?.children?.length ? (
             tree.children.map((c) => (
               <TreeNode key={c.path} node={c} depth={0} onOpen={(p) => openEditor(p, false)} root={root} {...renameRowProps} bulkOpen={bulk.open} bulkN={bulk.n} />
             ))
@@ -575,6 +744,58 @@ export function ExplorerPane({ root }: { root: string }) {
           style={{ background: "var(--gm-ink-mute)" }}
         />
       </div>
+      {editorTabs.length > 1 && (
+        <div
+          className="flex items-center gap-0.5 overflow-x-auto px-2 pt-1.5"
+          role="tablist"
+          aria-label="Open files"
+          style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}
+        >
+          {editorTabs.map((t) => {
+            const active = t === editorPath;
+            return (
+              <div
+                key={t}
+                role="tab"
+                aria-selected={active}
+                tabIndex={0}
+                title={t}
+                onClick={() => openEditor(t, false)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openEditor(t, false);
+                  }
+                }}
+                className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md px-2.5 py-1.5 text-[12px] ${
+                  active ? "font-semibold text-ink-100" : "font-medium text-ink-400 hover:text-ink-200"
+                }`}
+                style={active ? { background: "rgba(255,255,255,0.04)" } : undefined}
+              >
+                <span className="max-w-[140px] truncate">{tabName(t)}</span>
+                {buffers.get(t)?.dirty && (
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ background: "var(--gm-amber)" }}
+                    title="Unsaved changes"
+                  />
+                )}
+                <button
+                  className={`gm-icon-btn gm-icon-btn--sm -mr-1 focus-visible:opacity-100 ${active ? "" : "opacity-0 hover:opacity-100"}`}
+                  title={`Close ${tabName(t)}`}
+                  aria-label={`Close ${tabName(t)}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void closeEditorGuarded(t);
+                  }}
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div
         className="flex items-center justify-between gap-2 px-2.5 py-2"
       >
@@ -738,6 +959,9 @@ export function ExplorerPane({ root }: { root: string }) {
               setDirty(true);
             }}
             onMount={(editor, monaco) => {
+              // Instance in state (not a ref): setting it re-renders, which
+              // is what lets a pending search-hit reveal fire on first mount.
+              setEditorInstance(editor);
               monaco.editor.defineTheme("guimux-dark", {
                 base: "vs-dark",
                 inherit: true,

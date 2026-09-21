@@ -215,6 +215,7 @@ interface AppState {
   // editor
   editorOpen: boolean;
   editorPath: string | null;
+  editorTabs: string[];
   diffMode: boolean;
 
   // palette
@@ -253,7 +254,8 @@ interface AppState {
   toggleLeft: () => void;
   toggleRight: () => void;
   openEditor: (path: string | null, diff?: boolean) => void;
-  closeEditor: () => void;
+  closeEditor: (path?: string | null) => void;
+  setEditorTabs: (tabs: string[]) => void;
   setPaletteOpen: (open: boolean) => void;
   setSettings: (patch: Partial<Settings>) => void;
   hydrateSettings: (s: Settings) => void;
@@ -284,6 +286,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   editorOpen: false,
   editorPath: null,
+  editorTabs: [],
   diffMode: false,
 
   paletteOpen: false,
@@ -750,8 +753,33 @@ export const useStore = create<AppState>((set, get) => ({
       };
     }),
   openEditor: (path, diff = false) =>
-    set({ editorOpen: true, editorPath: path, diffMode: diff }),
-  closeEditor: () => set({ editorOpen: false, editorPath: null }),
+    set((s) => ({
+      editorOpen: true,
+      editorPath: path,
+      editorTabs: path ? [...s.editorTabs.filter((t) => t !== path), path].slice(-10) : s.editorTabs,
+      diffMode: diff,
+    })),
+  // No arg closes the active tab; a path closes that tab, activating the
+  // most recent survivor. Last tab out closes the editor.
+  closeEditor: (path) =>
+    set((s) => {
+      const target = path === undefined ? s.editorPath : path;
+      if (target == null) return { editorOpen: false, editorPath: null, editorTabs: [] };
+      const tabs = s.editorTabs.filter((t) => t !== target);
+      if (tabs.length === 0) return { editorOpen: false, editorPath: null, editorTabs: tabs };
+      const active = target === s.editorPath ? tabs[tabs.length - 1] : (s.editorPath ?? tabs[tabs.length - 1]);
+      return {
+        editorPath: tabs.includes(active) ? active : tabs[tabs.length - 1],
+        editorTabs: tabs,
+      };
+    }),
+  setEditorTabs: (tabs) =>
+    set((s) => {
+      const kept = tabs.filter((t, i) => tabs.indexOf(t) === i).slice(-10);
+      if (kept.length === 0) return { editorOpen: false, editorPath: null, editorTabs: kept };
+      const active = s.editorPath && kept.includes(s.editorPath) ? s.editorPath : kept[kept.length - 1];
+      return { editorPath: active, editorTabs: kept };
+    }),
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   hydrateSettings: (s) => set({ settings: { ...DEFAULT_SETTINGS, ...s } }),

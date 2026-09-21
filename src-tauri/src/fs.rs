@@ -3,12 +3,16 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tauri::command;
+use std::sync::{mpsc, Mutex};
+use notify::Watcher as _NotifyWatcher;
+use tauri::{command, AppHandle, Emitter};
 
 const MAX_FILE: u64 = 1_000_000; // skip files >1MB
 const MAX_WRITE: usize = 5_000_000; // fs_write cap: stops disk-fill, allows growth past read cap
 const MAX_CHILDREN: usize = 2000; // per-dir cap (H-002: 100k-file dirs froze the UI)
 const MAX_NODES: usize = 20_000; // whole-tree cap
+const MAX_GREP_FILES: usize = 20_000; // scanned files per search
+const MAX_GREP_HITS: usize = 200; // hits per search
 const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "__pycache__"];
 /// Windows reserved names (also `NUL.txt`): open/read would block the IPC thread.
 const RESERVED: &[&str] = &[
@@ -261,6 +265,238 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
         .unwrap_or_else(|| "rename failed".into()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrepHit {
+    pub path: String,
+    pub lineno: u32,
+    pub text: String,
+}
+
+fn grep_visible(name: &str) -> bool {
+    // Same ignore rules as the tree: build output, dotfiles (minus .github)
+    // and device names never match.
+    if IGNORED.contains(&name) {
+        return false;
+    }
+    if name.starts_with('.') && name != ".github" {
+        return false;
+    }
+    true
+}
+
+#[command]
+pub fn grep_search(
+    path: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    limit: Option<u32>,
+) -> Result<Vec<GrepHit>, String> {
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let q = query.trim();
+    if q.is_empty() || q.len() > 200 {
+        return Err("query must be 1-200 chars".into());
+    }
+    let case_sensitive = case_sensitive.unwrap_or(false);
+    let needle = if case_sensitive { q.to_string() } else { q.to_lowercase() };
+    let cap = limit.unwrap_or(100).clamp(1, MAX_GREP_HITS as u32) as usize;
+    let mut hits = vec![];
+    let mut scanned = 0usize;
+    let mut stack = vec![root];
+    // Iterative walk: same skip rules as fs_tree, regular files only
+    // (symlinks listed, never followed). Stops at the hit cap or the scan
+    // budget, whichever comes first — a node_modules-heavy root otherwise
+    // blocks the IPC thread for seconds.
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            if hits.len() >= cap || scanned >= MAX_GREP_FILES {
+                break;
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !grep_visible(&name) {
+                continue;
+            }
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_symlink() {
+                continue;
+            }
+            if ftype.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            scanned += 1;
+            let fpath = entry.path();
+            let meta = match fs::metadata(&fpath) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.len() > MAX_FILE {
+                continue;
+            }
+            let bytes = match fs::read(&fpath) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            // Binary probe: a NUL in the head means not text.
+            if bytes.iter().take(8192).any(|&b| b == 0) {
+                continue;
+            }
+            let text = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let pstr = fpath.to_string_lossy().to_string();
+            if case_sensitive {
+                for (i, line) in text.lines().enumerate() {
+                    if hits.len() >= cap {
+                        break;
+                    }
+                    if line.contains(&needle) {
+                        hits.push(GrepHit {
+                            path: pstr.clone(),
+                            lineno: (i + 1) as u32,
+                            text: line.trim().chars().take(200).collect::<String>(),
+                        });
+                    }
+                }
+            } else {
+                let low = text.to_lowercase();
+                for ((i, line), (_, lline)) in text.lines().enumerate().zip(low.lines().enumerate()) {
+                    if hits.len() >= cap {
+                        break;
+                    }
+                    if lline.contains(&needle) {
+                        hits.push(GrepHit {
+                            path: pstr.clone(),
+                            lineno: (i + 1) as u32,
+                            text: line.trim().chars().take(200).collect::<String>(),
+                        });
+                    }
+                }
+            }
+        }
+        if hits.len() >= cap || scanned >= MAX_GREP_FILES {
+            break;
+        }
+    }
+    Ok(hits)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsChanged {
+    pub root: String,
+}
+
+// Recursive watches, one per root at most. Roots stay registered for the app
+// lifetime (cap 16, oldest evicted): worktree switches re-subscribe faster
+// than teardown + re-arm, and an idle watcher costs one thread.
+static WATCHERS: std::sync::LazyLock<Mutex<WatchedRoots>> =
+    std::sync::LazyLock::new(|| Mutex::new(WatchedRoots::default()));
+
+#[derive(Default)]
+struct WatchedRoots {
+    order: Vec<String>,
+    live: std::collections::HashMap<String, notify::RecommendedWatcher>,
+}
+
+static COALESCE_TX: std::sync::LazyLock<Mutex<Option<mpsc::Sender<String>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+fn coalesce_tx(app: &AppHandle) -> mpsc::Sender<String> {
+    let mut slot = COALESCE_TX.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = slot.clone() {
+        return tx;
+    }
+    let (tx, rx) = mpsc::channel::<String>();
+    let app = app.clone();
+    // One thread for all roots: trailing-edge 600ms coalescing per root, so
+    // a `git checkout` (hundreds of writes) delivers one `fs-changed`.
+    std::thread::spawn(move || {
+        let mut pending: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let quiet = std::time::Duration::from_millis(600);
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(150)) {
+                Ok(root) => {
+                    pending.insert(root, std::time::Instant::now() + quiet);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let now = std::time::Instant::now();
+            let due: Vec<String> = pending
+                .iter()
+                .filter(|(_, at)| **at <= now)
+                .map(|(r, _)| r.clone())
+                .collect();
+            for root in due {
+                pending.remove(&root);
+                let _ = app.emit("fs-changed", FsChanged { root });
+            }
+        }
+    });
+    *slot = Some(tx.clone());
+    tx
+}
+
+#[command]
+pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    // Slash-normalized like every other path id, so the frontend's `==`
+    // against worktree roots holds on Windows.
+    let root = p.to_string_lossy().replace('\\', "/");
+    {
+        let map = WATCHERS.lock().unwrap_or_else(|e| e.into_inner());
+        if map.live.contains_key(&root) {
+            return Ok(());
+        }
+    }
+    let tx = coalesce_tx(&app);
+    let fire = root.clone();
+    let mut watcher = notify::RecommendedWatcher::new(
+        move |res: Result<notify::Event, notify::Error>| {
+            if res.is_ok() {
+                let _ = tx.send(fire.clone());
+            }
+        },
+        notify::Config::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    watcher
+        .watch(&p, notify::RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    let mut map = WATCHERS.lock().unwrap_or_else(|e| e.into_inner());
+    if map.live.len() >= 16 {
+        if let Some(old) = map.order.first().cloned() {
+            map.order.remove(0);
+            map.live.remove(&old);
+        }
+    }
+    // Re-check under the same lock: two panes racing fs_watch on one root
+    // would otherwise arm it twice (the loser's watcher just drops).
+    if !map.live.contains_key(&root) {
+        map.order.push(root.clone());
+        map.live.insert(root, watcher);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +542,25 @@ mod tests {
         let kids = node.children.unwrap();
         assert_eq!(kids.len(), MAX_CHILDREN);
         assert!(node.truncated);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_finds_text_skips_binary_and_dotfiles() {
+        let dir = std::env::temp_dir().join(format!("guimux-grep-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        fs::write(dir.join("a.txt"), "hello world\nsecond line\n").unwrap();
+        fs::write(dir.join("b.txt"), "nothing here\n").unwrap();
+        fs::write(dir.join("bin.dat"), b"hel\x00lo".to_vec()).unwrap();
+        fs::write(dir.join(".hidden"), "hello hidden\n").unwrap();
+        let hits = grep_search(root.clone(), "hello".into(), None, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].lineno, 1);
+        assert!(hits[0].path.ends_with("a.txt"));
+        assert!(grep_search(root.clone(), "   ".into(), None, None).is_err());
+        assert!(grep_search(root, "HELLO".into(), Some(true), None).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }
