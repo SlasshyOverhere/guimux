@@ -1,6 +1,6 @@
 import type { KeyboardEvent, MouseEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
-import type { FileStatus, Worktree } from "../types";
+import type { AheadBehind, FileStatus, Worktree } from "../types";
 
 // One row shape for every worktree in the panel: selected rail, branch line,
 // status cluster, and a hover actions button. A context menu alone leaves the
@@ -32,6 +32,8 @@ interface Props {
   /** Porcelain entries, or null when status has not been read yet. Omitted
    *  entirely for rows that never show a cluster (sleeping, discovered). */
   status?: FileStatus[] | null;
+  /** Ahead/behind vs upstream (or main). Null = not read yet; hidden then. */
+  aheadBehind?: AheadBehind | null;
   pinned?: boolean;
   /** Sleeping rows read quieter without leaving the list. */
   dim?: boolean;
@@ -45,6 +47,7 @@ export function WorktreeRow({
   onMenu,
   selected = false,
   status,
+  aheadBehind,
   pinned = false,
   dim = false,
   compact = false,
@@ -52,6 +55,9 @@ export function WorktreeRow({
   const plainRow = wt.id.startsWith("plain:");
   const known = status !== undefined && status !== null;
   const dirty = status?.length ?? 0;
+  const abAhead = aheadBehind?.ahead ?? 0;
+  const abBehind = aheadBehind?.behind ?? 0;
+  const showAb = aheadBehind != null && (abAhead > 0 || abBehind > 0);
 
   return (
     <div
@@ -92,6 +98,14 @@ export function WorktreeRow({
             ) : (
               <span className="gm-meta tnum">clean</span>
             )}
+          </span>
+        )}
+        {showAb && (
+          <span
+            className="tnum flex-none text-[11px] text-ink-500"
+            title={abBehind > 0 ? `${abAhead} ahead, ${abBehind} behind` : `${abAhead} ahead`}
+          >
+            {abAhead > 0 ? `↑${abAhead}` : ""}{abAhead > 0 && abBehind > 0 ? " " : ""}{abBehind > 0 ? `↓${abBehind}` : ""}
           </span>
         )}
         <button

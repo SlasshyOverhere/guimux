@@ -17,14 +17,14 @@ import { parseRemoveGuard } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { confirmDialog, errorDialog } from "../dialogs";
-import type { Project, Worktree } from "../types";
+import type { AheadBehind, Project, Worktree } from "../types";
 
 // One listing at a time: two in-flight `worktree_list` calls race to write the
 // same store slice, and the loser is whichever finished last.
 const listGuard = createSingleFlight();
 
 // Menu boxes, sized to their item count, used to keep them inside the viewport.
-const ROW_MENU_SIZE = { w: 192, h: 214 };
+const ROW_MENU_SIZE = { w: 192, h: 278 };
 const PROJECT_MENU_SIZE = { w: 216, h: 126 };
 
 // One popover serves both menus: a worktree row's actions, and a project's.
@@ -169,6 +169,83 @@ export function WorktreeSidebar() {
   // Must run before any conditional return and after isGit exists: `empty` is
   // not `clean`, so the panel needs to know whether status has landed.
   const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
+
+  // Ahead/behind vs upstream (or main): read once per repo, not on the 8s
+  // status tick — it only moves on commit/push/fetch/merge. Unknown rows
+  // stay badge-less rather than claiming 0.
+  const [aheadBehind, setAheadBehind] = useState<Record<string, AheadBehind>>({});
+  const [gitBusy, setGitBusy] = useState<string | null>(null);
+  const [commitMsg, setCommitMsg] = useState("");
+  const refreshAheadBehind = async () => {
+    const st = useStore.getState();
+    const rows = st.worktrees.filter((wt) => !wt.id.startsWith("plain:"));
+    if (rows.length === 0) return;
+    const next: Record<string, AheadBehind> = {};
+    for (const [i, wt] of rows.entries()) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 100));
+      try {
+        next[wt.id] = await invoke<AheadBehind>("git_ahead_behind", { path: wt.path });
+      } catch {
+        /* unreadable row: leave it badge-less */
+      }
+    }
+    setAheadBehind((prev) => ({ ...prev, ...next }));
+  };
+
+  useEffect(() => {
+    setAheadBehind({});
+    if (!repoRoot || !isGit) return;
+    let cancelled = false;
+    // Status owns the startup window; ahead/behind catches up after.
+    const t = setTimeout(() => {
+      if (!cancelled && !document.hidden) void refreshAheadBehind();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot, isGit]);
+
+  const pushPath = async (path: string) => {
+    setGitBusy(`push:${path}`);
+    try {
+      await invoke("git_push", { path });
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`push failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
+
+  const fetchPath = async (path: string) => {
+    setGitBusy(`fetch:${path}`);
+    try {
+      await invoke("git_fetch", { path });
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`fetch failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
+
+  const commitActive = async () => {
+    const wt = useStore.getState().worktrees.find((w) => w.id === useStore.getState().activeWorktreeId);
+    const msg = commitMsg.trim();
+    if (!wt || !msg) return;
+    setGitBusy(`commit:${wt.id}`);
+    try {
+      await invoke("git_commit", { path: wt.path, message: msg, stageAll: true });
+      setCommitMsg("");
+      await refreshAheadBehind();
+    } catch (e) {
+      void errorDialog(`commit failed: ${e}`);
+    } finally {
+      setGitBusy(null);
+    }
+  };
 
   // `immediate` skips the deferral below, because an explicit user action such
   // as create or remove is not racing App's loader and should not wait 1.5s to
@@ -341,6 +418,7 @@ export function WorktreeSidebar() {
       } else {
         await refreshList(true);
       }
+      await refreshAheadBehind();
     } catch (e) {
       void errorDialog(`merge failed: ${e}`);
     }
@@ -355,6 +433,7 @@ export function WorktreeSidebar() {
       } else {
         await refreshList(true);
       }
+      await refreshAheadBehind();
     } catch (e) {
       void errorDialog(`abort failed: ${e}`);
     }
@@ -475,6 +554,12 @@ export function WorktreeSidebar() {
       { label: pinned[wt.id] ? "Unpin" : "Pin to top", onSelect: () => togglePin(wt.id) },
       { label: "Copy path", onSelect: () => void copyPath(wt.path) },
     ];
+    if (!wt.id.startsWith("plain:")) {
+      items.push(
+        { label: "Push", onSelect: () => void pushPath(wt.path) },
+        { label: "Fetch", onSelect: () => void fetchPath(wt.path) },
+      );
+    }
     if (!wt.is_main && !wt.id.startsWith("plain:")) {
       items.push(
         { label: "Merge into base", onSelect: () => void merge(wt, pid) },
@@ -542,6 +627,7 @@ export function WorktreeSidebar() {
       // Other projects' status is never read here: omit the cluster rather
       // than claim anything about rows we have not looked at.
       status={pid ? undefined : statuses[wt.id] ?? null}
+      aheadBehind={pid ? undefined : (aheadBehind[wt.id] ?? null)}
       onOpen={() => (pid ? openProjectWorktree(pid, wt.id) : setActiveWorktree(wt.id))}
       onMenu={(at) => setMenu({ kind: "row", ...at, wt, pid })}
     />
@@ -820,7 +906,52 @@ export function WorktreeSidebar() {
                   : activeStatuses.length === 0
                     ? "is clean."
                     : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
+                {(() => {
+                  const ab = aheadBehind[activeWt.id];
+                  if (!ab || (ab.ahead === 0 && ab.behind === 0)) return "";
+                  return ` · ${ab.ahead > 0 ? `↑${ab.ahead}` : ""}${ab.ahead > 0 && ab.behind > 0 ? " " : ""}${ab.behind > 0 ? `↓${ab.behind}` : ""}`;
+                })()}
               </span>
+            </div>
+          )}
+          {isGit && activeWt && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+              <input
+                value={commitMsg}
+                onChange={(e) => setCommitMsg(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void commitActive();
+                }}
+                placeholder="Commit message — stages all"
+                aria-label="Commit message"
+                className="mono min-w-0 flex-1 rounded border bg-ink-950 px-1.5 py-1 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+                style={{ borderColor: "var(--gm-hairline)" }}
+              />
+              <button
+                title="Stage all and commit"
+                disabled={!commitMsg.trim() || gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
+                style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
+                onClick={() => void commitActive()}
+              >
+                {gitBusy?.startsWith("commit:") ? "…" : "Commit"}
+              </button>
+              <button
+                title="Push current branch"
+                disabled={gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
+                onClick={() => void pushPath(activeWt.path)}
+              >
+                {gitBusy?.startsWith("push:") ? "…" : "Push"}
+              </button>
+              <button
+                title="Fetch and prune"
+                disabled={gitBusy != null}
+                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
+                onClick={() => void fetchPath(activeWt.path)}
+              >
+                {gitBusy?.startsWith("fetch:") ? "…" : "Fetch"}
+              </button>
             </div>
           )}
           {isGit && !activeWt && <div className="gm-meta px-2.5 py-2">No active worktree.</div>}

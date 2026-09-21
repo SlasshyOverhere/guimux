@@ -26,6 +26,11 @@ export interface FileStatus {
   workdir_status: string;
 }
 
+export interface AheadBehind {
+  ahead: number;
+  behind: number;
+}
+
 export interface FsNode {
   name: string;
   path: string;
