@@ -48,6 +48,14 @@ export const flagMap = (v: unknown): Record<string, true> | null => {
   return out;
 };
 
+/** Like flagMap but preserves explicit `false` values (for toggle states). */
+export const boolFlagMap = (v: unknown): Record<string, boolean> | null => {
+  if (!isRecord(v)) return null;
+  const out: Record<string, boolean> = {};
+  for (const [k, val] of Object.entries(v)) if (typeof val === "boolean") out[k] = val;
+  return out;
+};
+
 /** `{ projectId: string[] }` maps (the hidden-worktree baseline). */
 export const stringArrayMap = (v: unknown): Record<string, string[]> | null => {
   if (!isRecord(v)) return null;

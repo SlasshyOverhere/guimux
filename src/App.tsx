@@ -7,7 +7,6 @@ import {
   FolderOpen,
   Folder,
   X,
-  Plus,
   House as HomeIcon,
   Settings as SettingsIcon,
   Bot,
@@ -77,11 +76,7 @@ function barDoubleClick(e: React.MouseEvent) {
   }).catch(() => {});
 }
 
-function Topbar({ onAdd }: { onAdd: () => void }) {
-  const projects = useStore((s) => s.projects);
-  const activeProjectId = useStore((s) => s.activeProjectId);
-  const setActiveProject = useStore((s) => s.setActiveProject);
-  const removeProject = useStore((s) => s.removeProject);
+function Topbar() {
   const worktrees = useStore((s) => s.worktrees);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
@@ -90,35 +85,7 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
   const rightVisible = useStore((s) => s.rightVisible);
   const toggleLeft = useStore((s) => s.toggleLeft);
   const toggleRight = useStore((s) => s.toggleRight);
-  const proj = projects.find((p) => p.id === activeProjectId) ?? null;
   const wt = worktrees.find((w) => w.id === activeWorktreeId);
-  const [projOpen, setProjOpen] = useState(false);
-
-  // Escape + pointer-down-outside close the project dropdown.
-  // pointerdown (not click): a real click-outside that works even when the
-  // click itself is swallowed, and it closes before the row's click fires.
-  useEffect(() => {
-    if (!projOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setProjOpen(false);
-    };
-    // mousedown (not pointerdown): synthetic PointerEvents dispatched via
-    // JS do not trigger real pointerdown listeners in this WebView, but
-    // real mousedown always fires for real clicks, so gate on that.
-    const onDown = (e: MouseEvent) => {
-      // The click-outside overlay covers the screen but lives INSIDE the
-      // menu root, so exempt it: a press on it is definitionally outside.
-      const t = e.target as HTMLElement;
-      if (t.closest("[data-menu-root]") && !t.closest("[data-outside]")) return;
-      setProjOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("mousedown", onDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("mousedown", onDown, true);
-    };
-  }, [projOpen]);
 
   return (
     <div
@@ -151,97 +118,6 @@ function Topbar({ onAdd }: { onAdd: () => void }) {
       >
         {leftVisible ? <PanelLeftClose size={14} strokeWidth={2} /> : <PanelLeftOpen size={14} strokeWidth={2} />}
       </button>
-
-      {/* project picker, left */}
-      <div className="relative" data-menu-root style={{ zIndex: projOpen ? 50 : undefined }}>
-        <button
-          className="gm-icon-btn h-[30px] max-w-[220px] gap-2 px-2 text-[12.5px] font-medium text-ink-200"
-          style={{ width: "auto" }}
-          onClick={() => setProjOpen(!projOpen)}
-          title={proj?.path ?? "No project open"}
-          aria-haspopup="menu"
-          aria-expanded={projOpen}
-        >
-          {proj?.isGit ? (
-            <GitBranch size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
-          ) : (
-            <Folder size={14} className="shrink-0 text-ink-400" strokeWidth={2} />
-          )}
-          <span className="truncate">{proj ? proj.name : "No project"}</span>
-        </button>
-        {projOpen && (
-          <>
-            <div className="fixed inset-0 z-30" data-no-drag data-outside />
-            <div
-              className="gm-menu absolute left-0 top-9 z-40 w-80"
-            >
-              <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-ink-400">
-                Projects
-              </div>
-              {projects.map((p) => (
-                <div
-                  key={p.id}
-                  role="button"
-                  tabIndex={0}
-                  data-selected={p.id === activeProjectId}
-                  className="gm-row group mx-1 flex cursor-pointer items-center gap-2.5 px-2 py-2"
-                  onClick={() => {
-                    setActiveProject(p.id);
-                    setProjOpen(false);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setActiveProject(p.id);
-                      setProjOpen(false);
-                    }
-                  }}
-                >
-                  {p.isGit ? (
-                    <GitBranch
-                      size={14}
-                      strokeWidth={2}
-                      className="shrink-0 text-ink-400"
-                    />
-                  ) : (
-                    <Folder size={14} strokeWidth={2} className="shrink-0 text-ink-400" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={`truncate text-[12.5px] ${
-                        p.id === activeProjectId ? "font-semibold text-ink-100" : "font-medium text-ink-200"
-                      }`}
-                    >
-                      {p.name}
-                    </div>
-                    <div className="truncate text-[11px] text-ink-500">{p.path}</div>
-                  </div>
-                  <button
-                    title="Remove project"
-                    className="hidden shrink-0 rounded-md p-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-clay-400 group-hover:block"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeProject(p.id);
-                    }}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))}
-              <button
-                className="gm-menu-item mt-1 text-[12.5px]"
-                style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
-                onClick={() => {
-                  setProjOpen(false);
-                  onAdd();
-                }}
-              >
-                <Plus size={14} strokeWidth={2} className="text-ink-400" /> Open folder or repository
-              </button>
-            </div>
-          </>
-        )}
-      </div>
 
       {/* session title: centered worktree, the document of this app */}
       {wt ? (
@@ -731,7 +607,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <Topbar onAdd={addFolder} />
+      <Topbar />
       {repoError && (
         <div
           className="flex shrink-0 items-center gap-2 px-3 py-1.5 text-[11.5px]"
