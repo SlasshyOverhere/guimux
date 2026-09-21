@@ -69,7 +69,7 @@ export function WorktreeRow({
       tabIndex={0}
       aria-pressed={selected}
       data-selected={selected}
-      className={`gm-row group/row cursor-pointer px-2.5 py-1.5 ${dim ? "opacity-60 hover:opacity-100" : ""}`}
+      className={`gm-row gm-wt-row group/row cursor-pointer px-3 py-2 ${dim ? "opacity-60 hover:opacity-100" : ""}`}
       onClick={onOpen}
       onKeyDown={rowKey(onOpen)}
       onContextMenu={(e) => {
@@ -79,16 +79,16 @@ export function WorktreeRow({
       }}
       title={`${wt.branch}\n${wt.path}\nRight-click, or use the row button, for actions.`}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2">
         {/* Status dot */}
         <span
-          className="h-1.5 w-1.5 flex-none rounded-full"
+          className="h-2 w-2 flex-none rounded-full"
           style={{ backgroundColor: statusColor }}
           title={!known ? "Status not read yet" : dirty > 0 ? `${dirty} changed ${dirty === 1 ? "file" : "files"}` : "Clean"}
         />
         <span
-          className={`min-w-0 flex-1 truncate text-[13px] ${
-            selected ? "font-medium text-ink-100" : "text-ink-200"
+          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
+            selected ? "text-ink-100" : "text-ink-200"
           }`}
         >
           {wt.branch}
@@ -107,7 +107,7 @@ export function WorktreeRow({
           </span>
         )}
         <button
-          className="gm-icon-btn gm-icon-btn--sm -my-0.5 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+          className={`gm-icon-btn gm-icon-btn--sm -my-0.5 focus-visible:opacity-100 ${selected ? "opacity-100" : "opacity-0 group-hover/row:opacity-100"}`}
           aria-label={`Actions for ${wt.branch}`}
           aria-haspopup="menu"
           onClick={(e: MouseEvent<HTMLButtonElement>) => {
@@ -122,7 +122,7 @@ export function WorktreeRow({
         </button>
       </div>
       {!compact && (
-        <div className="mt-0.5 truncate pl-3 text-[11px] text-ink-500" title={slash(wt.path)}>
+        <div className="mt-1 truncate pl-4 text-[11.5px] text-ink-500" title={slash(wt.path)}>
           {shortPath(wt.path, wt.is_main)}
         </div>
       )}

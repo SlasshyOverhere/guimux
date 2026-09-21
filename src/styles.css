@@ -235,6 +235,19 @@ textarea,
   box-shadow: inset 2px 0 0 var(--gm-ink-mute);
 }
 
+/* Sidebar worktree rows: card rows with a transparent border, so the selected
+   state can carry a hairline without shifting layout on select. */
+.gm-wt-row {
+  border: 1px solid transparent;
+}
+.gm-wt-row[data-selected="true"] {
+  background: var(--gm-panel);
+  border-color: var(--gm-hairline);
+}
+.gm-wt-row[data-selected="true"]:hover {
+  background: var(--gm-panel);
+}
+
 /* Panel section label: the one heading style in a list panel. */
 .gm-sect {
   font-size: 10.5px;

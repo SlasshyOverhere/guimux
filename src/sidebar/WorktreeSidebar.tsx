@@ -874,7 +874,7 @@ export function WorktreeSidebar() {
       </div>
 
       {tab === "worktrees" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
           {!proj && (
             <div className="px-3 py-8 text-center">
               <div className="text-[12px] text-ink-300">No projects yet.</div>
@@ -903,12 +903,12 @@ export function WorktreeSidebar() {
             // Active project defaults open but can be collapsed via projOpen.
             const open = isActive ? projOpen[p.id] !== false : !!projOpen[p.id];
             return (
-              <div key={p.id} className={isActive ? "" : "mt-0.5"}>
+              <div key={p.id} className={isActive ? "" : "mt-1"}>
                 <div
                   role="button"
                   tabIndex={0}
                   aria-expanded={open}
-                  className="gm-row group/proj flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-2"
+                  className="gm-row group/proj flex w-full cursor-pointer items-center gap-2 px-2.5 py-2"
                   onClick={() => toggleProjOpen(p.id)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -927,7 +927,14 @@ export function WorktreeSidebar() {
                     strokeWidth={2}
                     className={`shrink-0 text-ink-500 transition-transform ${open ? "rotate-90" : ""}`}
                   />
-                  <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink-100">
+                  <span
+                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                    aria-hidden
+                  >
+                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink-100">
                     {p.name}
                   </span>
                   <span className="tnum gm-meta flex-none">{visible.length}</span>
@@ -935,7 +942,7 @@ export function WorktreeSidebar() {
                   {projActions(p.id, p.name)}
                 </div>
                 {open && (
-                  <div className={isActive ? "" : "pb-0.5 pl-4"}>
+                  <div className={`space-y-[3px] ${isActive ? "" : "pb-0.5 pl-4"}`}>
                     {visible.map((wt) => row(wt, isActive ? undefined : p.id))}
                     {isActive && isGit && (
                       <DiscoveredBlock
@@ -976,13 +983,20 @@ export function WorktreeSidebar() {
             return (
               <div key={p.id} className="mt-1">
                 <div
-                  className="group/proj flex items-center gap-1 px-2.5 pb-0.5 pt-2 text-[12px] font-semibold text-ink-100"
+                  className="group/proj flex items-center gap-2 px-2.5 pb-1 pt-2 text-[12.5px] font-semibold text-ink-100"
                   title={p.path}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
                   }}
                 >
+                  <span
+                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
+                    style={{ background: "rgba(255,255,255,0.06)" }}
+                    aria-hidden
+                  >
+                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
+                  </span>
                   <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
                   {newWorktreeBtn(p)}
