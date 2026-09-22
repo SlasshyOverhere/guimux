@@ -80,7 +80,9 @@ fn current_branch(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-#[command]
+// (async): git spawns block for seconds; keep them off the main thread or
+// the whole UI freezes (preflight/refresh wrap every delete).
+#[command(async)]
 pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
     let root = PathBuf::from(&repo_root);
     if !root.exists() {
@@ -359,7 +361,9 @@ fn norm_sep(s: String) -> String {
     s
 }
 
-#[command]
+// (async): status checks + up to 2s retry sleeps + recursive dir delete
+// would freeze the app for ~5s on the main thread.
+#[command(async)]
 pub fn worktree_remove(
     repo_root: String,
     id: String,
