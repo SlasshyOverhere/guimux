@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::command;
 
@@ -233,18 +235,44 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     let mut child = git_cmd()
         .args(args)
         .current_dir(repo)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "[git] failed to spawn".to_string())?;
+    let stdout = child.stdout.take().ok_or("git stdout pipe unavailable")?;
+    let stderr = child.stderr.take().ok_or("git stderr pipe unavailable")?;
+    let child = Arc::new(Mutex::new(child));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watchdog_child = Arc::clone(&child);
+    let watchdog_timeout = Arc::clone(&timed_out);
+    let watchdog = std::thread::spawn(move || {
+        let deadline = Instant::now() + GIT_TIMEOUT;
+        loop {
+            let done = {
+                let mut child = watchdog_child.lock().unwrap_or_else(|e| e.into_inner());
+                matches!(child.try_wait(), Ok(Some(_)))
+            };
+            if done || Instant::now() >= deadline {
+                if !done {
+                    watchdog_timeout.store(true, Ordering::SeqCst);
+                    let _ = watchdog_child
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .kill();
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
     // Drain stderr on its own thread: reading it after wait() would deadlock
     // if git ever filled the pipe while we were still reading stdout.
-    let err_thread = child.stderr.take().map(|e| {
-        std::thread::spawn(move || read_capped(e, STDERR_CAP))
-    });
+    let err_thread = std::thread::spawn(move || read_capped(stderr, STDERR_CAP));
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
-    if let Some(mut out) = child.stdout.take() {
+    {
+        let mut out = stdout;
         let mut chunk = [0u8; 32 * 1024];
         while buf.len() < cap {
             match out.read(&mut chunk) {
@@ -269,12 +297,21 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
         }
     }
     if truncated {
-        let _ = child.kill();
+        let _ = child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .kill();
     }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let (stderr, stderr_truncated) = err_thread
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
+    let status = child
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .wait()
+        .map_err(|e| e.to_string())?;
+    let _ = watchdog.join();
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(format!("git {} timed out after {}s", args.join(" "), GIT_TIMEOUT.as_secs()));
+    }
+    let (stderr, stderr_truncated) = err_thread.join().unwrap_or_default();
     if !truncated && !status.success() {
         let mut message = String::from_utf8_lossy(&stderr).trim().to_string();
         if stderr_truncated {
@@ -502,6 +539,29 @@ mod tests {
         fs::write(dir.join("b.txt"), "other").unwrap();
         let scoped = git_diff(dir.to_string_lossy().to_string(), None, Some("a.txt".into())).unwrap();
         assert!(!scoped.contains("other"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capped_diff_stops_at_requested_cap() {
+        let dir = std::env::temp_dir().join(format!("guimux-git-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&dir).output().unwrap();
+        }
+        fs::write(dir.join("a.txt"), "a".repeat(4096)).unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&dir).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().unwrap();
+        fs::write(dir.join("a.txt"), "b".repeat(4096)).unwrap();
+
+        let (diff, truncated) = git_capped(&dir, &["diff", "--"], 128).unwrap();
+        assert!(truncated);
+        assert!(diff.len() <= 128);
         let _ = fs::remove_dir_all(&dir);
     }
 
