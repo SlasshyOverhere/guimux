@@ -130,7 +130,12 @@ export function AgentLauncher() {
         ],
       });
     }
-    launchAgents(items);
+    const launched = launchAgents(items);
+    if (launched < total) {
+      void errorDialog(
+        `Only ${launched} of ${total} tiles fit in this worktree. Close a pane and launch again.`,
+      );
+    }
     setCustomName("");
     setCustomCmd("");
     setCustomFlags("");

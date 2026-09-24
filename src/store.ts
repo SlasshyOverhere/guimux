@@ -243,7 +243,7 @@ interface AppState {
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
-  launchAgents: (items: { command: string; count: number }[]) => void;
+  launchAgents: (items: { command: string; count: number }[]) => number;
   dropWorktreeLayout: (id: string) => number[];
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
@@ -611,11 +611,11 @@ export const useStore = create<AppState>((set, get) => ({
   // and truncate below ~50, so width is sacred and height is spent instead.
   launchAgents: (items) => {
     const { activeWorktreeId, layouts, layout } = get();
-    if (!activeWorktreeId) return;
+    if (!activeWorktreeId) return 0;
     const cur = layouts[activeWorktreeId] ?? layout;
     const existing = cur ? collectPaneObjs(cur) : [];
     const room = Math.max(0, 12 - existing.length);
-    if (room <= 0) return;
+    if (room <= 0) return 0;
     const cmds: string[] = [];
     for (const item of items) {
       const cmd = item.command.trim();
@@ -623,7 +623,7 @@ export const useStore = create<AppState>((set, get) => ({
       const n = Math.min(6, Math.max(1, Math.floor(item.count) || 1));
       for (let i = 0; i < n; i++) cmds.push(cmd);
     }
-    if (cmds.length === 0) return;
+    if (cmds.length === 0) return 0;
     // Empty panes (prompt line only, e.g. fresh `PS D:\x>`) are reused in
     // place, so a launch into an empty terminal never splits. Anything else
     // (typed input, command output, a running agent) forces a split. The
@@ -653,14 +653,14 @@ export const useStore = create<AppState>((set, get) => ({
     const freshCmds = cmds.slice(reuseCount, reuseCount + room);
     if (freshCmds.length === 0) {
       // Everything fit into clean panes: no split at all.
-      if (!patched) return;
+      if (!patched) return 0;
       set({
         layout: patched,
         layouts: { ...layouts, [activeWorktreeId]: patched },
         activePaneId: reusable[0].id,
         maximizedPaneId: null,
       });
-      return;
+      return reuseCount;
     }
     const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
     if (!patched) {
@@ -671,7 +671,7 @@ export const useStore = create<AppState>((set, get) => ({
         activePaneId: panes[0].id,
         maximizedPaneId: null,
       });
-      return;
+      return freshCmds.length;
     }
     // Retile everything into one equal grid. Appending the fresh tiles beside
     // the old tree left lopsided ratios (a reused pane kept 1/4 width while
@@ -682,7 +682,8 @@ export const useStore = create<AppState>((set, get) => ({
       layouts: { ...layouts, [activeWorktreeId]: node },
       activePaneId: reuseCount > 0 ? reusable[0].id : panes[0].id,
       maximizedPaneId: null,
-        });
+      });
+    return reuseCount + freshCmds.length;
   },
   markPaneDirty: (paneId) => {
     // Fires on every keystroke: skip the tree rebuild when already dirty so
