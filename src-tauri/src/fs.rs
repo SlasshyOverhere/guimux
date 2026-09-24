@@ -493,17 +493,16 @@ pub fn grep_search(
             }
             scanned += 1;
             let fpath = entry.path();
-            let meta = match fs::metadata(&fpath) {
-                Ok(m) => m,
+            let mut file = match fs::File::open(&fpath) {
+                Ok(file) => file,
                 Err(_) => continue,
             };
-            if meta.len() > MAX_FILE {
+            let mut bytes = Vec::new();
+            if file.by_ref().take(MAX_FILE + 1).read_to_end(&mut bytes).is_err()
+                || bytes.len() as u64 > MAX_FILE
+            {
                 continue;
             }
-            let bytes = match fs::read(&fpath) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
             // Binary probe: a NUL in the head means not text.
             if bytes.iter().take(8192).any(|&b| b == 0) {
                 continue;
@@ -740,6 +739,7 @@ mod tests {
         fs::write(dir.join("a.txt"), "hello world\nsecond line\n").unwrap();
         fs::write(dir.join("b.txt"), "nothing here\n").unwrap();
         fs::write(dir.join("bin.dat"), b"hel\x00lo".to_vec()).unwrap();
+        fs::write(dir.join("big.txt"), vec![b'x'; MAX_FILE as usize + 1]).unwrap();
         fs::write(dir.join(".hidden"), "hello hidden\n").unwrap();
         let hits = grep_search(root.clone(), "hello".into(), None, None).unwrap();
         assert_eq!(hits.len(), 1);
