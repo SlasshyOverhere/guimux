@@ -266,6 +266,21 @@ fn system_explorer() -> Result<PathBuf, String> {
     Ok(directory.join("explorer.exe"))
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn system_xdg_open() -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").ok_or("PATH is not set")?;
+    for directory in std::env::split_paths(&path) {
+        if !directory.is_absolute() {
+            continue;
+        }
+        let candidate = directory.join("xdg-open");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("xdg-open was not found in an absolute PATH entry".into())
+}
+
 #[command]
 pub fn fs_reveal(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
@@ -283,9 +298,9 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
         c
     };
     #[cfg(target_os = "macos")]
-    let mut cmd = { let mut c = std::process::Command::new("open"); c.arg(&p); c };
+    let mut cmd = { let mut c = std::process::Command::new("/usr/bin/open"); c.arg(&p); c };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = { let mut c = std::process::Command::new("xdg-open"); c.arg(&p); c };
+    let mut cmd = { let mut c = std::process::Command::new(system_xdg_open()?); c.arg(&p); c };
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
