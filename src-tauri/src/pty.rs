@@ -632,6 +632,7 @@ fn spawn_pair(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pair_inner(
     app: &AppHandle,
     state: &State<PtyManager>,
@@ -1094,7 +1095,7 @@ mod tests {
 
     #[test]
     fn detach_stops_live_delivery_until_reattach() {
-        let id = 0xDE7A_C4u64;
+        let id = 0x00DE_7AC4_u64;
         EPOCHS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
