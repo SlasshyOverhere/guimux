@@ -607,18 +607,24 @@ export function ExplorerPane({ root }: { root: string }) {
   };
 
   const newFile = async () => {
-    const p = `${root}/untitled`;
-    try {
-      const created = await invoke<boolean>("fs_create_empty", { path: p });
-      if (created) announceWrite(p);
-    } catch (e) {
-      void errorDialog(`new file failed: ${e}`);
-      return;
+    for (let i = 0; i < 100; i++) {
+      const name = i === 0 ? "untitled" : `untitled-${i + 1}`;
+      const path = siblingPath(root, name);
+      try {
+        const created = await invoke<boolean>("fs_create_empty", { path });
+        if (!created) continue;
+        announceWrite(path);
+        openEditor(path, false);
+        // The editor covers the tree, so the rename affordance lives in the
+        // header pencil: start there immediately for the fresh untitled file.
+        startRename(path);
+        return;
+      } catch (e) {
+        void errorDialog(`new file failed: ${e}`);
+        return;
+      }
     }
-    openEditor(p, false);
-    // The editor covers the tree, so the rename affordance lives in the
-    // header pencil: start there immediately for the fresh untitled file.
-    startRename(p);
+    void errorDialog("could not find an available new file name");
   };
 
   const renameRowProps = {
