@@ -153,13 +153,13 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
         if IGNORED.contains(&fname.as_str()) || fname.starts_with('.') && fname != ".github" {
             continue;
         }
-        if collected.len() >= MAX_CHILDREN + 1 {
+        if collected.len() > MAX_CHILDREN {
             entry_overflow = true;
             break;
         }
         collected.push((entry, fname));
     }
-    collected.sort_by(|a, b| a.0.file_name().cmp(&b.0.file_name()));
+    collected.sort_by_key(|entry| entry.0.file_name());
     let mut truncated = entry_overflow;
     for (entry, fname) in collected.into_iter().take(MAX_CHILDREN) {
         if children.len() >= MAX_CHILDREN {
@@ -450,7 +450,7 @@ fn base64_val(c: u8) -> Option<u32> {
 
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("invalid base64 length".into());
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -1208,7 +1208,7 @@ mod tests {
         let root = dir.to_string_lossy().to_string();
         fs::write(dir.join("a.txt"), "hello world\nsecond line\n").unwrap();
         fs::write(dir.join("b.txt"), "nothing here\n").unwrap();
-        fs::write(dir.join("bin.dat"), b"hel\x00lo".to_vec()).unwrap();
+        fs::write(dir.join("bin.dat"), b"hel\x00lo").unwrap();
         fs::write(dir.join("big.txt"), vec![b'x'; MAX_FILE as usize + 1]).unwrap();
         fs::write(dir.join(".hidden"), "hello hidden\n").unwrap();
         let hits = grep_search(root.clone(), "hello".into(), None, None).unwrap();
