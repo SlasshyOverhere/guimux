@@ -153,6 +153,7 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
 #[command]
 pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
     let p = PathBuf::from(&path);
+    reject_special_path(&p, "path")?;
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
@@ -519,6 +520,7 @@ pub fn grep_search(
     limit: Option<u32>,
 ) -> Result<Vec<GrepHit>, String> {
     let root = PathBuf::from(&path);
+    reject_special_path(&root, "path")?;
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
@@ -684,6 +686,7 @@ fn coalesce_tx(app: &AppHandle) -> mpsc::Sender<String> {
 #[command]
 pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
+    reject_special_path(&p, "path")?;
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
@@ -750,6 +753,13 @@ mod tests {
         assert!(reject_special_path(Path::new("C:/x/COM1.txt"), "path").is_err());
         assert!(reject_special_path(Path::new("\\\\.\\C:"), "path").is_err());
         assert!(reject_special_path(Path::new("C:/ok/file.txt"), "path").is_ok());
+    }
+
+    #[test]
+    fn scans_reject_unc_roots() {
+        let root = r"\\server\share";
+        assert!(fs_tree(root.into(), 1).is_err());
+        assert!(grep_search(root.into(), "text".into(), None, None).is_err());
     }
 
     #[cfg(windows)]
