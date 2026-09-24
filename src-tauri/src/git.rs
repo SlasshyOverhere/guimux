@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::command;
 
@@ -20,6 +20,7 @@ const DIFF_CAP: usize = 1_000_000; // 1MB per file
 const STATUS_CAP: usize = 8 * 1024 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// All git spawns go through here: on Windows a child console process flashes
 /// a visible console window unless CREATE_NO_WINDOW is set — that flash is
@@ -87,6 +88,10 @@ fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
     (out, truncated)
 }
 
+fn recv_reader<T>(rx: &mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
+    rx.recv_timeout(timeout).ok()
+}
+
 pub fn git_output(
     repo: &Path,
     args: &[&str],
@@ -103,34 +108,41 @@ pub fn git_output(
         .map_err(|e| format!("[git] failed to spawn: {e}"))?;
     let stdout = child.stdout.take().ok_or("git stdout pipe unavailable")?;
     let stderr = child.stderr.take().ok_or("git stderr pipe unavailable")?;
-    let out_thread = std::thread::spawn(move || read_capped(stdout, STATUS_CAP));
-    let err_thread = std::thread::spawn(move || read_capped(stderr, STDERR_CAP));
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        let _ = out_tx.send(read_capped(stdout, STATUS_CAP));
+    });
+    let _ = std::thread::spawn(move || {
+        let _ = err_tx.send(read_capped(stderr, STDERR_CAP));
+    });
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = out_thread.join();
-                let _ = err_thread.join();
                 return Err(format!("[git] wait failed: {e}"));
             }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            return Err(format!("git {} timed out after {}s", args.join(" "), timeout.as_secs()));
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let (stdout, stdout_truncated) = out_thread.join().unwrap_or_default();
-    let (stderr, stderr_truncated) = err_thread.join().unwrap_or_default();
-    match status {
-        Some(status) => Ok((status, stdout, stderr, stdout_truncated || stderr_truncated)),
-        None => Err(format!("git {} timed out after {}s", args.join(" "), timeout.as_secs())),
-    }
+    let (Some((stdout, stdout_truncated)), Some((stderr, stderr_truncated))) =
+        (
+            recv_reader(&out_rx, READER_DRAIN_TIMEOUT),
+            recv_reader(&err_rx, READER_DRAIN_TIMEOUT),
+        )
+    else {
+        return Err("[git] output pipe did not close".into());
+    };
+    Ok((status, stdout, stderr, stdout_truncated || stderr_truncated))
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -535,6 +547,18 @@ pub fn git_fetch(path: String) -> Result<String, String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn reader_drain_timeout_is_bounded() {
+        let (tx, rx) = mpsc::channel::<u8>();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = tx.send(1);
+        });
+        let started = Instant::now();
+        assert!(recv_reader(&rx, Duration::from_millis(10)).is_none());
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
 
     #[test]
     fn status_and_diff() {
