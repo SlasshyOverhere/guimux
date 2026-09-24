@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -290,6 +290,21 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
 #[command]
 pub fn fs_write(path: String, content: String) -> Result<(), String> {
     write_text(&path, &content, None)
+}
+
+#[command]
+pub fn fs_create_empty(path: String) -> Result<bool, String> {
+    let p = PathBuf::from(&path);
+    reject_special_path(&p, "path")?;
+    let parent = p.parent().ok_or("invalid path")?;
+    if !parent.is_dir() {
+        return Err(format!("parent directory does not exist: {}", parent.to_string_lossy()));
+    }
+    match OpenOptions::new().write(true).create_new(true).open(&p) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[command]
@@ -682,6 +697,21 @@ mod tests {
         let error = fs_write_checked(path, "mine".into(), "original".into()).unwrap_err();
         assert!(error.contains("changed on disk"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "external");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_empty_never_overwrites_existing_files() {
+        let dir = std::env::temp_dir().join(format!("guimux-fs-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("untitled");
+        let path = file.to_string_lossy().to_string();
+        assert!(fs_create_empty(path.clone()).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"");
+        fs::write(&file, "existing").unwrap();
+        assert!(!fs_create_empty(path).unwrap());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "existing");
         let _ = fs::remove_dir_all(&dir);
     }
 

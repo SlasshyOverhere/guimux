@@ -581,15 +581,11 @@ export function ExplorerPane({ root }: { root: string }) {
   const newFile = async () => {
     const p = `${root}/untitled`;
     try {
-      await invoke("fs_read", { path: p });
-    } catch {
-      // doesn't exist yet: create it empty so the editor opens real content
-      try {
-        announceWrite(p);
-        await invoke("fs_write", { path: p, content: "" });
-      } catch {
-        /* fall through: editor will show the read error */
-      }
+      const created = await invoke<boolean>("fs_create_empty", { path: p });
+      if (created) announceWrite(p);
+    } catch (e) {
+      void errorDialog(`new file failed: ${e}`);
+      return;
     }
     openEditor(p, false);
     // The editor covers the tree, so the rename affordance lives in the

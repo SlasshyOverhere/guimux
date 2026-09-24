@@ -43,6 +43,7 @@ pub fn run() {
             fs::fs_tree,
             fs::fs_read,
             fs::fs_write,
+            fs::fs_create_empty,
             fs::fs_write_checked,
             fs::fs_write_bytes,
             fs::fs_rename,
