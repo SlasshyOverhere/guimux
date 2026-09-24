@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -17,6 +18,8 @@ const MAX_GREP_FILES: usize = 20_000; // scanned files per search
 const MAX_GREP_HITS: usize = 200; // hits per search
 const MAX_GREP_DIRS: usize = 20_000; // directories visited per search
 const MAX_GREP_ENTRIES: usize = 200_000; // directory entries examined per search
+const MAX_WATCH_DIRS: usize = 10_000; // directories watched per root
+const MAX_WATCH_ENTRIES: usize = 200_000; // directory entries examined per root
 const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "__pycache__"];
 /// Windows reserved names (also `NUL.txt`): open/read would block the IPC thread.
 const RESERVED: &[&str] = &[
@@ -702,7 +705,7 @@ pub struct FsChanged {
     pub root: String,
 }
 
-// Recursive watches, one per root at most. Roots stay registered for the app
+// One safe watcher per root at most. Roots stay registered for the app
 // lifetime (cap 16, oldest evicted): worktree switches re-subscribe faster
 // than teardown + re-arm, and an idle watcher costs one thread.
 static WATCHERS: std::sync::LazyLock<Mutex<WatchedRoots>> =
@@ -711,7 +714,7 @@ static WATCHERS: std::sync::LazyLock<Mutex<WatchedRoots>> =
 #[derive(Default)]
 struct WatchedRoots {
     order: Vec<String>,
-    live: std::collections::HashMap<String, notify::RecommendedWatcher>,
+    live: std::collections::HashMap<String, mpsc::Sender<()>>,
 }
 
 static COALESCE_TX: std::sync::LazyLock<Mutex<Option<mpsc::Sender<String>>>> =
@@ -754,13 +757,161 @@ fn coalesce_tx(app: &AppHandle) -> mpsc::Sender<String> {
     tx
 }
 
-#[command]
+fn collect_watch_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut entries_seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        if !seen.insert(dir.clone()) {
+            continue;
+        }
+        if dirs.len() >= MAX_WATCH_DIRS {
+            return Err("watch directory limit exceeded".into());
+        }
+        dirs.push(dir.clone());
+        let entries = fs::read_dir(&dir)
+            .map_err(|e| format!("cannot inspect watch directory {}: {e}", dir.to_string_lossy()))?;
+        for entry in entries {
+            if entries_seen >= MAX_WATCH_ENTRIES {
+                return Err("watch entry limit exceeded".into());
+            }
+            entries_seen += 1;
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !grep_visible(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+            if !is_link_like(&metadata) && metadata.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(dirs)
+}
+
+fn add_watch_tree(
+    watcher: &mut notify::RecommendedWatcher,
+    watched: &mut HashSet<PathBuf>,
+    root: &Path,
+    start: &Path,
+    budget: &mut usize,
+) {
+    if !start.starts_with(root) || reject_link_components(start, "watch path").is_err() {
+        return;
+    }
+    let mut stack = vec![start.to_path_buf()];
+    let mut entries_seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&dir) else { continue };
+        if is_link_like(&metadata) || !metadata.is_dir() {
+            continue;
+        }
+        if !watched.insert(dir.clone()) {
+            continue;
+        }
+        if *budget == 0 {
+            watched.remove(&dir);
+            break;
+        }
+        *budget -= 1;
+        if watcher
+            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            watched.remove(&dir);
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries {
+            if entries_seen >= MAX_WATCH_ENTRIES {
+                break;
+            }
+            entries_seen += 1;
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !grep_visible(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+            if !is_link_like(&metadata) && metadata.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+}
+
+fn spawn_watch_manager(
+    app: &AppHandle,
+    root: String,
+    watch_root: PathBuf,
+    dirs: Vec<PathBuf>,
+) -> Result<mpsc::Sender<()>, String> {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let fire = root.clone();
+    let notify_tx = coalesce_tx(app);
+    let mut watcher = notify::RecommendedWatcher::new(
+        move |result: Result<notify::Event, notify::Error>| {
+            let _ = event_tx.send(result);
+        },
+        notify::Config::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut watched = HashSet::new();
+    for dir in dirs {
+        watcher
+            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())?;
+        watched.insert(dir);
+    }
+    let mut budget = MAX_WATCH_DIRS.saturating_sub(watched.len());
+    std::thread::spawn(move || {
+        loop {
+            match stop_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
+                Ok(Ok(event)) => {
+                    for path in event.paths {
+                        if !path.starts_with(&watch_root) {
+                            continue;
+                        }
+                        if path.is_dir() {
+                            add_watch_tree(
+                                &mut watcher,
+                                &mut watched,
+                                &watch_root,
+                                &path,
+                                &mut budget,
+                            );
+                        } else {
+                            watched.retain(|known| known != &path && !known.starts_with(&path));
+                        }
+                    }
+                    let _ = notify_tx.send(fire.clone());
+                }
+                Ok(Err(_)) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+    Ok(stop_tx)
+}
+
+#[command(async)]
 pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
+    let dirs = collect_watch_dirs(&p)?;
     // Slash-normalized like every other path id, so the frontend's `==`
     // against worktree roots holds on Windows.
     let root = p.to_string_lossy().replace('\\', "/");
@@ -770,20 +921,7 @@ pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
             return Ok(());
         }
     }
-    let tx = coalesce_tx(&app);
-    let fire = root.clone();
-    let mut watcher = notify::RecommendedWatcher::new(
-        move |res: Result<notify::Event, notify::Error>| {
-            if res.is_ok() {
-                let _ = tx.send(fire.clone());
-            }
-        },
-        notify::Config::default(),
-    )
-    .map_err(|e| e.to_string())?;
-    watcher
-        .watch(&p, notify::RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
+    let stop = spawn_watch_manager(&app, root.clone(), p, dirs)?;
     let mut map = WATCHERS.lock().unwrap_or_else(|e| e.into_inner());
     if map.live.len() >= 16 {
         if let Some(old) = map.order.first().cloned() {
@@ -795,7 +933,9 @@ pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
     // would otherwise arm it twice (the loser's watcher just drops).
     if !map.live.contains_key(&root) {
         map.order.push(root.clone());
-        map.live.insert(root, watcher);
+        map.live.insert(root, stop);
+    } else {
+        drop(stop);
     }
     Ok(())
 }
@@ -956,6 +1096,7 @@ mod tests {
         let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
         let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
         assert!(linked.children.is_none());
+        assert!(!collect_watch_dirs(&root).unwrap().iter().any(|dir| dir == &link));
 
         let _ = fs::remove_file(&link);
         let _ = fs::remove_dir_all(&dir);
@@ -989,6 +1130,7 @@ mod tests {
         let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
         let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
         assert!(linked.children.is_none());
+        assert!(!collect_watch_dirs(&root).unwrap().iter().any(|dir| dir == &link));
 
         assert!(fs::remove_dir(&link).is_ok());
         let _ = fs::remove_dir_all(&dir);
