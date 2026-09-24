@@ -181,6 +181,12 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
                 Err(_) => break,
             }
         }
+        // Reaching the cap is enough to conservatively mark the result
+        // truncated. Waiting for one extra byte here can block forever when
+        // the child is still writing past the cap.
+        if buf.len() >= cap {
+            truncated = true;
+        }
     }
     if truncated {
         let _ = child.kill();
