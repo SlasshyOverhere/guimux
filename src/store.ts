@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { paneEmptiness } from "./terminal/paneEmpty";
 import type { Project, Worktree } from "./types";
 import { DEFAULT_SETTINGS, type Settings } from "./types";
+import { pathStartsRoot } from "./path";
 
 // ---- Pane tree model -------------------------------------------------------
 // Binary split tree. Each leaf = one terminal pane.
@@ -64,16 +65,6 @@ function cleanRestoredNode(node: PaneNode): PaneNode {
     first: cleanRestoredNode(node.first),
     second: cleanRestoredNode(node.second),
   };
-}
-
-// Path prefix must land on a separator: "C:/proj" also prefixes "C:/proj-old",
-// which seeded another project's worktree and spawned a shell in it.
-function underRoot(root: string | null, path: string): boolean {
-  if (!root) return false;
-  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
-  const r = norm(root);
-  const p = norm(path);
-  return p === r || p.startsWith(r + "/");
 }
 
 function readVis(key: string): boolean {
@@ -311,7 +302,7 @@ export const useStore = create<AppState>((set, get) => ({
       p ? (p.isGit ? (p.gitRoot ?? p.path) : p.path) : null;
     const seedWts = seed?.worktrees.filter((w) => {
       // Seed must belong to the active project or the shell spawns elsewhere.
-      return underRoot(rootOf(proj), w.path);
+      return pathStartsRoot(rootOf(proj), w.path);
     }) ?? [];
     const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
       ? seed.activeWorktreeId
@@ -341,7 +332,7 @@ export const useStore = create<AppState>((set, get) => ({
         const list = seed.worktreesByProject[p.id];
         if (!list) continue;
         const root = rootOf(p);
-        const kept = list.filter((w) => underRoot(root, w.path));
+        const kept = list.filter((w) => pathStartsRoot(root, w.path));
         if (kept.length > 0) seedCache[p.id] = kept.slice(0, 50);
       }
     }

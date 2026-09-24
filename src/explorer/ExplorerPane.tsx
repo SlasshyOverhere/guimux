@@ -8,6 +8,7 @@ import { announceWrite } from "../announceWrite";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { menuPos } from "../menuPos";
+import { normalizePath, pathStartsRoot } from "../path";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
@@ -32,11 +33,7 @@ function syncEditorDirtyCount() {
 // Tree paths mix separators (worktree roots use `/`, DirEntry adds `\`), so
 // both comparisons below normalize before matching.
 const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-const inRoot = (root: string, p: string) => {
-  const r = normSep(root);
-  const n = normSep(p);
-  return n === r || n.startsWith(r + "/");
-};
+const inRoot = (root: string, p: string) => pathStartsRoot(root, p);
 
 function baseName(p: string): string {
   const parts = p.split(SEP);
@@ -256,11 +253,11 @@ export function ExplorerPane({ root }: { root: string }) {
     const requestedRoot = root;
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
       .then((t) => {
-        if (request !== treeRequestRef.current || normSep(requestedRoot) !== normSep(rootRef.current)) return;
+        if (request !== treeRequestRef.current || normalizePath(requestedRoot) !== normalizePath(rootRef.current)) return;
         setTree(t);
       })
       .catch(() => {
-        if (request !== treeRequestRef.current || normSep(requestedRoot) !== normSep(rootRef.current)) return;
+        if (request !== treeRequestRef.current || normalizePath(requestedRoot) !== normalizePath(rootRef.current)) return;
         setTree(null);
       });
   };
@@ -274,7 +271,7 @@ export function ExplorerPane({ root }: { root: string }) {
     let unlisten: (() => void) | null = null;
     invoke("fs_watch", { path: root }).catch(() => {});
     listen<{ root: string }>("fs-changed", (ev) => {
-      if (cancelled || normSep(ev.payload.root) !== normSep(root)) return;
+      if (cancelled || normalizePath(ev.payload.root) !== normalizePath(root)) return;
       if (timer != null) clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
