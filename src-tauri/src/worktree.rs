@@ -555,9 +555,7 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     let base = find_base_branch(&main_wt, &branch)?;
     // Refuse with a dirty main worktree: a conflicted merge leaves MERGE_HEAD
     // behind (recover with `worktree_merge_abort`).
-    let dirty = !git_succeeds(&main_wt, &["diff", "--quiet"])
-        || !git_succeeds(&main_wt, &["diff", "--cached", "--quiet"]);
-    if dirty {
+    if worktree_dirty(&main_wt)? {
         return Err("main worktree has uncommitted changes — commit or stash first".into());
     }
     // Ensure main worktree is on the base branch
@@ -774,6 +772,19 @@ mod tests {
         assert!(err.contains("path="), "error must carry canonical path: {err}");
         assert!(outside.exists());
         let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn worktree_merge_rejects_untracked_main_changes() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("untracked-main".into())).unwrap();
+        fs::write(repo.join("scratch.txt"), "untracked").unwrap();
+
+        let err = worktree_merge(wt.id.clone()).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "unexpected error: {err}");
+
         let _ = fs::remove_dir_all(&repo);
     }
 
