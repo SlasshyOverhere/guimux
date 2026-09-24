@@ -213,11 +213,14 @@ pub fn worktree_create(
     // Same-named repos in different folders shared one dir: mix a hash of
     // the canonical root into the folder name.
     let project: String = format!("{slug}-{h:08x}", h = short_hash(&root));
-    let base_dir = dirs::home_dir()
-        .map(|h| h.join(".guimux").join("worktrees").join(&project))
-        .unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
-    let _ = std::fs::create_dir_all(&base_dir);
+    let home = dirs::home_dir().unwrap_or_else(|| root.parent().unwrap_or(&root).to_path_buf());
+    let home = canonicalize_for_git(&home);
+    let base_dir = home.join(".guimux").join("worktrees").join(&project);
+    reject_link_components(&base_dir)?;
+    std::fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
+    reject_link_components(&base_dir)?;
     let path = base_dir.join(format!("{}-wt", dir_name));
+    reject_link_components(&path)?;
     let mut i = 0;
     let mut target = path.clone();
     while target.exists() {
@@ -237,6 +240,7 @@ pub fn worktree_create(
             &base_ref,
         ],
     )?;
+    reject_link_components(&target)?;
     // Forward slashes: must `==` the `worktree list` ids for the same path.
     let created_path = norm_sep(target.to_string_lossy().to_string());
     let last_commit = last_commit_ts(Path::new(&created_path));
@@ -276,13 +280,45 @@ fn is_link_like(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-fn reject_link_like(path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if is_link_like(&metadata) => {
-            Err("refusing to operate on a symlink or junction worktree path".into())
+fn reject_link_components(path: &Path) -> Result<(), String> {
+    let mut current = path;
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(metadata) if is_link_like(&metadata) => {
+                return Err("refusing to operate on a symlink or junction worktree path".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect worktree path: {error}")),
         }
-        Ok(_) | Err(_) => Ok(()),
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
     }
+    Ok(())
+}
+
+fn canonicalize_for_git(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        let raw = canonical.to_string_lossy();
+        if let Some(rest) = raw.strip_prefix("\\\\?\\") {
+            if let Some(unc) = rest.strip_prefix("UNC\\") {
+                return PathBuf::from(format!("\\\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    canonical
+}
+
+fn reject_link_like(path: &Path) -> Result<(), String> {
+    reject_link_components(path)
 }
 
 fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, String> {
@@ -827,7 +863,32 @@ mod tests {
 
         let error = reject_link_like(&link).unwrap_err();
         assert!(error.contains("symlink or junction"));
+        let nested = link.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(reject_link_like(&nested).is_err());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_rejects_junction_components() {
+        use std::os::windows::fs::symlink_dir;
+
+        let dir =
+            std::env::temp_dir().join(format!("guimux-worktree-junction-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = dir.join("link");
+        if symlink_dir(&target, &link).is_err() {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        let nested = link.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(reject_link_like(&nested).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
