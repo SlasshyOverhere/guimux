@@ -301,6 +301,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
+  const snoopDecoderRef = useRef(new TextDecoder());
   const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
   // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
   // only forward when cols/rows actually changed — AND coalesce to one
@@ -383,7 +384,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const snoopLiveCwd = (bytes: Uint8Array) => {
     let text: string;
     try {
-      text = new TextDecoder().decode(bytes);
+      text = snoopDecoderRef.current.decode(bytes, { stream: true });
     } catch {
       return;
     }
@@ -525,6 +526,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     sessionRef.current = session.id;
     sessionEpochRef.current = session.epoch;
     shellKindRef.current = session.shell_kind;
+    snoopDecoderRef.current = new TextDecoder();
     setPtyId(paneId, session.id);
     return session.id;
   };
@@ -536,6 +538,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const sid = sessionRef.current;
     const dims = saneDims(term) ?? { cols: 80, rows: 24 };
     lastDimsRef.current = dims;
+    snoopDecoderRef.current = new TextDecoder();
     // Same-id restart keeps the existing listeners alive: the backend
     // respawns the child and the reader thread re-emits on the same
     // `pty:output-{id}` channel, so output flows with no re-subscribe.
