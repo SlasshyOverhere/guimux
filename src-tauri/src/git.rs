@@ -70,6 +70,13 @@ fn dir_name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+fn is_not_repository_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not a git repository")
+        || lower.contains("not under version control")
+        || lower.contains("not a working tree")
+}
+
 #[command]
 pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     let p = PathBuf::from(&path);
@@ -83,38 +90,42 @@ pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     let out = git_cmd()
         .args(["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"])
         .current_dir(&p)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            let mut lines = text.lines();
-            let root = lines.next().unwrap_or("").trim().to_string();
-            if root.is_empty() {
-                return Err("git rev-parse returned no toplevel".into());
-            }
-            let branch = lines
-                .next()
-                .map(str::trim)
-                .filter(|b| !b.is_empty() && *b != "HEAD")
-                .map(str::to_string);
-            Ok(ProjectInfo {
-                name: PathBuf::from(&root)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| root.clone()),
-                path: path.clone(),
-                is_git: true,
-                git_root: Some(root),
-                branch,
-            })
+        .output()
+        .map_err(|e| format!("failed to run git while detecting project: {e}"))?;
+    if out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut lines = text.lines();
+        let root = lines.next().unwrap_or("").trim().to_string();
+        if root.is_empty() {
+            return Err("git rev-parse returned no toplevel".into());
         }
-        _ => Ok(ProjectInfo {
+        let branch = lines
+            .next()
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != "HEAD")
+            .map(str::to_string);
+        Ok(ProjectInfo {
+            name: PathBuf::from(&root)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.clone()),
+            path: path.clone(),
+            is_git: true,
+            git_root: Some(root),
+            branch,
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !is_not_repository_error(&stderr) {
+            return Err(format!("git project detection failed: {}", stderr.trim()));
+        }
+        Ok(ProjectInfo {
             name: dir_name_of(&p),
             path,
             is_git: false,
             git_root: None,
             branch: None,
-        }),
+        })
     }
 }
 
@@ -420,5 +431,19 @@ mod tests {
         let ab = git_ahead_behind(root.clone()).unwrap();
         assert_eq!((ab.ahead, ab.behind), (1, 0));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_detection_distinguishes_plain_folders_from_git_errors() {
+        assert!(is_not_repository_error(
+            "fatal: not a git repository (or any of the parent directories): .git"
+        ));
+        assert!(is_not_repository_error(
+            "fatal: not a git repository: '/tmp/repo'"
+        ));
+        assert!(!is_not_repository_error(
+            "fatal: detected dubious ownership in repository at '/tmp/repo'"
+        ));
+        assert!(!is_not_repository_error("fatal: unable to access repository"));
     }
 }
