@@ -1,4 +1,4 @@
-use crate::git::{git_cmd, reject_git_ref};
+use crate::git::{git_output, reject_git_ref, GIT_TIMEOUT};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,15 +19,9 @@ pub struct Worktree {
 }
 
 fn last_commit_ts(path: &Path) -> Option<i64> {
-    let out = git_cmd()
-        .args(["log", "-1", "--format=%ct"])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    run_git(path, &["log", "-1", "--format=%ct"])
+        .ok()
+        .and_then(|out| out.trim().parse().ok())
 }
 
 fn rand_id() -> String {
@@ -55,35 +49,32 @@ fn rand_id_suffix() -> u16 {
 fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Some operations (merge) need a real CLI; run in the repo root.
     // NO_WINDOW + no rev-parse-audit: one spawn per op, invisible on Windows.
-    let out = git_cmd()
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .map_err(|_| "[git] failed to spawn".to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    let (status, stdout, stderr, truncated) = git_output(repo, args, GIT_TIMEOUT)?;
+    if status.success() {
+        if truncated {
+            return Err("git output exceeded safety limit".into());
+        }
+        Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
+        let stderr = String::from_utf8_lossy(&stderr);
         Err(format!(
             "git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
+            stderr.trim()
         ))
     }
 }
 
+fn git_succeeds(repo: &Path, args: &[&str]) -> bool {
+    git_output(repo, args, GIT_TIMEOUT)
+        .map(|(status, _, _, _)| status.success())
+        .unwrap_or(false)
+}
+
 fn current_branch(path: &Path) -> Result<String, String> {
-    let out = git_cmd()
-        .args(["branch", "--show-current"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "cannot inspect current branch: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    run_git(path, &["branch", "--show-current"])
+        .map(|out| out.trim().to_string())
+        .map_err(|e| format!("cannot inspect current branch: {e}"))
 }
 
 // (async): git spawns block for seconds; keep them off the main thread or
@@ -94,20 +85,24 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
     if !root.exists() {
         return Err(format!("repo root does not exist: {repo_root}"));
     }
-    let out = git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(&root)
-        .output()
-        .map_err(|e| format!("failed to run git (is it on PATH?): {e}"))?;
-    if !out.status.success() {
+    let (status, stdout, stderr, truncated) = git_output(
+        &root,
+        &["worktree", "list", "--porcelain"],
+        GIT_TIMEOUT,
+    )
+    .map_err(|e| format!("failed to run git (is it on PATH?): {e}"))?;
+    if !status.success() {
         // Never swallow stderr here: the old Ok(vec![]) made the UI sit on
         // "Starting terminal…" forever (e.g. git's "dubious ownership" refusal).
         return Err(format!(
             "git worktree list failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    if truncated {
+        return Err("git worktree list output exceeded safety limit".into());
+    }
+    let text = String::from_utf8_lossy(&stdout);
     // (path, branch, head-hash, is_main). HEAD is free in this output; the
     // old code ignored it and ran one `git log` per worktree (N spawns on
     // the startup path). Timestamps resolve in one batch spawn below.
@@ -177,11 +172,10 @@ fn batch_commit_ts(repo: &Path, heads: Vec<String>) -> std::collections::HashMap
     }
     let mut args: Vec<&str> = vec!["log", "--no-walk", "--format=%H %ct"];
     args.extend(heads.iter().map(|s| s.as_str()));
-    let out = match git_cmd().args(&args).current_dir(repo).output() {
-        Ok(o) if o.status.success() => o,
-        _ => return map,
+    let Ok(out) = run_git(repo, &args) else {
+        return map;
     };
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in out.lines() {
         let mut it = line.split_whitespace();
         if let (Some(h), Some(ts)) = (it.next(), it.next()) {
             if let Ok(ts) = ts.parse() {
@@ -294,21 +288,22 @@ fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, S
 
 /// Paths git currently knows, slash-normalized for `==` with worktree ids.
 fn registered_paths(root: &Path) -> Result<Vec<String>, String> {
-    let out = match git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(root)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return Err(format!("cannot inspect git worktrees: {e}")),
-    };
-    if !out.status.success() {
+    let (status, stdout, stderr, truncated) = git_output(
+        root,
+        &["worktree", "list", "--porcelain"],
+        GIT_TIMEOUT,
+    )
+    .map_err(|e| format!("cannot inspect git worktrees: {e}"))?;
+    if !status.success() {
         return Err(format!(
             "cannot inspect git worktrees: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
+    if truncated {
+        return Err("cannot inspect git worktrees: output exceeded safety limit".into());
+    }
+    Ok(String::from_utf8_lossy(&stdout)
         .lines()
         .filter_map(|l| l.strip_prefix("worktree "))
         .map(|p| norm_sep(p.to_string()))
@@ -560,18 +555,8 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     let base = find_base_branch(&main_wt, &branch)?;
     // Refuse with a dirty main worktree: a conflicted merge leaves MERGE_HEAD
     // behind (recover with `worktree_merge_abort`).
-    let dirty = git_cmd()
-        .args(["diff", "--quiet"])
-        .current_dir(&main_wt)
-        .output()
-        .map(|o| !o.status.success())
-        .unwrap_or(true)
-        || git_cmd()
-            .args(["diff", "--cached", "--quiet"])
-            .current_dir(&main_wt)
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true);
+    let dirty = !git_succeeds(&main_wt, &["diff", "--quiet"])
+        || !git_succeeds(&main_wt, &["diff", "--cached", "--quiet"]);
     if dirty {
         return Err("main worktree has uncommitted changes — commit or stash first".into());
     }
@@ -610,15 +595,12 @@ pub fn worktree_merge_abort(id: String) -> Result<String, String> {
 
 fn find_main_worktree(path: &Path) -> Option<PathBuf> {
     // git worktree list from any worktree; first entry is main
-    let out = git_cmd()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let (status, stdout, _, truncated) =
+        git_output(path, &["worktree", "list", "--porcelain"], GIT_TIMEOUT).ok()?;
+    if !status.success() || truncated {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&stdout);
     text.lines()
         .find_map(|l| l.strip_prefix("worktree "))
         .map(PathBuf::from)
@@ -627,14 +609,8 @@ fn find_main_worktree(path: &Path) -> Option<PathBuf> {
 fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     // Heuristic: merge-base with main/master; fallback to current HEAD of main worktree.
     for cand in ["main", "master"] {
-        let ok = git_cmd()
-            .args(["merge-base", "--is-ancestor", cand, branch])
-            .current_dir(main_wt)
-            .output();
-        if let Ok(o) = ok {
-            if o.status.success() {
-                return Ok(cand.to_string());
-            }
+        if git_succeeds(main_wt, &["merge-base", "--is-ancestor", cand, branch]) {
+            return Ok(cand.to_string());
         }
     }
     let cur_branch = current_branch(main_wt).unwrap_or_default();
@@ -645,18 +621,19 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
 }
 
 fn worktree_dirty(path: &Path) -> Result<bool, String> {
-    let out = git_cmd()
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| format!("cannot inspect worktree status: {e}"))?;
-    if !out.status.success() {
+    let (status, stdout, stderr, truncated) =
+        git_output(path, &["status", "--porcelain"], GIT_TIMEOUT)
+            .map_err(|e| format!("cannot inspect worktree status: {e}"))?;
+    if !status.success() {
         return Err(format!(
             "cannot inspect worktree status: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    Ok(!out.stdout.is_empty())
+    if truncated {
+        return Err("cannot inspect worktree status: output exceeded safety limit".into());
+    }
+    Ok(!stdout.is_empty())
 }
 
 /// Commits on the worktree's branch that its base lacks: what `branch -D`
@@ -666,18 +643,23 @@ fn unmerged_commits(main_wt: &Path, branch: &str) -> Result<Option<(usize, Strin
         return Ok(None);
     }
     let base = find_base_branch(main_wt, branch)?;
-    let out = git_cmd()
-        .args(["rev-list", "--count", &format!("{base}..{branch}")])
-        .current_dir(main_wt)
-        .output()
-        .map_err(|e| format!("cannot inspect unmerged commits: {e}"))?;
-    if !out.status.success() {
+    let range = format!("{base}..{branch}");
+    let (status, stdout, stderr, truncated) = git_output(
+        main_wt,
+        &["rev-list", "--count", &range],
+        GIT_TIMEOUT,
+    )
+    .map_err(|e| format!("cannot inspect unmerged commits: {e}"))?;
+    if !status.success() {
         return Err(format!(
             "cannot inspect unmerged commits: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
-    let n = String::from_utf8_lossy(&out.stdout)
+    if truncated {
+        return Err("cannot inspect unmerged commits: output exceeded safety limit".into());
+    }
+    let n = String::from_utf8_lossy(&stdout)
         .trim()
         .parse::<usize>()
         .map_err(|_| "cannot inspect unmerged commits: invalid count".to_string())?;
