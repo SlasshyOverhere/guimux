@@ -305,7 +305,10 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     });
     // Drain stderr on its own thread: reading it after wait() would deadlock
     // if git ever filled the pipe while we were still reading stdout.
-    let err_thread = std::thread::spawn(move || read_capped(stderr, STDERR_CAP));
+    let (err_tx, err_rx) = mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        let _ = err_tx.send(read_capped(stderr, STDERR_CAP));
+    });
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
     {
@@ -348,7 +351,8 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     if timed_out.load(Ordering::SeqCst) {
         return Err(format!("git {} timed out after {}s", args.join(" "), GIT_TIMEOUT.as_secs()));
     }
-    let (stderr, stderr_truncated) = err_thread.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = recv_reader(&err_rx, READER_DRAIN_TIMEOUT)
+        .ok_or("[git] stderr pipe did not close")?;
     if !truncated && !status.success() {
         let mut message = String::from_utf8_lossy(&stderr).trim().to_string();
         if stderr_truncated {
