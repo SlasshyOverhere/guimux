@@ -12,6 +12,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require version tag
+        shell: bash
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *)
+              echo "::error::releases must run from a v* tag"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
