@@ -68,8 +68,7 @@ impl PtyManager {
         }
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
@@ -297,16 +296,26 @@ fn shell_kind_for(shell: &str) -> &'static str {
     }
 }
 
-/// Output-before-attach fix: per-PTY ring buffer. The pump always appends
-/// (cap 256KB, oldest dropped); live `pty:output-{id}` emits only after the
-/// frontend sends explicit `pty_attach(id)`, which replays the buffer.
+/// Output-before-attach fix: per-PTY state makes the replay/attachment handoff
+/// atomic. Detached output is capped at 256KB; attached output is emitted live.
 const REPLAY_CAP: usize = 256 * 1024;
 /// H-003 caps: at most 64 live shells (24-pane UI + headroom), 1MB per write.
 const MAX_SESSIONS: usize = 64;
 const MAX_PTY_WRITE: usize = 1 << 20;
-static BUFFERS: std::sync::LazyLock<Mutex<HashMap<u64, VecDeque<u8>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static ATTACHED: std::sync::LazyLock<Mutex<HashMap<u64, bool>>> =
+struct OutputState {
+    epoch: u64,
+    attached: bool,
+    replay: VecDeque<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+enum OutputDisposition {
+    Emit,
+    Buffered,
+    Stale,
+}
+
+static OUTPUTS: std::sync::LazyLock<Mutex<HashMap<u64, OutputState>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Exit-watcher epochs: restart/kill bumps the epoch so a stale watcher for
 /// the old child never emits `pty:exit-{id}` at the reused numeric id.
@@ -324,22 +333,23 @@ fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.clamp(1, 1000), rows.clamp(1, 500))
 }
 
-fn push_buffer(id: u64, epoch: u64, bytes: &[u8]) {
-    // Epoch check BEFORE taking BUFFERS (lock order EPOCHS → BUFFERS, same
-    // as bump_epoch_reset_buffer): a pump thread that read bytes just before
-    // a restart/kill can never slip them into the reused id's fresh replay
-    // buffer — the old window showed dead-shell garbage in restarted panes.
-    let epochs = EPOCHS.lock().unwrap_or_else(|e| e.into_inner());
-    if epochs.get(&id).copied() != Some(epoch) {
-        return; // stale pump from a killed/restarted session
+fn queue_output(id: u64, epoch: u64, bytes: &[u8]) -> OutputDisposition {
+    let mut outputs = OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = outputs.get_mut(&id) else {
+        return OutputDisposition::Stale;
+    };
+    if state.epoch != epoch {
+        return OutputDisposition::Stale;
+    }
+    if state.attached {
+        return OutputDisposition::Emit;
     }
     // VecDeque: dropping from the front never memmoves the retained tail
     // (M-003: Vec::drain shifted ~256KB on every 8KB read while detached).
-    let mut map = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
-    let buf = map.entry(id).or_default();
-    buf.extend(bytes.iter().copied());
-    let excess = buf.len().saturating_sub(REPLAY_CAP);
-    buf.drain(..excess);
+    state.replay.extend(bytes.iter().copied());
+    let excess = state.replay.len().saturating_sub(REPLAY_CAP);
+    state.replay.drain(..excess);
+    OutputDisposition::Buffered
 }
 
 /// Spawn-latency caches: bootstrap base64 per cwd, resolved pwsh path once.
@@ -377,13 +387,38 @@ fn next_epoch(id: u64) -> u64 {
     e
 }
 
-/// Spawn/restart path: bump the epoch AND install a fresh replay buffer as
-/// one logical step (EPOCHS → BUFFERS lock order, matching push_buffer) so
-/// no stale pump can write between the bump and the reset.
-fn bump_epoch_reset_buffer(id: u64) -> u64 {
+/// Spawn/restart path: install fresh output state with the new epoch so a
+/// stale pump can neither append to replay nor emit into the new session.
+fn reset_output(id: u64, attached: bool) -> u64 {
     let e = next_epoch(id);
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, VecDeque::new());
+    OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        OutputState {
+            epoch: e,
+            attached,
+            replay: VecDeque::new(),
+        },
+    );
     e
+}
+
+fn attach_output(id: u64) -> Option<(u64, Vec<u8>)> {
+    let mut outputs = OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = outputs.get_mut(&id)?;
+    state.attached = true;
+    let epoch = state.epoch;
+    let replay = std::mem::take(&mut state.replay).into_iter().collect();
+    Some((epoch, replay))
+}
+
+fn detach_output(id: u64) {
+    if let Some(state) = OUTPUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&id)
+    {
+        state.attached = false;
+    }
 }
 
 /// Watch the SHELL child (not the pty pipe): only a true shell death may
@@ -425,7 +460,13 @@ fn spawn_exit_watcher(
     });
 }
 
-fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Read + Send>, t_start: std::time::Instant) {
+fn spawn_output_pump(
+    app: AppHandle,
+    id: u64,
+    epoch: u64,
+    mut reader: Box<dyn Read + Send>,
+    t_start: std::time::Instant,
+) {
     // EOF just ends the stream. This thread never emits exit.
     // Every byte is buffered; live emit starts only after `pty_attach`.
     // The epoch guard stops a pre-restart pump from leaking stale bytes
@@ -437,27 +478,25 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if !epoch_current(id, epoch) {
-                        break;
-                    }
                     if pty_debug() && first {
                         first = false;
-                        eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
-                    }
-                    let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
-                    if attached {
-                        let _ = app.emit(
-                            &format!("pty:output-{id}"),
-                            PtyOutput {
-                                epoch,
-                                bytes: buf[..n].to_vec(),
-                            },
+                        eprintln!(
+                            "[gm-pty] id={id} first-byte {}ms after spawn start",
+                            t_start.elapsed().as_millis()
                         );
-                    } else {
-                        // Attached panes have no reader for the replay buffer
-                        // (pty_attach drained it), so rebuilding a 256KB copy
-                        // per chunk only burned memory and memcpy.
-                        push_buffer(id, epoch, &buf[..n]);
+                    }
+                    match queue_output(id, epoch, &buf[..n]) {
+                        OutputDisposition::Emit => {
+                            let _ = app.emit(
+                                &format!("pty:output-{id}"),
+                                PtyOutput {
+                                    epoch,
+                                    bytes: buf[..n].to_vec(),
+                                },
+                            );
+                        }
+                        OutputDisposition::Buffered => {}
+                        OutputDisposition::Stale => break,
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -599,8 +638,7 @@ fn spawn_pair_inner(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, shell_kind.to_string());
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, live);
-    let epoch = bump_epoch_reset_buffer(id);
+    let epoch = reset_output(id, live);
 
     // Exit authority = shell process liveness (GetExitCodeProcess), never
     // pipe EOF. The watcher owns the real Child; the stored killer stays
@@ -641,32 +679,16 @@ pub fn pty_spawn(
 /// switch) and spawn fresh instead of sitting blank.
 #[command]
 pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
-    if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
-        return Err("no such pty session".into());
-    }
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, true);
     // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
     // raw bytes); kept because the frontend consumes number[] — switch both
     // to base64 together if replay size ever matters.
-    let replay = BUFFERS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&id)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let (epoch, replay) = attach_output(id).ok_or("no such pty session")?;
     let shell_kind = SHELL_KINDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&id)
         .cloned()
         .unwrap_or_else(|| "unknown".into());
-    let epoch = EPOCHS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&id)
-        .copied()
-        .ok_or("no such pty session")?;
     Ok(PtyAttach {
         replay,
         shell_kind,
@@ -676,7 +698,7 @@ pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
 
 #[command]
 pub fn pty_detach(id: u64) {
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, false);
+    detach_output(id);
 }
 
 /// Liveness probe for remounts: false when the session is unknown OR its
@@ -792,8 +814,10 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    OUTPUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     // Bump the epoch so the dead child's watcher can never emit exit at this
     // id again (matters for restart, which reuses the id right after).
     next_epoch(id);
@@ -840,14 +864,28 @@ mod tests {
     #[test]
     fn replay_buffer_caps_oldest_first() {
         let id = 0xB0FFEBu64;
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
-        push_buffer(id, 1, &[b'a'; 10]);
-        push_buffer(id, 1, &[b'b'; REPLAY_CAP + 100]);
-        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, 0);
+        let epoch = reset_output(id, false);
+        assert_eq!(
+            queue_output(id, epoch, &[b'a'; 10]),
+            OutputDisposition::Buffered
+        );
+        assert_eq!(
+            queue_output(id, epoch, &[b'b'; REPLAY_CAP + 100]),
+            OutputDisposition::Buffered
+        );
+        let (_, buf) = attach_output(id).unwrap();
         assert_eq!(buf.len(), REPLAY_CAP);
         // oldest bytes ('a's) were dropped
         assert!(buf.iter().all(|&b| b == b'b'));
+        assert_eq!(queue_output(id, epoch, b"live"), OutputDisposition::Emit);
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
@@ -855,18 +893,30 @@ mod tests {
     fn stale_pump_cannot_pollute_replay_buffer() {
         // Regression: a pump thread that read bytes just before a restart
         // could push them into the reused id's fresh replay buffer between
-        // pty_kill's BUFFERS.remove and spawn_pair's insert.
+        // pty_kill's output-state removal and spawn_pair's replacement.
         let id = 0x5EEDu64;
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
-        // old-epoch pump arrives AFTER the restart bumped the epoch
-        push_buffer(id, 1, b"old-shell-garbage");
-        let e2 = bump_epoch_reset_buffer(id);
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, 0);
+        let e1 = reset_output(id, false);
+        assert_eq!(
+            queue_output(id, e1, b"old-shell-garbage"),
+            OutputDisposition::Buffered
+        );
+        let e2 = reset_output(id, false);
         assert_ne!(e2, 1);
-        push_buffer(id, 1, b"late stale bytes"); // must be dropped
-        push_buffer(id, e2, b"fresh");
-        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
+        assert_eq!(
+            queue_output(id, e1, b"late stale bytes"),
+            OutputDisposition::Stale
+        );
+        assert_eq!(queue_output(id, e2, b"fresh"), OutputDisposition::Buffered);
+        let (_, buf) = attach_output(id).unwrap();
         assert_eq!(buf, b"fresh".to_vec());
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
@@ -889,21 +939,21 @@ mod tests {
     #[test]
     fn detach_stops_live_delivery_until_reattach() {
         let id = 0xDE7A_C4u64;
-        ATTACHED
+        EPOCHS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, true);
+            .insert(id, 0);
+        let epoch = reset_output(id, true);
         pty_detach(id);
-        assert!(!ATTACHED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&id)
-            .copied()
-            .unwrap_or(false));
-        ATTACHED
+        assert_eq!(
+            queue_output(id, epoch, b"buffered"),
+            OutputDisposition::Buffered
+        );
+        OUTPUTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     #[test]

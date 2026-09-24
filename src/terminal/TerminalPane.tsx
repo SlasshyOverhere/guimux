@@ -423,11 +423,13 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
-    const disposeOutput = await listen<PtyOutput>(`pty:output-${sid}`, (ev) => {
+    const pending: PtyOutput[] = [];
+    let replaying = true;
+    const writeOutput = (output: PtyOutput) => {
       const currentEpoch = sessionEpochRef.current;
-      if (currentEpoch != null && ev.payload.epoch < currentEpoch) return;
-      sessionEpochRef.current = ev.payload.epoch;
-      const bytes = new Uint8Array(ev.payload.bytes);
+      if (currentEpoch != null && output.epoch < currentEpoch) return;
+      sessionEpochRef.current = output.epoch;
+      const bytes = new Uint8Array(output.bytes);
       snoopLiveCwd(bytes);
       if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
         const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
@@ -447,6 +449,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
+    };
+    const disposeOutput = await listen<PtyOutput>(`pty:output-${sid}`, (ev) => {
+      if (replaying) pending.push(ev.payload);
+      else writeOutput(ev.payload);
     });
     const disposeExit = await listen<number>(`pty:exit-${sid}`, () => {
       term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
@@ -469,6 +475,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       snoopLiveCwd(bytes);
       writeKeepPlace(term, bytes);
     }
+    for (const output of pending) writeOutput(output);
+    pending.length = 0;
+    replaying = false;
   };
 
   // WebGL primary, canvas/DOM fallback. Buffer, cursor, and focus live on the
