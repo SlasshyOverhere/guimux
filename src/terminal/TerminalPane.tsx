@@ -281,6 +281,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const shellKindRef = useRef<PtySession["shell_kind"]>("unknown");
   // Agent fan-out: one-shot command typed into a fresh shell, then cleared.
   const initCmdRef = useRef<string | null>(initCmd ?? null);
+  const initCmdEffectReadyRef = useRef(false);
   initCmdRef.current = initCmd ?? null;
   const exitedRef = useRef(false);
   // Mirrors the mount effect's `alive` flag for code that outlives a render.
@@ -1189,6 +1190,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // only fires initCmd once, so a command assigned later (reuse, no split)
   // is typed here. Fresh panes skip this (no session yet; mount handles it).
   useEffect(() => {
+    if (!initCmdEffectReadyRef.current) {
+      initCmdEffectReadyRef.current = true;
+      return;
+    }
     if (!initCmd) return;
     if (!termRef.current || sessionRef.current == null || exitedRef.current) return;
     const cmdText = initCmd;
