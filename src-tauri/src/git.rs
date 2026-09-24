@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 use tauri::command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +15,8 @@ pub struct FileStatus {
 const DIFF_CAP: usize = 1_000_000; // 1MB per file
 /// `status -z` on a repo with ~100k changes is ~8MB; cap the read there too.
 const STATUS_CAP: usize = 8 * 1024 * 1024;
+const STDERR_CAP: usize = 64 * 1024;
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// All git spawns go through here: on Windows a child console process flashes
 /// a visible console window unless CREATE_NO_WINDOW is set — that flash is
@@ -36,21 +40,87 @@ pub fn reject_git_ref(v: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
+    let mut out = Vec::with_capacity(cap.min(64 * 1024));
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(out.len());
+                if room > 0 {
+                    out.extend_from_slice(&chunk[..n.min(room)]);
+                }
+                if n > room {
+                    truncated = true;
+                }
+            }
+        }
+    }
+    (out, truncated)
+}
+
+pub fn git_output(
+    repo: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>, bool), String> {
+    let mut child = git_cmd()
+        .args(args)
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("[git] failed to spawn: {e}"))?;
+    let stdout = child.stdout.take().ok_or("git stdout pipe unavailable")?;
+    let stderr = child.stderr.take().ok_or("git stderr pipe unavailable")?;
+    let out_thread = std::thread::spawn(move || read_capped(stdout, STATUS_CAP));
+    let err_thread = std::thread::spawn(move || read_capped(stderr, STDERR_CAP));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_thread.join();
+                let _ = err_thread.join();
+                return Err(format!("[git] wait failed: {e}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let (stdout, stdout_truncated) = out_thread.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = err_thread.join().unwrap_or_default();
+    match status {
+        Some(status) => Ok((status, stdout, stderr, stdout_truncated || stderr_truncated)),
+        None => Err(format!("git {} timed out after {}s", args.join(" "), timeout.as_secs())),
+    }
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Every dynamic ref/path arg must be preceded by `"--"` at the call
     // site; static flag lists here are safe by construction.
-    let out = git_cmd()
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .map_err(|_| "[git] failed to spawn".to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    let (status, stdout, stderr, truncated) = git_output(repo, args, GIT_TIMEOUT)?;
+    if status.success() {
+        if truncated {
+            return Err("git output exceeded safety limit".into());
+        }
+        Ok(String::from_utf8_lossy(&stdout).to_string())
     } else {
+        let stderr = String::from_utf8_lossy(&stderr);
         Err(format!(
             "git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
+            stderr.trim()
         ))
     }
 }
@@ -87,13 +157,17 @@ pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     // project doubled startup latency and flashed two console windows each.
     // `--show-toplevel` succeeds anywhere inside a worktree; a `HEAD`
     // abbrev-ref means detached (no current branch).
-    let out = git_cmd()
-        .args(["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"])
-        .current_dir(&p)
-        .output()
-        .map_err(|e| format!("failed to run git while detecting project: {e}"))?;
-    if out.status.success() {
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (status, stdout, stderr, truncated) = git_output(
+        &p,
+        &["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .map_err(|e| format!("failed to run git while detecting project: {e}"))?;
+    if status.success() {
+        if truncated {
+            return Err("git project detection output exceeded safety limit".into());
+        }
+        let text = String::from_utf8_lossy(&stdout).into_owned();
         let mut lines = text.lines();
         let root = lines.next().unwrap_or("").trim().to_string();
         if root.is_empty() {
@@ -115,7 +189,7 @@ pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
             branch,
         })
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = String::from_utf8_lossy(&stderr);
         if !is_not_repository_error(&stderr) {
             return Err(format!("git project detection failed: {}", stderr.trim()));
         }
@@ -137,16 +211,16 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
     }
     let initial = branch.unwrap_or_else(|| "main".into());
     reject_git_ref(&initial, "branch")?;
-    let out = git_cmd()
-        .args(["init", "-b", &initial])
-        .current_dir(&p)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
+    let (status, _, stderr, truncated) =
+        git_output(&p, &["init", "-b", &initial], GIT_TIMEOUT)?;
+    if !status.success() {
         return Err(format!(
             "git init failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&stderr).trim()
         ));
+    }
+    if truncated {
+        return Err("git init output exceeded safety limit".into());
     }
     Ok(p.to_string_lossy().to_string())
 }
@@ -155,7 +229,6 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
 /// only for the caller to keep the first 1MB. Stop reading at the cap, then
 /// kill the child so it never blocks on a full pipe. Returns (text, truncated).
 fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), String> {
-    use std::io::Read;
     use std::process::Stdio;
     let mut child = git_cmd()
         .args(args)
@@ -166,12 +239,8 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
         .map_err(|_| "[git] failed to spawn".to_string())?;
     // Drain stderr on its own thread: reading it after wait() would deadlock
     // if git ever filled the pipe while we were still reading stdout.
-    let err_thread = child.stderr.take().map(|mut e| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = e.read_to_string(&mut s);
-            s
-        })
+    let err_thread = child.stderr.take().map(|e| {
+        std::thread::spawn(move || read_capped(e, STDERR_CAP))
     });
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
@@ -203,9 +272,15 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
         let _ = child.kill();
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    let stderr = err_thread.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let (stderr, stderr_truncated) = err_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
     if !truncated && !status.success() {
-        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()));
+        let mut message = String::from_utf8_lossy(&stderr).trim().to_string();
+        if stderr_truncated {
+            message.push_str(" [stderr truncated]");
+        }
+        return Err(format!("git {} failed: {}", args.join(" "), message));
     }
     Ok((String::from_utf8_lossy(&buf).to_string(), truncated))
 }
