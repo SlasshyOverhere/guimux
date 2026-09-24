@@ -475,22 +475,40 @@ export const useStore = create<AppState>((set, get) => ({
       // projects' cached trees share this map and must survive while hidden.
       const live = new Set(wts.map((w) => w.id));
       const old = new Set(s.worktrees.map((w) => w.id));
-      for (const [id, node] of Object.entries(s.layouts)) {
-        if (old.has(id) && !live.has(id) && id !== s.activeWorktreeId) {
+      const currentLayouts =
+        s.activeWorktreeId && s.layout ? { ...s.layouts, [s.activeWorktreeId]: s.layout } : s.layouts;
+      const activeMissing = s.activeWorktreeId != null && !live.has(s.activeWorktreeId);
+      const fallback = activeMissing ? wts.find((w) => w.is_main) ?? wts[0] : undefined;
+      const activeWorktreeId = activeMissing ? fallback?.id ?? null : s.activeWorktreeId;
+      for (const [id, node] of Object.entries(currentLayouts)) {
+        if (old.has(id) && !live.has(id)) {
           for (const p of collectPaneObjs(node)) {
             if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
           }
         }
       }
       const layouts = Object.fromEntries(
-        Object.entries(s.layouts).filter(([id]) => !old.has(id) || live.has(id) || id === s.activeWorktreeId),
+        Object.entries(currentLayouts).filter(([id]) => !old.has(id) || live.has(id)),
       );
+      const layout = activeWorktreeId
+        ? layouts[activeWorktreeId] ?? { kind: "pane", id: nextId(), ptyId: null }
+        : null;
+      const nextLayouts = activeWorktreeId && layout ? { ...layouts, [activeWorktreeId]: layout } : layouts;
+      const switched = activeWorktreeId !== s.activeWorktreeId;
       return {
         worktrees: wts,
+        activeWorktreeId,
+        layout,
+        layouts: nextLayouts,
+        activePaneId: switched
+          ? layout
+            ? collectPanes(layout)[0] ?? null
+            : null
+          : s.activePaneId,
+        maximizedPaneId: switched ? null : s.maximizedPaneId,
         worktreesByProject: s.activeProjectId
           ? { ...s.worktreesByProject, [s.activeProjectId]: wts }
           : s.worktreesByProject,
-        layouts,
       };
     }),
   setActiveWorktree: (id) => {
