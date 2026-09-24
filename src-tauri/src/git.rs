@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -23,14 +24,37 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// All git spawns go through here: on Windows a child console process flashes
 /// a visible console window unless CREATE_NO_WINDOW is set — that flash is
 /// the "terminals popping in and out" on startup and on every status poll.
-pub fn git_cmd() -> Command {
-    let mut cmd = Command::new("git");
+#[cfg(windows)]
+const GIT_EXECUTABLE: &str = "git.exe";
+#[cfg(not(windows))]
+const GIT_EXECUTABLE: &str = "git";
+
+fn git_executable_from_path(path: &OsStr) -> Result<PathBuf, String> {
+    for directory in std::env::split_paths(path) {
+        if !directory.is_absolute() {
+            continue;
+        }
+        let candidate = directory.join(GIT_EXECUTABLE);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("{GIT_EXECUTABLE} was not found in an absolute PATH entry"))
+}
+
+fn git_executable() -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").ok_or("PATH is not set")?;
+    git_executable_from_path(&path)
+}
+
+pub fn git_cmd() -> Result<Command, String> {
+    let mut cmd = Command::new(git_executable()?);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    cmd
+    Ok(cmd)
 }
 
 /// Rejects flag-shaped git refs (H-005): a leading `-` would be parsed as a
@@ -69,6 +93,7 @@ pub fn git_output(
     timeout: Duration,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>, bool), String> {
     let mut child = git_cmd()
+        .map_err(|e| format!("[git] {e}"))?
         .args(args)
         .current_dir(repo)
         .stdin(Stdio::null())
@@ -233,6 +258,7 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
 fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), String> {
     use std::process::Stdio;
     let mut child = git_cmd()
+        .map_err(|e| e)?
         .args(args)
         .current_dir(repo)
         .stdin(Stdio::null())
@@ -562,6 +588,20 @@ mod tests {
         let (diff, truncated) = git_capped(&dir, &["diff", "--"], 128).unwrap();
         assert!(truncated);
         assert!(diff.len() <= 128);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_path_ignores_relative_entries() {
+        let dir = std::env::temp_dir().join(format!("guimux-git-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join(GIT_EXECUTABLE);
+        fs::write(&fake, b"not executable").unwrap();
+
+        let absolute = std::env::join_paths([dir.clone()]).unwrap();
+        assert_eq!(git_executable_from_path(&absolute).unwrap(), fake);
+        assert!(git_executable_from_path(std::ffi::OsStr::new("relative-git-dir")).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
