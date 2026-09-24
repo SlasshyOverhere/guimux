@@ -222,6 +222,9 @@ export function ExplorerPane({ root }: { root: string }) {
   const [monacoReady, setMonacoReady] = useState(false);
   const [monacoError, setMonacoError] = useState<string | null>(null);
   const [monacoRetry, setMonacoRetry] = useState(0);
+  const rootRef = useRef(root);
+  rootRef.current = root;
+  const treeRequestRef = useRef(0);
   // Markdown preview: defaults on for .md files, toggled per-file.
   const [markdownPreview, setMarkdownPreview] = useState(true);
   useEffect(() => {
@@ -249,9 +252,17 @@ export function ExplorerPane({ root }: { root: string }) {
   }, [editorPath, monacoReady, monacoRetry, markdownPreview]);
 
   const refreshTree = () => {
+    const request = ++treeRequestRef.current;
+    const requestedRoot = root;
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
-      .then((t) => setTree(t))
-      .catch(() => setTree(null));
+      .then((t) => {
+        if (request !== treeRequestRef.current || normSep(requestedRoot) !== normSep(rootRef.current)) return;
+        setTree(t);
+      })
+      .catch(() => {
+        if (request !== treeRequestRef.current || normSep(requestedRoot) !== normSep(rootRef.current)) return;
+        setTree(null);
+      });
   };
 
   // External changes (git checkout, agent writes, another editor): the
@@ -285,25 +296,33 @@ export function ExplorerPane({ root }: { root: string }) {
 
   // Content search over the worktree, debounced; needs 2+ chars.
   useEffect(() => {
+    let cancelled = false;
     const q = query.trim();
     if (!searchOpen || q.length < 2) {
       setHits([]);
       setSearching(false);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
     setSearching(true);
     const t = window.setTimeout(() => {
       invoke<GrepHit[]>("grep_search", { path: root, query: q })
         .then((h) => {
+          if (cancelled) return;
           setHits(h);
           setSearching(false);
         })
         .catch(() => {
+          if (cancelled) return;
           setHits([]);
           setSearching(false);
         });
     }, 300);
-    return () => clearTimeout(t);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [query, searchOpen, root]);
 
   // A search hit opens its file first; reveal the line once the editor holds it.
@@ -496,11 +515,20 @@ export function ExplorerPane({ root }: { root: string }) {
 
   useEffect(() => {
     if (!editorPath || !diffMode) return;
+    let cancelled = false;
+    setGitDiff("");
     // Diff-only: the old effect ran `git diff` on every file open even when
     // the diff view was never shown, adding a spawn to the startup path.
     invoke<string>("git_diff", { path: root, base: null })
-      .then(setGitDiff)
-      .catch(() => setGitDiff(""));
+      .then((diff) => {
+        if (!cancelled) setGitDiff(diff);
+      })
+      .catch(() => {
+        if (!cancelled) setGitDiff("");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [root, editorPath, diffMode]);
 
   const shortName = useMemo(() => {
