@@ -1,12 +1,15 @@
 import { RefreshCw } from "lucide-react";
 import { useStore } from "../store";
 import { useAutoUpdater } from "../useAutoUpdater";
+import { confirmUnsavedDiscard } from "../explorer/editorBuffer";
+import { confirmDialog } from "../dialogs";
 
 const HAIRLINE = { borderBottom: "1px solid var(--gm-hairline-soft)" } as const;
 
 export function UpdatesSection() {
   const autoCheck = useStore((s) => s.settings.autoCheckForUpdates);
   const setSettings = useStore((s) => s.setSettings);
+  const editorDirtyCount = useStore((s) => s.editorDirtyCount);
   const u = useAutoUpdater();
   const busy = u.status === "checking" || u.status === "downloading";
 
@@ -67,7 +70,10 @@ export function UpdatesSection() {
           <button
             className="mt-1.5 rounded-md px-3 py-1.5 text-[12.5px] font-semibold"
             style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
-            onClick={() => void u.relaunch()}
+            onClick={async () => {
+              if (!(await confirmUnsavedDiscard(editorDirtyCount, confirmDialog, "restart for the update"))) return;
+              await u.relaunch();
+            }}
           >
             Restart to Update
           </button>

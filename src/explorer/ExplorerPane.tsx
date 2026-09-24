@@ -11,7 +11,7 @@ import { menuPos } from "../menuPos";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
-import { canSaveBuffer } from "./editorBuffer";
+import { canSaveBuffer, confirmUnsavedDiscard } from "./editorBuffer";
 import type { FsNode, GrepHit } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
@@ -22,6 +22,12 @@ const SEP = /[\\/]/;
 // Unsaved buffers keyed by path: the pane remounts on every worktree switch
 // (key={wt.id}), and local state alone took the user's edits with it.
 const buffers = new Map<string, { content: string; saved: string; dirty: boolean }>();
+
+function syncEditorDirtyCount() {
+  let count = 0;
+  for (const buffer of buffers.values()) if (buffer.dirty) count += 1;
+  useStore.getState().setEditorDirtyCount(count);
+}
 
 // Tree paths mix separators (worktree roots use `/`, DirEntry adds `\`), so
 // both comparisons below normalize before matching.
@@ -397,10 +403,23 @@ export function ExplorerPane({ root }: { root: string }) {
     setRenaming(null);
     setMenu(null);
     const st = useStore.getState();
-    const open = st.editorPath;
-    if (open && !inRoot(root, open)) {
-      st.setEditorTabs(st.editorTabs.filter((t) => inRoot(root, t)));
+    const outside = st.editorTabs.filter((path) => !inRoot(root, path));
+    if (outside.length === 0) return;
+    const dirtyOutside = outside.filter((path) => buffers.get(path)?.dirty);
+    if (dirtyOutside.length === 0) {
+      st.setEditorTabs(st.editorTabs.filter((path) => inRoot(root, path)));
+      return;
     }
+    let cancelled = false;
+    void confirmUnsavedDiscard(dirtyOutside.length, confirmDialog, "leave this worktree").then((confirmed) => {
+      if (!confirmed || cancelled) return;
+      for (const path of dirtyOutside) buffers.delete(path);
+      syncEditorDirtyCount();
+      useStore.getState().setEditorTabs(useStore.getState().editorTabs.filter((path) => inRoot(root, path)));
+    });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -409,6 +428,7 @@ export function ExplorerPane({ root }: { root: string }) {
     // A dirty buffer outranks disk: this is the remount that used to lose it.
     const cached = buffers.get(editorPath);
     if (cached?.dirty) {
+      loadedPathRef.current = editorPath;
       setContent(cached.content);
       setSavedContent(cached.saved);
       setDirty(true);
@@ -452,9 +472,10 @@ export function ExplorerPane({ root }: { root: string }) {
   // Mirror only unsaved buffers: a clean one reloads from disk, and keeping
   // every opened file in memory would grow without bound.
   useEffect(() => {
-    if (!editorPath) return;
+    if (!editorPath || !canSaveBuffer(editorPath, loadedPathRef.current)) return;
     if (dirty) buffers.set(editorPath, { content, saved: savedContent, dirty: true });
     else buffers.delete(editorPath);
+    syncEditorDirtyCount();
   }, [editorPath, content, savedContent, dirty]);
 
   useEffect(() => {
@@ -535,8 +556,9 @@ export function ExplorerPane({ root }: { root: string }) {
     // Live edits mirror into `buffers` on render; check both so a close
     // issued between keystroke and mirror still guards.
     const isDirty = buffers.get(target)?.dirty || (target === editorPath && dirty);
-    if (isDirty && !(await confirmDialog("Discard unsaved changes?"))) return;
+    if (isDirty && !(await confirmUnsavedDiscard(1, confirmDialog, "close this file"))) return;
     buffers.delete(target);
+    syncEditorDirtyCount();
     closeEditor(target);
   };
 

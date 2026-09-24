@@ -217,6 +217,7 @@ interface AppState {
   editorPath: string | null;
   editorTabs: string[];
   diffMode: boolean;
+  editorDirtyCount: number;
 
   // palette
   paletteOpen: boolean;
@@ -256,6 +257,7 @@ interface AppState {
   openEditor: (path: string | null, diff?: boolean) => void;
   closeEditor: (path?: string | null) => void;
   setEditorTabs: (tabs: string[]) => void;
+  setEditorDirtyCount: (count: number) => void;
   setPaletteOpen: (open: boolean) => void;
   setSettings: (patch: Partial<Settings>) => void;
   hydrateSettings: (s: Settings) => void;
@@ -288,6 +290,7 @@ export const useStore = create<AppState>((set, get) => ({
   editorPath: null,
   editorTabs: [],
   diffMode: false,
+  editorDirtyCount: 0,
 
   paletteOpen: false,
 
@@ -774,6 +777,7 @@ export const useStore = create<AppState>((set, get) => ({
       const active = s.editorPath && kept.includes(s.editorPath) ? s.editorPath : kept[kept.length - 1];
       return { editorPath: active, editorTabs: kept };
     }),
+  setEditorDirtyCount: (count) => set({ editorDirtyCount: Math.max(0, Math.floor(count)) }),
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   hydrateSettings: (s) => set({ settings: { ...DEFAULT_SETTINGS, ...s } }),
