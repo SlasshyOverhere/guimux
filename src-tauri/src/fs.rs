@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
 use notify::Watcher as _NotifyWatcher;
 use tauri::{command, AppHandle, Emitter};
+#[cfg(windows)]
+use winapi::um::sysinfoapi::GetSystemDirectoryW;
 
 const MAX_FILE: u64 = 1_000_000; // skip files >1MB
 const MAX_WRITE: usize = 5_000_000; // fs_write cap: stops disk-fill, allows growth past read cap
@@ -194,6 +196,17 @@ pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     fs::rename(&from, &to).map_err(|e| e.to_string())
 }
 
+#[cfg(windows)]
+fn system_explorer() -> Result<PathBuf, String> {
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err("cannot resolve the Windows system directory".into());
+    }
+    let directory = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+    Ok(directory.join("explorer.exe"))
+}
+
 #[command]
 pub fn fs_reveal(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
@@ -205,7 +218,11 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
     // Explorer needs backslashes: worktree ids use `/` (norm_sep) and
     // Explorer silently falls back to Documents on forward slashes.
     #[cfg(target_os = "windows")]
-    let mut cmd = { let mut c = std::process::Command::new("explorer"); c.arg(p.to_string_lossy().replace('/', "\\")); c };
+    let mut cmd = {
+        let mut c = std::process::Command::new(system_explorer()?);
+        c.arg(p.to_string_lossy().replace('/', "\\"));
+        c
+    };
     #[cfg(target_os = "macos")]
     let mut cmd = { let mut c = std::process::Command::new("open"); c.arg(&p); c };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -712,6 +729,14 @@ mod tests {
     fn reveal_rejects_non_dirs() {
         assert!(fs_reveal("C:/no/such/dir-xyz".into()).is_err());
         assert!(reject_special_path(Path::new("\\\\.\\C:"), "path").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reveal_uses_system_explorer() {
+        let path = system_explorer().unwrap();
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("explorer.exe"));
     }
 
     #[test]
