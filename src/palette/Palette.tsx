@@ -70,12 +70,19 @@ export function Palette() {
   }, [paletteOpen]);
 
   useEffect(() => {
+    let cancelled = false;
     // Lazy: only scan when the palette opens. The old effect walked the
     // tree on every repoRoot change (startup included) for results nobody
     // saw until Ctrl+K.
-    if (!repoRoot || !paletteOpen) return;
+    if (!repoRoot || !paletteOpen) {
+      setFiles([]);
+      return () => {
+        cancelled = true;
+      };
+    }
     invoke<FsNode>("fs_tree", { path: repoRoot, depth: 3 })
       .then((t) => {
+        if (cancelled) return;
         const flat: FsNode[] = [];
         const walk = (n: FsNode) => {
           if (!n.is_dir) flat.push(n);
@@ -84,7 +91,12 @@ export function Palette() {
         if (t) walk(t);
         setFiles(flat);
       })
-      .catch(() => setFiles([]));
+      .catch(() => {
+        if (!cancelled) setFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [repoRoot, paletteOpen]);
 
   const openFolder = async () => {
