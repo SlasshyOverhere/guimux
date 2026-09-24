@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, State};
@@ -10,6 +10,13 @@ use tauri::{command, AppHandle, Emitter, State};
 pub struct PtySession {
     pub id: u64,
     pub cwd: String,
+    pub shell_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyAttach {
+    pub replay: Vec<u8>,
+    pub shell_kind: String,
 }
 
 struct PtyEntry {
@@ -47,6 +54,7 @@ impl PtyManager {
             drop(entry.master);
         }
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -232,6 +240,23 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
 /// cwd per live session id, so `pty_restart` can respawn in place.
 static SPAWN_CWDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static SHELL_KINDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn shell_kind_for(shell: &str) -> &'static str {
+    let name = Path::new(shell)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "pwsh" | "powershell" => "powershell",
+        "cmd" => "cmd",
+        "fish" => "fish",
+        "bash" | "sh" | "zsh" | "ksh" | "dash" => "posix",
+        _ => "unknown",
+    }
+}
 
 /// Output-before-attach fix: per-PTY ring buffer. The pump always appends
 /// (cap 256KB, oldest dropped); live `pty:output-{id}` emits only after the
@@ -454,6 +479,7 @@ fn spawn_pair(
 
     let mut spawn_err = String::new();
     let mut child = None;
+    let mut shell_kind = "unknown";
     for (shell, shell_args) in &attempts {
         let mut cmd = CommandBuilder::new(shell.clone());
         for arg in shell_args {
@@ -477,6 +503,7 @@ fn spawn_pair(
                     eprintln!("[gm-pty] id={id} process-started shell={shell} +{}ms", t_start.elapsed().as_millis());
                 }
                 child = Some(c);
+                shell_kind = shell_kind_for(shell);
                 break;
             }
             // Store-alias stub (code 5) or AV block: walk the chain.
@@ -517,6 +544,10 @@ fn spawn_pair(
         let mut map = SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id, cwd.clone());
     }
+    SHELL_KINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, shell_kind.to_string());
     ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, live);
     let epoch = bump_epoch_reset_buffer(id);
 
@@ -525,7 +556,11 @@ fn spawn_pair(
     // behind for pty_kill/pty_restart.
     spawn_exit_watcher(app.clone(), id, epoch, child);
     spawn_output_pump(app.clone(), id, epoch, reader, t_start);
-    Ok(PtySession { id, cwd })
+    Ok(PtySession {
+        id,
+        cwd,
+        shell_kind: shell_kind.to_string(),
+    })
 }
 
 #[command]
@@ -546,7 +581,7 @@ pub fn pty_spawn(
 /// ids so the pane can detect a dead session (e.g. killed across a worktree
 /// switch) and spawn fresh instead of sitting blank.
 #[command]
-pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
+pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
     if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
         return Err("no such pty session".into());
     }
@@ -554,7 +589,20 @@ pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
     // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
     // raw bytes); kept because the frontend consumes number[] — switch both
     // to base64 together if replay size ever matters.
-    Ok(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap_or_default().into_iter().collect())
+    let replay = BUFFERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let shell_kind = SHELL_KINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| "unknown".into());
+    Ok(PtyAttach { replay, shell_kind })
 }
 
 /// Liveness probe for remounts: false when the session is unknown OR its
@@ -663,6 +711,7 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     // Arc lets the last holder close the PTY.)
     drop(master_to_close);
     SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
@@ -682,6 +731,15 @@ mod tests {
         // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('test'))
         assert_eq!(base64_encode(&utf16le("test")), "dABlAHMAdAA=");
         assert_eq!(utf16le("A"), vec![0x41, 0x00]);
+    }
+
+    #[test]
+    fn classifies_shells_for_safe_path_pasting() {
+        assert_eq!(shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"), "powershell");
+        assert_eq!(shell_kind_for("cmd.exe"), "cmd");
+        assert_eq!(shell_kind_for("/bin/bash"), "posix");
+        assert_eq!(shell_kind_for("/usr/bin/fish"), "fish");
+        assert_eq!(shell_kind_for("custom-shell"), "unknown");
     }
 
     #[test]

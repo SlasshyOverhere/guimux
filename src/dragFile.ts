@@ -1,3 +1,5 @@
+import type { ShellKind } from "./types";
+
 // Same-document file-drag channel (explorer tree -> terminal panes).
 //
 // The drop handler used to read the path only from `dataTransfer`, but the
@@ -21,13 +23,14 @@ if (typeof window !== "undefined") {
   w.__gmDragFile = dragFile;
 }
 
-// Quote a Windows path for pasting at a PowerShell/cmd prompt. `"` is an
-// illegal file-name character on Windows, so no inner-quote escaping is
-// needed; a trailing backslash (folders) would escape the closing quote, so
-// it is doubled (harmless to both shells).
-export function quoteForShell(path: string): string {
-  const safe = path.endsWith("\\") ? `${path}\\` : path;
-  return `"${safe}" `;
+export function quoteForShell(path: string, shell: ShellKind): string | null {
+  if (shell === "powershell" || shell === "posix") {
+    return `'${path.replaceAll("'", "''")}' `;
+  }
+  if (shell === "fish") {
+    return `'${path.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}' `;
+  }
+  return null;
 }
 
 // Release-to-paste bus: HTML5 drop never fires in this webview (logs show

@@ -18,6 +18,14 @@ export interface Project {
 export interface PtySession {
   id: number;
   cwd: string;
+  shell_kind: ShellKind;
+}
+
+export type ShellKind = "powershell" | "cmd" | "posix" | "fish" | "unknown";
+
+export interface PtyAttach {
+  replay: number[];
+  shell_kind: ShellKind;
 }
 
 export interface FileStatus {
