@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -260,7 +260,16 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
     }
     let n = WRITE_CTR.fetch_add(1, Ordering::SeqCst);
     let tmp = parent.join(format!(".guimux-tmp-{}-{}", std::process::id(), n));
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    let mut temp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = temp.write_all(content.as_bytes()) {
+        drop(temp);
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     if let Some(expected) = expected {
         if !file_matches(&p, expected) {
             let _ = fs::remove_file(&tmp);
@@ -401,22 +410,40 @@ pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
     }
     // Our own managed drop dir: create it, unlike fs_write's no-mkdir rule.
     let parent = p.parent().ok_or("invalid path")?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    // Suffix on clash instead of truncating another paste.
+    if let Ok(meta) = std::fs::symlink_metadata(parent) {
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err("invalid paste drop directory".into());
+        }
+    } else {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let meta = std::fs::symlink_metadata(parent).map_err(|e| e.to_string())?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err("invalid paste drop directory".into());
+        }
+    }
+    // Suffix on clash instead of truncating another paste. create_new also
+    // rejects a dangling or malicious symlink at the chosen target.
     let mut target = p.clone();
     for i in 1..100 {
-        if !target.exists() {
-            break;
-        }
         let stem = name.rsplit_once('.').map(|s| s.0).unwrap_or(name);
         let ext = name.rsplit_once('.').map(|s| s.1).unwrap_or("png");
-        target = parent.join(format!("{stem}-{i}.{ext}"));
+        if i > 1 {
+            target = parent.join(format!("{stem}-{}.{ext}", i - 1));
+        }
+        match OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&bytes) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&target);
+                    return Err(e.to_string());
+                }
+                return Ok(target.to_string_lossy().to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
     }
-    if target.exists() {
-        return Err("could not pick a free paste file name".into());
-    }
-    std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-    Ok(target.to_string_lossy().to_string())
+    Err("could not pick a free paste file name".into())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,7 +525,10 @@ pub fn grep_search(
                 Err(_) => continue,
             };
             let mut bytes = Vec::new();
-            if file.by_ref().take(MAX_FILE + 1).read_to_end(&mut bytes).is_err()
+            if Read::by_ref(&mut file)
+                .take(MAX_FILE + 1)
+                .read_to_end(&mut bytes)
+                .is_err()
                 || bytes.len() as u64 > MAX_FILE
             {
                 continue;
@@ -786,6 +816,24 @@ mod tests {
         assert!(fs_write_bytes(dir.join("x.png").to_string_lossy().to_string(), "aGk=".into()).is_err());
         assert!(fs_write_bytes(drop.join("evil.txt").to_string_lossy().to_string(), "aGk=".into()).is_err());
         assert!(fs_write_bytes(target.to_string_lossy().to_string(), "!!!".into()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paste_does_not_follow_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("guimux-paste-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".guimux-pastes")).unwrap();
+        let outside = dir.join("outside.txt");
+        fs::write(&outside, b"keep").unwrap();
+        let requested = dir.join(".guimux-pastes").join("paste-link.png");
+        symlink(&outside, &requested).unwrap();
+        let saved = fs_write_bytes(requested.to_string_lossy().to_string(), "aGk=".into()).unwrap();
+        assert_ne!(saved, requested.to_string_lossy());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&dir);
     }
 }
