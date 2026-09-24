@@ -263,7 +263,30 @@ fn short_hash(root: &Path) -> u32 {
 /// C-001 guard for the `remove_dir_all` fallback (git already forgot the
 /// path): only delete inside our own `~/.guimux/worktrees` tree — never the
 /// repo root, home, or anything else. Returns the canonical target.
+fn is_link_like(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn reject_link_like(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if is_link_like(&metadata) => {
+            Err("refusing to operate on a symlink or junction worktree path".into())
+        }
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
 fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, String> {
+    reject_link_like(path)?;
     let target = std::fs::canonicalize(path).map_err(|e| format!("cannot resolve path: {e}"))?;
     let canon_root = std::fs::canonicalize(main_root).unwrap_or_else(|_| main_root.to_path_buf());
     if target == canon_root {
@@ -380,6 +403,7 @@ pub fn worktree_remove(
     reject_git_ref(&id, "worktree id")?;
     let force = force.unwrap_or(false);
     let path = PathBuf::from(&id);
+    reject_link_like(&path)?;
     // Run git from the MAIN worktree (a linked worktree reports itself as
     // toplevel, and removing a worktree from inside itself fails on Windows).
     // Resolve via repo_root: the worktree dir itself may be half-removed and
@@ -786,6 +810,25 @@ mod tests {
         assert!(err.contains("uncommitted changes"), "unexpected error: {err}");
 
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_remove_rejects_symlink_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("guimux-worktree-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let link = dir.join("link");
+        symlink(&target, &link).unwrap();
+
+        let error = reject_link_like(&link).unwrap_err();
+        assert!(error.contains("symlink or junction"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
