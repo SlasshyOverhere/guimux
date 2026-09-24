@@ -51,6 +51,14 @@ fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
         if let Component::Normal(os) = c {
             let mut name = os.to_string_lossy().to_uppercase();
             #[cfg(windows)]
+            while name.ends_with(' ') || name.ends_with('.') {
+                name.pop();
+            }
+            #[cfg(windows)]
+            if name.is_empty() {
+                return Err(format!("invalid {what}: reserved device name"));
+            }
+            #[cfg(windows)]
             if name.contains(':') {
                 return Err(format!("invalid {what}: alternate data streams are not allowed"));
             }
@@ -770,6 +778,14 @@ mod tests {
         assert!(reject_special_path(Path::new("C:/x/COM1.txt"), "path").is_err());
         assert!(reject_special_path(Path::new("\\\\.\\C:"), "path").is_err());
         assert!(reject_special_path(Path::new("C:/ok/file.txt"), "path").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reserved_names_reject_windows_trailing_aliases() {
+        for name in ["NUL ", "NUL  ", "NUL ."] {
+            assert!(reject_special_path(Path::new("C:/x").join(name).as_path(), "path").is_err());
+        }
     }
 
     #[test]
