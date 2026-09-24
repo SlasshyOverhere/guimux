@@ -173,25 +173,36 @@ export function WorktreeSidebar() {
   // status tick — it only moves on commit/push/fetch/merge. Unknown rows
   // stay badge-less rather than claiming 0.
   const [aheadBehind, setAheadBehind] = useState<Record<string, AheadBehind>>({});
+  const aheadRequestRef = useRef(0);
   const [gitBusy, setGitBusy] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const refreshAheadBehind = async () => {
+    const request = ++aheadRequestRef.current;
     const st = useStore.getState();
+    const root = st.repoRoot;
+    const projectId = st.activeProjectId;
     const rows = st.worktrees.filter((wt) => !wt.id.startsWith("plain:"));
-    if (rows.length === 0) return;
+    const current = () => request === aheadRequestRef.current && useStore.getState().repoRoot === root && useStore.getState().activeProjectId === projectId;
+    if (rows.length === 0) {
+      if (current()) setAheadBehind({});
+      return;
+    }
     const next: Record<string, AheadBehind> = {};
     for (const [i, wt] of rows.entries()) {
+      if (!current()) return;
       if (i > 0) await new Promise((r) => setTimeout(r, 100));
+      if (!current()) return;
       try {
         next[wt.id] = await invoke<AheadBehind>("git_ahead_behind", { path: wt.path });
       } catch {
         /* unreadable row: leave it badge-less */
       }
     }
-    setAheadBehind((prev) => ({ ...prev, ...next }));
+    if (current()) setAheadBehind((prev) => ({ ...prev, ...next }));
   };
 
   useEffect(() => {
+    aheadRequestRef.current += 1;
     setAheadBehind({});
     if (!repoRoot || !isGit) return;
     let cancelled = false;
@@ -201,6 +212,7 @@ export function WorktreeSidebar() {
     }, 5000);
     return () => {
       cancelled = true;
+      aheadRequestRef.current += 1;
       clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
