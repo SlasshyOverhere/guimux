@@ -77,6 +77,12 @@ fn current_branch(path: &Path) -> Result<String, String> {
         .current_dir(path)
         .output()
         .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot inspect current branch: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -287,33 +293,39 @@ fn safe_manual_remove_target(main_root: &Path, path: &Path) -> Result<PathBuf, S
 }
 
 /// Paths git currently knows, slash-normalized for `==` with worktree ids.
-fn registered_paths(root: &Path) -> Vec<String> {
+fn registered_paths(root: &Path) -> Result<Vec<String>, String> {
     let out = match git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(root)
         .output()
     {
-        Ok(o) if o.status.success() => o,
-        _ => return vec![],
+        Ok(o) => o,
+        Err(e) => return Err(format!("cannot inspect git worktrees: {e}")),
     };
-    String::from_utf8_lossy(&out.stdout)
+    if !out.status.success() {
+        return Err(format!(
+            "cannot inspect git worktrees: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.strip_prefix("worktree "))
         .map(|p| norm_sep(p.to_string()))
-        .collect()
+        .collect())
 }
 
-fn is_registered(root: &Path, id: &str) -> bool {
+fn is_registered(root: &Path, id: &str) -> Result<bool, String> {
     let want = norm_sep(id.to_string());
     #[cfg(windows)]
     {
-        registered_paths(root)
+        Ok(registered_paths(root)?
             .iter()
-            .any(|p| p.eq_ignore_ascii_case(&want))
+            .any(|p| p.eq_ignore_ascii_case(&want)))
     }
     #[cfg(not(windows))]
     {
-        registered_paths(root).iter().any(|p| p == &want)
+        Ok(registered_paths(root)?.iter().any(|p| p == &want))
     }
 }
 
@@ -327,14 +339,14 @@ fn classify_stale(main_root: &Path, path: &Path) -> (bool, String) {
     (inside, canon)
 }
 
-fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
+fn delete_branch_guarded(root: &Path, b: &str, force: bool) -> Result<(), String> {
     if b.is_empty() || b.starts_with('-') || b.contains('\0') {
-        return;
+        return Err("invalid branch name".into());
     }
     // -d refuses an unmerged branch; -D only once the caller accepted the
     // loss of uncommitted work.
     let flag = if force { "-D" } else { "-d" };
-    let _ = run_git(root, &["branch", flag, "--", b]);
+    run_git(root, &["branch", flag, "--", b]).map(|_| ())
 }
 
 fn sanitize(name: &str) -> String {
@@ -378,18 +390,29 @@ pub fn worktree_remove(
     // Resolve via repo_root: the worktree dir itself may be half-removed and
     // unusable as a cwd.
     let anchor = PathBuf::from(&repo_root);
-    let root = find_main_worktree(&anchor).unwrap_or(anchor);
+    let root = find_main_worktree(&anchor).ok_or_else(|| {
+        format!("cannot inspect git worktrees at {}", anchor.to_string_lossy())
+    })?;
     if !path.exists() {
         // Dir already gone (e.g. a previous forced remove half-finished):
         // prune the stale entry so `git worktree list` stops showing it.
-        let _ = run_git(&root, &["worktree", "prune"]);
+        run_git(&root, &["worktree", "prune"])?;
         return Ok(());
     }
+    let branch = if delete_branch {
+        let branch = current_branch(&path)?;
+        if branch.is_empty() {
+            return Err("cannot delete a detached worktree branch".into());
+        }
+        Some(branch)
+    } else {
+        None
+    };
     // Git already forgot this id (moved folder, deleted
     // `.git/worktrees/<name>`, external `git worktree remove` without a
     // refresh): fail structured so the UI can show the path, offer prune,
     // and refresh — never a dead-end "delete it manually".
-    if !is_registered(&root, &id) {
+    if !is_registered(&root, &id)? {
         let (inside, canon) = classify_stale(&root, &path);
         let repo = root.to_string_lossy().to_string();
         if inside {
@@ -400,10 +423,10 @@ pub fn worktree_remove(
                         "worktree is not registered with git and folder cleanup failed (close terminals using it and retry): {e}"
                     ));
                 }
-                let _ = run_git(&root, &["worktree", "prune"]);
+                run_git(&root, &["worktree", "prune"])?;
                 if delete_branch {
-                    if let Some(b) = current_branch(&path).ok() {
-                        delete_branch_guarded(&root, &b, force);
+                    if let Some(b) = branch.as_deref() {
+                        delete_branch_guarded(&root, b, force)?;
                     }
                 }
                 return Ok(());
@@ -419,17 +442,13 @@ pub fn worktree_remove(
     // --force also discards uncommitted work, so refuse it until the caller
     // confirmed the loss. Ignored build output does not count as dirty.
     if !force {
-        let dirty = git_cmd()
-            .args(["status", "--porcelain"])
-            .current_dir(&path)
-            .output()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or(false);
+        let dirty = worktree_dirty(&path)?;
         // delete_branch runs `branch -D`, which also drops commits the base
         // never saw. Name them: a finished-but-unmerged branch must not vanish
         // behind a generic "branch will be deleted" prompt.
         let unmerged = if delete_branch {
-            unmerged_commits(&root, &path).filter(|(n, _)| *n > 0)
+            unmerged_commits(&root, branch.as_deref().unwrap_or_default())?
+                .filter(|(n, _)| *n > 0)
         } else {
             None
         };
@@ -448,8 +467,6 @@ pub fn worktree_remove(
             ));
         }
     }
-    // capture branch before removal
-    let branch = current_branch(&path).ok();
     // Windows: AV/indexers can briefly lock freshly-written files; retry a few times.
     // A stale entry ("is not a working tree") is NOT transient: fall through to
     // the manual cleanup below instead of retrying.
@@ -479,17 +496,20 @@ pub fn worktree_remove(
                 "GUIMUX_STALE_OUTSIDE path={canon} repo={repo} worktree is not registered with git and is outside the managed dir; will not delete. Run `git worktree prune` to drop the stale entry or `git worktree repair` to re-register it, then retry"
             ));
         }
+        if !force {
+            return Err(format!(
+                "GUIMUX_STALE_INSIDE path={canon} repo={repo} worktree became unregistered during removal; folder is inside the managed dir and was not deleted. Retry with force to delete it and prune"
+            ));
+        }
         let target = safe_manual_remove_target(&root, &path)?;
         if let Err(e) = std::fs::remove_dir_all(&target) {
             return Err(format!(
                 "worktree is not registered with git and folder cleanup failed (close terminals using it and retry): {e}"
             ));
         }
-        let _ = run_git(&root, &["worktree", "prune"]);
-        if delete_branch {
-            if let Some(b) = branch {
-                delete_branch_guarded(&root, &b, force);
-            }
+        run_git(&root, &["worktree", "prune"])?;
+        if let Some(b) = branch.as_deref() {
+            delete_branch_guarded(&root, b, force)?;
         }
         return Ok(());
     }
@@ -500,10 +520,8 @@ pub fn worktree_remove(
             .unwrap_or_else(|_| id.clone());
         return Err(format!("{} (path={canon})", last_err));
     }
-    if delete_branch {
-        if let Some(b) = branch {
-            delete_branch_guarded(&root, &b, force);
-        }
+    if let Some(b) = branch.as_deref() {
+        delete_branch_guarded(&root, b, force)?;
         return Ok(());
     }
     Ok(())
@@ -626,21 +644,44 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
     Ok(cur_branch)
 }
 
+fn worktree_dirty(path: &Path) -> Result<bool, String> {
+    let out = git_cmd()
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("cannot inspect worktree status: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot inspect worktree status: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(!out.stdout.is_empty())
+}
+
 /// Commits on the worktree's branch that its base lacks: what `branch -D`
-/// would throw away. None when git cannot tell (detached HEAD, no base).
-fn unmerged_commits(main_wt: &Path, wt: &Path) -> Option<(usize, String)> {
-    let branch = current_branch(wt).ok()?;
-    let base = find_base_branch(main_wt, &branch).ok()?;
+/// would throw away.
+fn unmerged_commits(main_wt: &Path, branch: &str) -> Result<Option<(usize, String)>, String> {
+    if branch.is_empty() {
+        return Ok(None);
+    }
+    let base = find_base_branch(main_wt, branch)?;
     let out = git_cmd()
         .args(["rev-list", "--count", &format!("{base}..{branch}")])
         .current_dir(main_wt)
         .output()
-        .ok()?;
+        .map_err(|e| format!("cannot inspect unmerged commits: {e}"))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "cannot inspect unmerged commits: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    let n = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>().ok()?;
-    Some((n, base))
+    let n = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "cannot inspect unmerged commits: invalid count".to_string())?;
+    Ok(Some((n, base)))
 }
 
 #[cfg(test)]
@@ -752,6 +793,26 @@ mod tests {
         assert!(outside.exists());
         let _ = fs::remove_dir_all(&outside);
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn removal_fails_closed_when_git_lookup_fails() {
+        let dir = std::env::temp_dir().join(format!("guimux-no-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let worktree = dir.join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        assert!(registered_paths(&dir).is_err());
+        let error = worktree_remove(
+            dir.to_string_lossy().to_string(),
+            worktree.to_string_lossy().to_string(),
+            false,
+            Some(false),
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot inspect git worktrees"), "unexpected error: {error}");
+        assert!(worktree.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

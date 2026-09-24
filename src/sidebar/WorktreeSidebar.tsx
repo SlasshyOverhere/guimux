@@ -377,7 +377,7 @@ export function WorktreeSidebar() {
     // and abort with a notice instead of deleting the wrong thing.
     try {
       const fresh: Worktree[] = await invoke("worktree_list", { repoRoot: root });
-      if (fresh.length > 0 && !fresh.some((w) => w.id === wt.id)) {
+      if (!fresh.some((w) => w.id === wt.id)) {
         if (pid && pid !== useStore.getState().activeProjectId) {
           await refreshProjectList(pid, root);
         } else {
@@ -386,8 +386,9 @@ export function WorktreeSidebar() {
         void errorDialog(`Worktree is gone, list refreshed.\nPath: ${wt.path}`);
         return;
       }
-    } catch {
-      /* list failed: fall through to remove, backend reports the truth */
+    } catch (e) {
+      void errorDialog(`Could not verify worktree before removal:\n${e}`);
+      return;
     }
     const dropShells = () => {
       for (const pty of useStore.getState().dropWorktreeLayout(wt.id)) {
