@@ -15,6 +15,8 @@ const MAX_CHILDREN: usize = 2000; // per-dir cap (H-002: 100k-file dirs froze th
 const MAX_NODES: usize = 20_000; // whole-tree cap
 const MAX_GREP_FILES: usize = 20_000; // scanned files per search
 const MAX_GREP_HITS: usize = 200; // hits per search
+const MAX_GREP_DIRS: usize = 20_000; // directories visited per search
+const MAX_GREP_ENTRIES: usize = 200_000; // directory entries examined per search
 const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "__pycache__"];
 /// Windows reserved names (also `NUL.txt`): open/read would block the IPC thread.
 const RESERVED: &[&str] = &[
@@ -519,6 +521,17 @@ pub fn grep_search(
     case_sensitive: Option<bool>,
     limit: Option<u32>,
 ) -> Result<Vec<GrepHit>, String> {
+    grep_search_with_limits(path, query, case_sensitive, limit, MAX_GREP_DIRS, MAX_GREP_ENTRIES)
+}
+
+fn grep_search_with_limits(
+    path: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    limit: Option<u32>,
+    max_dirs: usize,
+    max_entries: usize,
+) -> Result<Vec<GrepHit>, String> {
     let root = PathBuf::from(&path);
     reject_special_path(&root, "path")?;
     if !root.is_dir() {
@@ -533,20 +546,27 @@ pub fn grep_search(
     let cap = limit.unwrap_or(100).clamp(1, MAX_GREP_HITS as u32) as usize;
     let mut hits = vec![];
     let mut scanned = 0usize;
+    let mut visited_dirs = 0usize;
+    let mut examined_entries = 0usize;
     let mut stack = vec![root];
     // Iterative walk: same skip rules as fs_tree, regular files only
     // (symlinks listed, never followed). Stops at the hit cap or the scan
     // budget, whichever comes first — a node_modules-heavy root otherwise
     // blocks the IPC thread for seconds.
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
+        if visited_dirs >= max_dirs {
+            break;
+        }
+        visited_dirs += 1;
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries {
-            if hits.len() >= cap || scanned >= MAX_GREP_FILES {
-                break;
+            if hits.len() >= cap || scanned >= MAX_GREP_FILES || examined_entries >= max_entries {
+                break 'walk;
             }
+            examined_entries += 1;
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -618,9 +638,6 @@ pub fn grep_search(
                     }
                 }
             }
-        }
-        if hits.len() >= cap || scanned >= MAX_GREP_FILES {
-            break;
         }
     }
     Ok(hits)
@@ -880,6 +897,24 @@ mod tests {
         assert!(hits[0].path.ends_with("a.txt"));
         assert!(grep_search(root.clone(), "   ".into(), None, None).is_err());
         assert!(grep_search(root, "HELLO".into(), Some(true), None).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_bounds_directory_and_entry_traversal() {
+        let dir = std::env::temp_dir().join(format!("guimux-grep-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let nested = dir.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("hit.txt"), "needle").unwrap();
+        let root = dir.to_string_lossy().to_string();
+
+        assert!(grep_search_with_limits(root.clone(), "needle".into(), None, None, 2, 100)
+            .unwrap()
+            .is_empty());
+        assert!(grep_search_with_limits(root, "needle".into(), None, None, 100, 1)
+            .unwrap()
+            .is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
