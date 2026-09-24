@@ -11,7 +11,10 @@ pub mod worktree;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
-    conpty_dll::ensure_bundled_conpty();
+    if !conpty_dll::ensure_bundled_conpty() {
+        eprintln!("[gm-conpty] refusing startup because bundled ConPTY failed integrity checks");
+        return;
+    }
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     #[cfg(all(debug_assertions, feature = "debug-mcp"))]
