@@ -467,17 +467,23 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       return;
     }
     unlisteners.current.push(disposeOutput, disposeExit);
-    const attached = await invoke<PtyAttach>("pty_attach", { id: sid });
-    shellKindRef.current = attached.shell_kind;
-    sessionEpochRef.current = attached.epoch;
-    if (attached.replay.length > 0) {
-      const bytes = new Uint8Array(attached.replay);
-      snoopLiveCwd(bytes);
-      writeKeepPlace(term, bytes);
+    try {
+      const attached = await invoke<PtyAttach>("pty_attach", { id: sid });
+      shellKindRef.current = attached.shell_kind;
+      sessionEpochRef.current = attached.epoch;
+      if (attached.replay.length > 0) {
+        const bytes = new Uint8Array(attached.replay);
+        snoopLiveCwd(bytes);
+        writeKeepPlace(term, bytes);
+      }
+      for (const output of pending) writeOutput(output);
+      pending.length = 0;
+      replaying = false;
+    } catch (error) {
+      disposeOutput();
+      disposeExit();
+      throw error;
     }
-    for (const output of pending) writeOutput(output);
-    pending.length = 0;
-    replaying = false;
   };
 
   // WebGL primary, canvas/DOM fallback. Buffer, cursor, and focus live on the
@@ -1045,6 +1051,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       // first (so Restart recovers), then surface the Restart banner.
       // Input wiring below still runs; only the one-shot initCmd is held.
       let deadSession = false;
+      let freshSessionId: number | null = null;
       if (sessionId != null) {
         // Layout kept an id (remount after split / worktree switch).
         // pty_attach validates; rejection = spawn fresh, not blank.
@@ -1062,6 +1069,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           unlisteners.current = [];
           try {
             sessionId = await spawnFresh(term, fit);
+            freshSessionId = sessionId;
             if (!alive) {
               invoke("pty_kill", { id: sessionId });
               return;
@@ -1069,6 +1077,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
             sessionRef.current = sessionId;
             await attach(term, sessionId);
           } catch (e) {
+            if (freshSessionId != null) invoke("pty_kill", { id: freshSessionId });
             term.writeln(`\x1b[31mfailed to spawn shell: ${e}\x1b[0m`);
             return;
           }
@@ -1076,16 +1085,18 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } else {
         try {
           sessionId = await spawnFresh(term, fit);
+          freshSessionId = sessionId;
           if (!alive) {
             invoke("pty_kill", { id: sessionId });
             return;
           }
           sessionRef.current = sessionId;
+          await attach(term, sessionId);
         } catch (e) {
+          if (freshSessionId != null) invoke("pty_kill", { id: freshSessionId });
           term.writeln(`\x1b[31mfailed to spawn shell: ${e}\x1b[0m`);
           return;
         }
-        await attach(term, sessionId);
       }
 
       // Fire-and-forget: the pty input buffer holds the line until the shell
