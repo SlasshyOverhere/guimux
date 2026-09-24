@@ -519,7 +519,7 @@ export function ExplorerPane({ root }: { root: string }) {
     setGitDiff("");
     // Diff-only: the old effect ran `git diff` on every file open even when
     // the diff view was never shown, adding a spawn to the startup path.
-    invoke<string>("git_diff", { path: root, base: null })
+    invoke<string>("git_diff", { path: root, base: null, file: editorPath })
       .then((diff) => {
         if (!cancelled) setGitDiff(diff);
       })

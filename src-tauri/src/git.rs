@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use tauri::command;
@@ -330,7 +330,7 @@ pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
 }
 
 #[command]
-pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
+pub fn git_diff(path: String, base: Option<String>, file: Option<String>) -> Result<String, String> {
     let repo = PathBuf::from(&path);
     let mut args: Vec<String> = vec![
         "-c".into(),
@@ -346,6 +346,26 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
         args.push(b.clone());
     }
     args.push("--".into());
+    if let Some(file) = file {
+        if file.trim().is_empty() || file.contains('\0') {
+            return Err("invalid diff file".into());
+        }
+        let requested = PathBuf::from(&file);
+        let relative = if requested.is_absolute() {
+            requested
+                .strip_prefix(&repo)
+                .map_err(|_| "diff file is outside the repository".to_string())?
+        } else {
+            requested.as_path()
+        };
+        if relative.as_os_str().is_empty()
+            || relative == Path::new(".")
+            || relative.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err("invalid diff file".into());
+        }
+        args.push(relative.to_string_lossy().replace('\\', "/"));
+    }
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let (diff, truncated) = git_capped(&repo, &args_ref, DIFF_CAP)?;
     if truncated {
@@ -476,9 +496,12 @@ mod tests {
         assert_eq!(st[0].path, "a.txt");
         assert_eq!(st[0].workdir_status, "M");
 
-        let diff = git_diff(dir.to_string_lossy().to_string(), None).unwrap();
+        let diff = git_diff(dir.to_string_lossy().to_string(), None, Some("a.txt".into())).unwrap();
         assert!(diff.contains("-hello"));
         assert!(diff.contains("+changed"));
+        fs::write(dir.join("b.txt"), "other").unwrap();
+        let scoped = git_diff(dir.to_string_lossy().to_string(), None, Some("a.txt".into())).unwrap();
+        assert!(!scoped.contains("other"));
         let _ = fs::remove_dir_all(&dir);
     }
 
