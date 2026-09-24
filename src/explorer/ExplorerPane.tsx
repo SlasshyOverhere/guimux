@@ -11,6 +11,7 @@ import { menuPos } from "../menuPos";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
+import { canSaveBuffer } from "./editorBuffer";
 import type { FsNode, GrepHit } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
@@ -193,6 +194,7 @@ export function ExplorerPane({ root }: { root: string }) {
   const [savedContent, setSavedContent] = useState<string>("");
   const [dirty, setDirty] = useState(false);
   const [contentLoaded, setContentLoaded] = useState(false);
+  const loadedPathRef = useRef<string | null>(null);
   const [gitDiff, setGitDiff] = useState<string>("");
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -418,10 +420,15 @@ export function ExplorerPane({ root }: { root: string }) {
     // Guarded: switching files mid-read let the stale response overwrite the
     // new file's content.
     let cancelled = false;
+    loadedPathRef.current = null;
+    setContent("");
+    setSavedContent("");
+    setDirty(false);
     setContentLoaded(false);
     invoke<string>("fs_read", { path: editorPath })
       .then((c) => {
         if (cancelled) return;
+        loadedPathRef.current = editorPath;
         setContent(c);
         setSavedContent(c);
         setDirty(false);
@@ -429,6 +436,7 @@ export function ExplorerPane({ root }: { root: string }) {
       })
       .catch((e) => {
         if (cancelled) return;
+        loadedPathRef.current = null;
         setContent(`// cannot open: ${e}`);
         setSavedContent("");
         setDirty(false);
@@ -491,6 +499,10 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const save = async () => {
     if (!editorPath) return;
+    if (!canSaveBuffer(editorPath, loadedPathRef.current)) {
+      void errorDialog("Save blocked: file content is not loaded");
+      return;
+    }
     announceWrite(editorPath);
     try {
       await invoke("fs_write", { path: editorPath, content });
@@ -831,7 +843,9 @@ export function ExplorerPane({ root }: { root: string }) {
               {shortName}
             </span>
           )}
-          {dirty ? (
+          {!contentLoaded ? (
+            <span className="tnum shrink-0 text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>not loaded</span>
+          ) : dirty ? (
             <span className="tnum shrink-0 text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>edited</span>
           ) : (
             <span className="gm-meta tnum shrink-0">saved</span>
@@ -888,7 +902,8 @@ export function ExplorerPane({ root }: { root: string }) {
               )}
               <button
                 title="Save (Ctrl+S)"
-                className="gm-icon-btn ml-1 h-[30px] gap-1.5 px-3 text-[12px] font-semibold"
+                disabled={!contentLoaded}
+                className="gm-icon-btn ml-1 h-[30px] gap-1.5 px-3 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
                 style={
                   dirty
                     ? { background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }
@@ -941,7 +956,7 @@ export function ExplorerPane({ root }: { root: string }) {
                 className="w-full rounded-md py-2 text-[12.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
                 onClick={async () => {
-                  if (editorPath && contentLoaded) {
+                  if (editorPath && canSaveBuffer(editorPath, loadedPathRef.current)) {
                     try {
                       announceWrite(editorPath);
                       await invoke("fs_write", { path: editorPath, content });
