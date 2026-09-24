@@ -19,6 +19,8 @@
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::io::Read;
+#[cfg(windows)]
+use winapi::um::winbase::SetDllDirectoryW;
 
 /// Vendored binary sizes and SHA-256 digests, recorded from node-pty 1.1.0's assets.
 #[cfg(windows)]
@@ -38,6 +40,11 @@ const EXPECTED: &[(&str, u64, &str)] = &[
 #[cfg(windows)]
 fn log_conpty(msg: &str) {
     eprintln!("[gm-conpty] {msg}");
+}
+
+#[cfg(windows)]
+fn harden_dll_search_path() -> bool {
+    unsafe { SetDllDirectoryW(std::ptr::null()) != 0 }
 }
 
 #[cfg(windows)]
@@ -77,6 +84,10 @@ fn asset_matches(path: &std::path::Path, expected_size: u64, expected_hash: &str
 /// (see tauri.conf.json) — nothing to do there.
 #[cfg(windows)]
 pub fn ensure_bundled_conpty() -> bool {
+    if !harden_dll_search_path() {
+        log_conpty("failed to remove cwd from DLL search path; refusing startup");
+        return false;
+    }
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -173,6 +184,11 @@ mod tests {
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         ));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dll_search_path_hardening_succeeds() {
+        assert!(harden_dll_search_path());
     }
 
     #[test]
