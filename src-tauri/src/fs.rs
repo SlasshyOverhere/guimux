@@ -98,23 +98,28 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
         Err(_) => return None,
     };
     // Skip (don't squash) unreadable entries: flatten() hid permission errors.
-    let mut collected = vec![];
+    // Apply the cap while reading; collecting the whole directory first let a
+    // huge folder bypass the memory bound before the cap was enforced.
+    let mut collected: Vec<(fs::DirEntry, String)> = Vec::with_capacity(MAX_CHILDREN + 1);
+    let mut entry_overflow = false;
     for e in entries {
-        match e {
-            Ok(e) => collected.push(e),
-            Err(_) => continue,
-        }
-    }
-    collected.sort_by_key(|e| e.file_name());
-    let mut truncated = false;
-    for entry in collected.into_iter().take(MAX_CHILDREN + 1) {
-        if children.len() >= MAX_CHILDREN {
-            truncated = true;
-            break;
-        }
+        let Ok(entry) = e else { continue };
         let fname = entry.file_name().to_string_lossy().to_string();
         if IGNORED.contains(&fname.as_str()) || fname.starts_with('.') && fname != ".github" {
             continue;
+        }
+        if collected.len() >= MAX_CHILDREN + 1 {
+            entry_overflow = true;
+            break;
+        }
+        collected.push((entry, fname));
+    }
+    collected.sort_by(|a, b| a.0.file_name().cmp(&b.0.file_name()));
+    let mut truncated = entry_overflow;
+    for (entry, fname) in collected.into_iter().take(MAX_CHILDREN) {
+        if children.len() >= MAX_CHILDREN {
+            truncated = true;
+            break;
         }
         if *budget == 0 {
             truncated = true;
