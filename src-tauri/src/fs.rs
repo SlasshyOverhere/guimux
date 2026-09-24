@@ -28,6 +28,7 @@ const RESERVED: &[&str] = &[
     "LPT7", "LPT8", "LPT9",
 ];
 static WRITE_CTR: AtomicU64 = AtomicU64::new(0);
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -229,6 +230,7 @@ fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
 
 #[command]
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let from = PathBuf::from(&old);
     let to = PathBuf::from(&new);
     reject_special_path(&from, "rename source")?;
@@ -329,6 +331,7 @@ fn file_matches(path: &Path, expected: &str) -> bool {
 }
 
 fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if content.len() > MAX_WRITE {
         return Err(format!("content too large ({} bytes > 5MB)", content.len()));
     }
@@ -406,6 +409,7 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
 
 #[command]
 pub fn fs_create_empty(path: String) -> Result<bool, String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
     let parent = p.parent().ok_or("invalid path")?;
@@ -495,6 +499,7 @@ fn valid_paste_name(name: &str) -> bool {
 
 #[command]
 pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if base64.len() > MAX_PASTE_BYTES / 3 * 4 + 4 {
         return Err("pasted image too large".into());
     }
@@ -1036,6 +1041,34 @@ mod tests {
         let error = fs_write_checked(path, "mine".into(), "original".into()).unwrap_err();
         assert!(error.contains("changed on disk"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "external");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checked_writes_serialize_competing_saves() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!("guimux-fs-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("race.txt");
+        fs::write(&file, "original").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for content in ["left", "right"] {
+            let path = file.to_string_lossy().to_string();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                fs_write_checked(path, content.into(), "original".into()).is_ok()
+            }));
+        }
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|success| *success)
+            .count();
+        assert_eq!(successes, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
