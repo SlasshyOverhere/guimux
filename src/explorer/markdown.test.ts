@@ -54,6 +54,14 @@ describe("renderMarkdown", () => {
     assert.ok(out.includes("bad"));
   });
 
+  it("strips protocol-relative and backslash-normalized links", () => {
+    for (const href of ["//evil.example", "/\\evil.example", "\\\\evil.example"]) {
+      const out = renderMarkdown(`[bad](${href})`);
+      assert.ok(!out.includes("<a"), href);
+      assert.ok(out.includes("bad"), href);
+    }
+  });
+
   it("renders blockquotes", () => {
     const out = renderMarkdown("> quote");
     assert.ok(out.includes("<blockquote>"));
