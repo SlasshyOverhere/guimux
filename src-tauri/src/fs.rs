@@ -258,6 +258,19 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
     if !parent.is_dir() {
         return Err(format!("parent directory does not exist: {}", parent.to_string_lossy()));
     }
+    let target_meta = match fs::symlink_metadata(&p) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err("cannot write through a symlink".into());
+            }
+            if meta.is_dir() {
+                return Err("cannot write a directory".into());
+            }
+            Some(meta.permissions())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
     let n = WRITE_CTR.fetch_add(1, Ordering::SeqCst);
     let tmp = parent.join(format!(".guimux-tmp-{}-{}", std::process::id(), n));
     let mut temp = OpenOptions::new()
@@ -269,6 +282,13 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
         drop(temp);
         let _ = fs::remove_file(&tmp);
         return Err(e.to_string());
+    }
+    if let Some(permissions) = target_meta {
+        if let Err(e) = fs::set_permissions(&tmp, permissions) {
+            drop(temp);
+            let _ = fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
     }
     if let Some(expected) = expected {
         if !file_matches(&p, expected) {
@@ -726,6 +746,39 @@ mod tests {
         let error = fs_write_checked(path, "mine".into(), "original".into()).unwrap_err();
         assert!(error.contains("changed on disk"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "external");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_write_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("guimux-fs-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mode.txt");
+        fs::write(&file, "before").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        fs_write(file.to_string_lossy().to_string(), "after".into()).unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_write_rejects_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("guimux-fs-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.txt");
+        fs::write(&target, "before").unwrap();
+        let link = dir.join("link.txt");
+        symlink(&target, &link).unwrap();
+        assert!(fs_write(link.to_string_lossy().to_string(), "after".into()).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "before");
         let _ = fs::remove_dir_all(&dir);
     }
 
