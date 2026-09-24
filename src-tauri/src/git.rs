@@ -257,8 +257,7 @@ pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> 
 /// kill the child so it never blocks on a full pipe. Returns (text, truncated).
 fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), String> {
     use std::process::Stdio;
-    let mut child = git_cmd()
-        .map_err(|e| e)?
+    let mut child = git_cmd()?
         .args(args)
         .current_dir(repo)
         .stdin(Stdio::null())
