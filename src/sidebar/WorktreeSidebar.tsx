@@ -18,6 +18,7 @@ import { parseRemoveGuard, parseRemoveStale } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
 import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { confirmDialog, errorDialog } from "../dialogs";
+import { useModalFocus } from "../modalFocus";
 import type { AheadBehind, Project, Worktree } from "../types";
 
 // One listing at a time: two in-flight `worktree_list` calls race to write the
@@ -88,6 +89,7 @@ export function WorktreeSidebar() {
   }, [projects.length, cacheKeys]);
 
   const [creatingPid, setCreatingPid] = useState<string | null>(null);
+  const createDialogRef = useModalFocus<HTMLDivElement>(creatingPid != null);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
   const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
@@ -1159,6 +1161,7 @@ export function WorktreeSidebar() {
           onClick={() => setCreatingPid(null)}
         >
           <div
+            ref={createDialogRef}
             className="w-[400px] max-w-full"
             onClick={(e) => e.stopPropagation()}
             role="dialog"

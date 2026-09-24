@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { errorDialog } from "../dialogs";
+import { useModalFocus } from "../modalFocus";
 import type { FsNode, Project, Worktree } from "../types";
 import {
   Bot,
@@ -47,8 +48,8 @@ export function Palette() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [files, setFiles] = useState<FsNode[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useModalFocus<HTMLDivElement>(paletteOpen);
 
   const projects: Project[] = useStore((s) => s.projects);
   const activeProjectId = useStore((s) => s.activeProjectId);
@@ -58,14 +59,12 @@ export function Palette() {
     if (!paletteOpen) return;
     setQuery("");
     setSelected(0);
-    const t = setTimeout(() => inputRef.current?.focus(), 10);
     // Escape closes even when focus leaves the input (e.g. tabs out).
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setPaletteOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => {
-      clearTimeout(t);
       window.removeEventListener("keydown", onKey);
     };
   }, [paletteOpen]);
@@ -263,6 +262,7 @@ export function Palette() {
       onClick={() => setPaletteOpen(false)}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
@@ -272,7 +272,6 @@ export function Palette() {
       >
         <div className="flex items-center gap-2 px-4" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
           <input
-            ref={inputRef}
             role="combobox"
             aria-expanded="true"
             aria-controls="gm-palette-list"
