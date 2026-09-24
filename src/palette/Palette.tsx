@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { errorDialog } from "../dialogs";
-import type { FsNode, Project } from "../types";
+import type { FsNode, Project, Worktree } from "../types";
 import {
   Bot,
   FolderOpen,
@@ -128,9 +128,23 @@ export function Palette() {
         group: "Commands",
         icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
-          invoke("worktree_create", { repoRoot, name: null, base: null }).catch((e) =>
-            errorDialog(`${e}`),
-          );
+          void (async () => {
+            const created = await invoke<Worktree>("worktree_create", { repoRoot, name: null, base: null });
+            const st = useStore.getState();
+            if (st.repoRoot !== repoRoot) return;
+            st.setWorktrees([...st.worktrees.filter((w) => w.id !== created.id), created]);
+            st.setActiveWorktree(created.id);
+            try {
+              const fresh = await invoke<Worktree[]>("worktree_list", { repoRoot });
+              const cur = useStore.getState();
+              if (cur.repoRoot === repoRoot && fresh.some((w) => w.id === created.id)) {
+                cur.setWorktrees(fresh);
+                cur.setActiveWorktree(created.id);
+              }
+            } catch {
+              /* keep the optimistic row if the follow-up list fails */
+            }
+          })().catch((e) => errorDialog(`${e}`));
         },
       });
     }
