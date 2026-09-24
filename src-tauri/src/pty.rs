@@ -591,6 +591,11 @@ pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
     Ok(PtyAttach { replay, shell_kind })
 }
 
+#[command]
+pub fn pty_detach(id: u64) {
+    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, false);
+}
+
 /// Liveness probe for remounts: false when the session is unknown OR its
 /// shell already exited (e.g. while the pane sat unmounted on another
 /// worktree). `pty_restart` still recovers such ids (cwd is retained).
@@ -791,6 +796,26 @@ mod tests {
     #[test]
     fn attach_rejects_unknown_session() {
         assert!(pty_attach(0xDEAD_DEAD).is_err());
+    }
+
+    #[test]
+    fn detach_stops_live_delivery_until_reattach() {
+        let id = 0xDE7A_C4u64;
+        ATTACHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, true);
+        pty_detach(id);
+        assert!(!ATTACHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .copied()
+            .unwrap_or(false));
+        ATTACHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
     }
 
     #[test]

@@ -1122,6 +1122,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       unregisterLiveTerm(paneId);
       ro.disconnect();
       hostRef.current?.removeEventListener("paste", killNativePaste, true);
+      const sid = sessionRef.current;
+      if (sid != null) invoke("pty_detach", { id: sid }).catch(() => {});
       for (const un of unlisteners.current) un();
       unlisteners.current = [];
       // persist scrollback
@@ -1141,7 +1143,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         paneAlive(st.layout, paneId) ||
         Object.values(st.layouts).some((n) => paneAlive(n, paneId));
       if (!kept) {
-        const sid = sessionRef.current;
         if (sid != null) invoke("pty_kill", { id: sid });
       }
       try {

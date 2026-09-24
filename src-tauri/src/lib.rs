@@ -54,6 +54,7 @@ pub fn run() {
             fs::grep_search,
             pty::pty_spawn,
             pty::pty_attach,
+            pty::pty_detach,
             pty::pty_alive,
             pty::pty_write,
             pty::pty_resize,
