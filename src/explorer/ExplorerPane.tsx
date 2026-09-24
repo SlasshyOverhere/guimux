@@ -201,6 +201,8 @@ export function ExplorerPane({ root }: { root: string }) {
   const [dirty, setDirty] = useState(false);
   const [contentLoaded, setContentLoaded] = useState(false);
   const loadedPathRef = useRef<string | null>(null);
+  const editorPathRef = useRef(editorPath);
+  editorPathRef.current = editorPath;
   const [gitDiff, setGitDiff] = useState<string>("");
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -524,15 +526,22 @@ export function ExplorerPane({ root }: { root: string }) {
       void errorDialog("Save blocked: file content is not loaded");
       return;
     }
-    announceWrite(editorPath);
+    const path = editorPath;
+    const nextContent = content;
+    const expected = savedContent;
+    announceWrite(path);
     try {
-      await invoke("fs_write", { path: editorPath, content });
+      await invoke("fs_write_checked", { path, content: nextContent, expected });
     } catch (e) {
       void errorDialog(`save failed: ${e}`);
       return;
     }
-    setSavedContent(content);
-    setDirty(false);
+    buffers.delete(path);
+    syncEditorDirtyCount();
+    if (editorPathRef.current === path) {
+      setSavedContent(nextContent);
+      setDirty(false);
+    }
     // Own writes land through the watcher too, but a save can also create
     // the file (untitled flow): refresh at once instead of waiting out the
     // coalesce window.
@@ -978,14 +987,19 @@ export function ExplorerPane({ root }: { root: string }) {
                 className="w-full rounded-md py-2 text-[12.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
                 onClick={async () => {
-                  if (editorPath && canSaveBuffer(editorPath, loadedPathRef.current)) {
+                  const path = editorPath;
+                  if (path && canSaveBuffer(path, loadedPathRef.current)) {
+                    const nextContent = content;
                     try {
-                      announceWrite(editorPath);
-                      await invoke("fs_write", { path: editorPath, content });
+                      announceWrite(path);
+                      await invoke("fs_write_checked", { path, content: nextContent, expected: savedContent });
                     } catch (e) {
                       void errorDialog(`save failed: ${e}`);
                       return;
                     }
+                    buffers.delete(path);
+                    syncEditorDirtyCount();
+                    if (editorPathRef.current !== path) return;
                   }
                   closeEditor();
                 }}

@@ -228,12 +228,28 @@ pub fn fs_read(path: String) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| format!("not valid utf-8 or unreadable: {e}"))
 }
 
-#[command]
-pub fn fs_write(path: String, content: String) -> Result<(), String> {
+fn file_matches(path: &Path, expected: &str) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if metadata.is_dir() || metadata.len() != expected.len() as u64 {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut current = Vec::with_capacity(expected.len());
+    file.take(MAX_FILE + 1)
+        .read_to_end(&mut current)
+        .is_ok()
+        && current == expected.as_bytes()
+}
+
+fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), String> {
     if content.len() > MAX_WRITE {
         return Err(format!("content too large ({} bytes > 5MB)", content.len()));
     }
-    let p = PathBuf::from(&path);
+    let p = PathBuf::from(path);
     reject_special_path(&p, "path")?;
     // Atomic temp+rename: a crash mid-write no longer leaves a truncated
     // file, and autosaves can't interleave. No more auto-mkdir (H-001:
@@ -244,7 +260,13 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
     }
     let n = WRITE_CTR.fetch_add(1, Ordering::SeqCst);
     let tmp = parent.join(format!(".guimux-tmp-{}-{}", std::process::id(), n));
-    fs::write(&tmp, &content).map_err(|e| e.to_string())?;
+    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    if let Some(expected) = expected {
+        if !file_matches(&p, expected) {
+            let _ = fs::remove_file(&tmp);
+            return Err("file changed on disk".into());
+        }
+    }
     // AV scanners and indexers briefly lock a freshly written file on Windows:
     // retry the swap instead of failing the save outright.
     let mut last_err: Option<std::io::Error> = None;
@@ -263,6 +285,19 @@ pub fn fs_write(path: String, content: String) -> Result<(), String> {
     Err(last_err
         .map(|e| e.to_string())
         .unwrap_or_else(|| "rename failed".into()))
+}
+
+#[command]
+pub fn fs_write(path: String, content: String) -> Result<(), String> {
+    write_text(&path, &content, None)
+}
+
+#[command]
+pub fn fs_write_checked(path: String, content: String, expected: String) -> Result<(), String> {
+    if expected.len() as u64 > MAX_FILE {
+        return Err("expected file content is too large".into());
+    }
+    write_text(&path, &content, Some(&expected))
 }
 
 /// Paste drop for clipboard images: base64 bytes -> `<dir>/.guimux-pastes/`.
@@ -630,6 +665,23 @@ mod tests {
         let small = dir.join("small.txt");
         fs::write(&small, "hi").unwrap();
         assert_eq!(fs_read(small.to_string_lossy().to_string()).unwrap(), "hi");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checked_write_rejects_external_changes() {
+        let dir = std::env::temp_dir().join(format!("guimux-fs-checked-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("checked.txt");
+        let path = file.to_string_lossy().to_string();
+        fs::write(&file, "original").unwrap();
+        fs_write_checked(path.clone(), "local".into(), "original".into()).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "local");
+        fs::write(&file, "external").unwrap();
+        let error = fs_write_checked(path, "mine".into(), "original".into()).unwrap_err();
+        assert!(error.contains("changed on disk"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "external");
         let _ = fs::remove_dir_all(&dir);
     }
 
