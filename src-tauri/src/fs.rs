@@ -109,6 +109,8 @@ fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
 }
 
 fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Option<Node> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let is_dir = metadata.is_dir() && !is_link_like(&metadata);
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -117,12 +119,12 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
         Some(Node {
             name: name.clone(),
             path: path.to_string_lossy().to_string(),
-            is_dir: path.is_dir(),
-            children: if path.is_dir() { Some(vec![]) } else { None },
+            is_dir,
+            children: if is_dir { Some(vec![]) } else { None },
             truncated,
         })
     };
-    if !path.is_dir() {
+    if !is_dir {
         return Some(Node {
             name,
             path: path.to_string_lossy().to_string(),
@@ -613,6 +615,10 @@ fn grep_search_with_limits(
     // budget, whichever comes first — a node_modules-heavy root otherwise
     // blocks the IPC thread for seconds.
     'walk: while let Some(dir) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&dir) else { continue };
+        if is_link_like(&metadata) || !metadata.is_dir() {
+            continue;
+        }
         if visited_dirs >= max_dirs {
             break;
         }
