@@ -14,12 +14,20 @@ pub struct PtySession {
     pub id: u64,
     pub cwd: String,
     pub shell_kind: String,
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyAttach {
     pub replay: Vec<u8>,
     pub shell_kind: String,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PtyOutput {
+    pub epoch: u64,
+    pub bytes: Vec<u8>,
 }
 
 struct PtyEntry {
@@ -438,7 +446,13 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                     }
                     let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
-                        let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
+                        let _ = app.emit(
+                            &format!("pty:output-{id}"),
+                            PtyOutput {
+                                epoch,
+                                bytes: buf[..n].to_vec(),
+                            },
+                        );
                     } else {
                         // Attached panes have no reader for the replay buffer
                         // (pty_attach drained it), so rebuilding a 256KB copy
@@ -604,6 +618,7 @@ fn spawn_pair_inner(
         id,
         cwd,
         shell_kind: shell_kind.to_string(),
+        epoch,
     })
 }
 
@@ -646,7 +661,17 @@ pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
         .get(&id)
         .cloned()
         .unwrap_or_else(|| "unknown".into());
-    Ok(PtyAttach { replay, shell_kind })
+    let epoch = EPOCHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .copied()
+        .ok_or("no such pty session")?;
+    Ok(PtyAttach {
+        replay,
+        shell_kind,
+        epoch,
+    })
 }
 
 #[command]

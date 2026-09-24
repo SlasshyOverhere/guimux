@@ -19,6 +19,7 @@ export interface PtySession {
   id: number;
   cwd: string;
   shell_kind: ShellKind;
+  epoch: number;
 }
 
 export type ShellKind = "powershell" | "cmd" | "posix" | "fish" | "unknown";
@@ -26,6 +27,12 @@ export type ShellKind = "powershell" | "cmd" | "posix" | "fish" | "unknown";
 export interface PtyAttach {
   replay: number[];
   shell_kind: ShellKind;
+  epoch: number;
+}
+
+export interface PtyOutput {
+  epoch: number;
+  bytes: number[];
 }
 
 export interface FileStatus {

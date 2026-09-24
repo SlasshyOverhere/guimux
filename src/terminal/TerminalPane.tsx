@@ -9,7 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, GripVertical, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
-import type { PtyAttach, PtySession } from "../types";
+import type { PtyAttach, PtyOutput, PtySession } from "../types";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
@@ -277,6 +277,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const webglRef = useRef<WebglAddon | null>(null);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const sessionRef = useRef<number | null>(ptyId);
+  const sessionEpochRef = useRef<number | null>(null);
   const shellKindRef = useRef<PtySession["shell_kind"]>("unknown");
   // Agent fan-out: one-shot command typed into a fresh shell, then cleared.
   const initCmdRef = useRef<string | null>(initCmd ?? null);
@@ -422,8 +423,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
-    const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
-      const bytes = new Uint8Array(ev.payload);
+    const disposeOutput = await listen<PtyOutput>(`pty:output-${sid}`, (ev) => {
+      const currentEpoch = sessionEpochRef.current;
+      if (currentEpoch != null && ev.payload.epoch < currentEpoch) return;
+      sessionEpochRef.current = ev.payload.epoch;
+      const bytes = new Uint8Array(ev.payload.bytes);
       snoopLiveCwd(bytes);
       if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
         const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
@@ -459,6 +463,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     unlisteners.current.push(disposeOutput, disposeExit);
     const attached = await invoke<PtyAttach>("pty_attach", { id: sid });
     shellKindRef.current = attached.shell_kind;
+    sessionEpochRef.current = attached.epoch;
     if (attached.replay.length > 0) {
       const bytes = new Uint8Array(attached.replay);
       snoopLiveCwd(bytes);
@@ -492,6 +497,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   const spawnFresh = async (term: Terminal, fit: FitAddon): Promise<number> => {
     const dims = fitSane(term, fit) ?? { cols: 80, rows: 24 };
+    sessionEpochRef.current = null;
     const session = await invoke<PtySession>("pty_spawn", {
       cwd,
       cols: dims.cols,
@@ -501,6 +507,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // dims must not re-send it (they'd no-op anyway, but keep the ledger true).
     lastDimsRef.current = dims;
     sessionRef.current = session.id;
+    sessionEpochRef.current = session.epoch;
     shellKindRef.current = session.shell_kind;
     setPtyId(paneId, session.id);
     return session.id;
@@ -520,6 +527,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       if (sid != null) {
         const session = await invoke<PtySession>("pty_restart", { id: sid, cols: dims.cols, rows: dims.rows });
         shellKindRef.current = session.shell_kind;
+        sessionEpochRef.current = session.epoch;
       } else {
         throw new Error("no session yet");
       }
