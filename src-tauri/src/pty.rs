@@ -41,6 +41,8 @@ struct PtyEntry {
 #[derive(Default)]
 pub struct PtyManager {
     next_id: AtomicU64,
+    next_slot: AtomicU64,
+    slots: Arc<Mutex<HashMap<u64, u64>>>,
     sessions: Mutex<HashMap<u64, PtyEntry>>,
 }
 
@@ -60,6 +62,32 @@ impl PtyManager {
         SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    fn reserve_slot(&self, id: u64) -> Result<u64, String> {
+        let token = self
+            .next_slot
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.contains_key(&id) {
+            return Err(format!("pty session {id} already exists"));
+        }
+        if slots.len() >= MAX_SESSIONS {
+            return Err(format!(
+                "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+            ));
+        }
+        slots.insert(id, token);
+        Ok(token)
+    }
+
+    fn release_slot(&self, id: u64, token: u64) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.get(&id) == Some(&token) {
+            slots.remove(&id);
+        }
     }
 }
 
@@ -359,7 +387,14 @@ fn bump_epoch_reset_buffer(id: u64) -> u64 {
 /// The watcher captures its spawn epoch and stays silent unless still
 /// current, so `pty_restart` (same numeric id) never delivers the old
 /// child's exit to the new session.
-fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+fn spawn_exit_watcher(
+    app: AppHandle,
+    id: u64,
+    epoch: u64,
+    slot: u64,
+    slots: Arc<Mutex<HashMap<u64, u64>>>,
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+) {
     std::thread::spawn(move || {
         let code: u32 = loop {
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -372,6 +407,10 @@ fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn po
             }
         };
         if epoch_current(id, epoch) {
+            let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+            if slots.get(&id) == Some(&slot) {
+                slots.remove(&id);
+            }
             EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
         }
@@ -423,15 +462,27 @@ fn spawn_pair(
     rows: u16,
     live: bool,
 ) -> Result<PtySession, String> {
+    let slot = state.reserve_slot(id)?;
+    let result = spawn_pair_inner(app, state, id, cwd, cols, rows, live, slot);
+    if result.is_err() {
+        state.release_slot(id, slot);
+    }
+    result
+}
+
+fn spawn_pair_inner(
+    app: &AppHandle,
+    state: &State<PtyManager>,
+    id: u64,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+    live: bool,
+    slot: u64,
+) -> Result<PtySession, String> {
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
     let t_start = std::time::Instant::now();
-    // Cap live shells: each holds a 256KB replay buffer (H-003).
-    if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
-        return Err(format!(
-            "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
-        ));
-    }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
     if pty_debug() {
@@ -540,7 +591,14 @@ fn spawn_pair(
     // Exit authority = shell process liveness (GetExitCodeProcess), never
     // pipe EOF. The watcher owns the real Child; the stored killer stays
     // behind for pty_kill/pty_restart.
-    spawn_exit_watcher(app.clone(), id, epoch, child);
+    spawn_exit_watcher(
+        app.clone(),
+        id,
+        epoch,
+        slot,
+        Arc::clone(&state.slots),
+        child,
+    );
     spawn_output_pump(app.clone(), id, epoch, reader, t_start);
     Ok(PtySession {
         id,
@@ -701,6 +759,11 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     // still be cloned-here-then-held by a concurrent resize; dropping our
     // Arc lets the last holder close the PTY.)
     drop(master_to_close);
+    state
+        .slots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
@@ -816,6 +879,28 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
+    }
+
+    #[test]
+    fn exited_shells_release_capacity_without_stale_release() {
+        let manager = PtyManager::default();
+        let mut tokens = Vec::new();
+        for id in 0..MAX_SESSIONS as u64 {
+            tokens.push(manager.reserve_slot(id).unwrap());
+        }
+        assert!(manager.reserve_slot(MAX_SESSIONS as u64).is_err());
+
+        manager.release_slot(0, tokens[0]);
+        let replacement = manager.reserve_slot(MAX_SESSIONS as u64).unwrap();
+        manager.release_slot(0, tokens[0]);
+        assert_eq!(
+            manager
+                .slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(MAX_SESSIONS as u64)),
+            Some(&replacement)
+        );
     }
 
     #[test]
