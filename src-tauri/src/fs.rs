@@ -289,9 +289,16 @@ pub fn fs_read(path: String) -> Result<String, String> {
     // Read with a hard cap instead of check-then-read (TOCTOU: the file can
     // grow between metadata and read). take() stops at the cap; a full
     // buffer means oversize.
+    match fs::metadata(&p) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err("cannot read a non-regular file".into()),
+        Err(e) => return Err(e.to_string()),
+    }
     let f = fs::File::open(&p).map_err(|e| e.to_string())?;
-    if f.metadata().map(|m| m.is_dir()).unwrap_or(false) {
-        return Err("cannot read a directory".into());
+    match f.metadata() {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err("cannot read a non-regular file".into()),
+        Err(e) => return Err(e.to_string()),
     }
     let mut buf = Vec::new();
     f.take(MAX_FILE + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
@@ -305,7 +312,7 @@ fn file_matches(path: &Path, expected: &str) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };
-    if metadata.is_dir() || metadata.len() != expected.len() as u64 {
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
         return false;
     }
     let Ok(file) = fs::File::open(path) else {
@@ -631,6 +638,9 @@ fn grep_search_with_limits(
                 stack.push(fpath);
                 continue;
             }
+            if !ftype.is_file() {
+                continue;
+            }
             scanned += 1;
             let mut file = match fs::File::open(&fpath) {
                 Ok(file) => file,
@@ -848,6 +858,27 @@ mod tests {
         let small = dir.join("small.txt");
         fs::write(&small, "hi").unwrap();
         assert_eq!(fs_read(small.to_string_lossy().to_string()).unwrap(), "hi");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_and_grep_skip_non_regular_files() {
+        let dir = std::env::temp_dir().join(format!("guimux-fs-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(fs_read(fifo.to_string_lossy().to_string()).is_err());
+        assert!(grep_search(dir.to_string_lossy().to_string(), "needle".into(), None, None)
+            .unwrap()
+            .is_empty());
+        let _ = fs::remove_file(&fifo);
         let _ = fs::remove_dir_all(&dir);
     }
 
