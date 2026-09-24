@@ -46,6 +46,10 @@ fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
     for c in p.components() {
         if let Component::Normal(os) = c {
             let mut name = os.to_string_lossy().to_uppercase();
+            #[cfg(windows)]
+            if name.contains(':') {
+                return Err(format!("invalid {what}: alternate data streams are not allowed"));
+            }
             if let Some(dot) = name.find('.') {
                 name.truncate(dot);
             }
@@ -716,6 +720,12 @@ mod tests {
         assert!(reject_special_path(Path::new("C:/x/COM1.txt"), "path").is_err());
         assert!(reject_special_path(Path::new("\\\\.\\C:"), "path").is_err());
         assert!(reject_special_path(Path::new("C:/ok/file.txt"), "path").is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alternate_data_stream_names_rejected() {
+        assert!(reject_special_path(Path::new("C:/x/file.txt:stream"), "path").is_err());
     }
 
     #[test]
