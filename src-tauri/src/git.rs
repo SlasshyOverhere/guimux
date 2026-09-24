@@ -151,7 +151,7 @@ fn is_not_repository_error(stderr: &str) -> bool {
 pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
-        return Err(format!("not a directory: {path}"));
+        return Err(format!("PROJECT_PATH_MISSING: not a directory: {path}"));
     }
     // Single spawn: toplevel + branch in one `rev-parse`. Two spawns per
     // project doubled startup latency and flashed two console windows each.
@@ -543,5 +543,16 @@ mod tests {
             "fatal: detected dubious ownership in repository at '/tmp/repo'"
         ));
         assert!(!is_not_repository_error("fatal: unable to access repository"));
+    }
+
+    #[test]
+    fn project_detection_marks_missing_paths() {
+        let path = std::env::temp_dir().join(format!(
+            "guimux-missing-project-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        let error = project_detect(path.to_string_lossy().to_string()).unwrap_err();
+        assert!(error.starts_with("PROJECT_PATH_MISSING:"), "unexpected error: {error}");
     }
 }
