@@ -6,6 +6,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, State};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStringExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use winapi::shared::minwindef::DWORD;
+#[cfg(windows)]
+use winapi::um::jobapi2::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
+};
+#[cfg(windows)]
+use winapi::um::sysinfoapi::GetSystemDirectoryW;
+#[cfg(windows)]
+use winapi::um::winbase::CREATE_NO_WINDOW;
+#[cfg(windows)]
+use winapi::um::winnt::{
+    JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+};
+
 #[cfg(not(windows))]
 use crate::pty_inputrc::ensure_guimux_inputrc;
 
@@ -44,6 +66,10 @@ struct PtyEntry {
     // RPC into conhost/OpenConsole) blocks only this pane — never another
     // pane's spawn/kill/write (was a global MASTERS lock).
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    #[cfg(windows)]
+    process_id: Option<u32>,
+    #[cfg(windows)]
+    job: Option<OwnedHandle>,
 }
 
 #[derive(Default)]
@@ -63,7 +89,7 @@ impl PtyManager {
             sessions.drain().map(|(_, entry)| entry).collect()
         };
         for mut entry in entries {
-            let _ = entry.killer.kill();
+            kill_entry(&mut entry);
             drop(entry.master);
         }
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -96,6 +122,89 @@ impl PtyManager {
             slots.remove(&id);
         }
     }
+}
+
+#[cfg(windows)]
+fn create_process_job(
+    child: &(dyn portable_pty::Child + Send + Sync),
+) -> Result<OwnedHandle, String> {
+    use std::mem::{size_of, zeroed};
+    use std::ptr::{null, null_mut};
+
+    let raw = unsafe { CreateJobObjectW(null_mut(), null()) };
+    if raw.is_null() {
+        return Err(format!(
+            "CreateJobObjectW: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as _,
+            JobObjectExtendedLimitInformation,
+            &mut limits as *mut _ as *mut _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+        )
+    };
+    if configured == 0 {
+        return Err(format!(
+            "SetInformationJobObject: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let process = child
+        .as_raw_handle()
+        .ok_or_else(|| "child has no Windows process handle".to_string())?;
+    let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, process as _) };
+    if assigned == 0 {
+        return Err(format!(
+            "AssignProcessToJobObject: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(job)
+}
+
+#[cfg(windows)]
+fn system_taskkill() -> Option<PathBuf> {
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as DWORD) };
+    if length == 0 || length as usize >= buffer.len() {
+        return None;
+    }
+    let directory = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+    Some(PathBuf::from(directory).join("taskkill.exe"))
+}
+
+#[cfg(windows)]
+fn kill_windows_tree(pid: u32) {
+    let Some(taskkill) = system_taskkill() else {
+        return;
+    };
+    let pid = pid.to_string();
+    let _ = std::process::Command::new(taskkill)
+        .args(["/PID", pid.as_str(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+fn kill_entry(entry: &mut PtyEntry) {
+    #[cfg(windows)]
+    {
+        let mut terminated = false;
+        if let Some(job) = entry.job.as_ref() {
+            terminated = unsafe { TerminateJobObject(job.as_raw_handle() as _, 1) } != 0;
+        }
+        if !terminated {
+            if let Some(pid) = entry.process_id {
+                kill_windows_tree(pid);
+            }
+        }
+    }
+    let _ = entry.killer.kill();
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -611,6 +720,16 @@ fn spawn_pair_inner(
             return Err(format!("failed to spawn shell: {spawn_err}"));
         }
     };
+    #[cfg(windows)]
+    let process_id = child.process_id();
+    #[cfg(windows)]
+    let job = match create_process_job(child.as_ref()) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            eprintln!("[gm-pty] id={id} process job unavailable: {error}");
+            None
+        }
+    };
     let (reader, writer) = match (pair.master.try_clone_reader(), pair.master.take_writer()) {
         (Ok(r), Ok(w)) => (r, w),
         (Err(e), _) | (_, Err(e)) => {
@@ -627,6 +746,10 @@ fn spawn_pair_inner(
                 writer: Arc::new(Mutex::new(writer)),
                 killer: child.clone_killer(),
                 master: Arc::new(Mutex::new(pair.master)),
+                #[cfg(windows)]
+                process_id,
+                #[cfg(windows)]
+                job,
             },
         );
     }
@@ -794,10 +917,9 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     let master_to_close = {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.remove(&id).map(|mut entry| {
-            // Killer handle = TerminateProcess on the shell HANDLE. Never
-            // touches the exit-watcher's owned Child, which exits its poll
-            // on its own.
-            let _ = entry.killer.kill();
+            // The job/tree kill includes descendants; the portable-pty killer
+            // remains the fallback for hosts without a Windows job.
+            kill_entry(&mut entry);
             entry.master
         })
     };
@@ -850,6 +972,40 @@ mod tests {
         assert!(!is_real_exe(std::path::Path::new(
             "C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe"
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_fallback_uses_system_directory() {
+        let path = system_taskkill().expect("system directory");
+        assert!(path.is_absolute());
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("taskkill.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_job_terminates_real_pty_child() {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.arg("/K");
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        let job = create_process_job(child.as_ref()).expect("assign process job");
+        assert!(child.try_wait().expect("poll child").is_none());
+        assert!(unsafe { TerminateJobObject(job.as_raw_handle() as _, 1) } != 0);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(child.try_wait().expect("wait child").is_some());
     }
 
     #[test]

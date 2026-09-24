@@ -1555,6 +1555,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-store",
  "tauri-plugin-updater",
+ "winapi",
 ]
 
 [[package]]
