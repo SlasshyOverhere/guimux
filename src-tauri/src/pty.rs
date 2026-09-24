@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, State};
 
+#[cfg(not(windows))]
+use crate::pty_inputrc::ensure_guimux_inputrc;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtySession {
     pub id: u64,
@@ -411,25 +414,6 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
     });
 }
 
-/// Guimux readline config: binds Ctrl+Delete (ESC[3;5~) to kill-word and
-/// Ctrl+Backspace/Ctrl+H (^H, which is what terminals send for it) to
-/// backward-kill-word, without touching the user's `~/.inputrc`. Written once
-/// to the temp dir; missing includes are ignored by readline so a bare
-/// container still gets the bindings.
-#[cfg(not(windows))]
-fn ensure_guimux_inputrc() -> PathBuf {
-    // Versioned name: a stale v1 file from an earlier run must not pin old
-    // bindings (it is written once and then reused).
-    let p = std::env::temp_dir().join("guimux-inputrc-v2");
-    if !p.exists() {
-        let _ = std::fs::write(
-            &p,
-            "$include /etc/inputrc\n$include ~/.inputrc\n\"\\e[3;5~\": kill-word\n\"\\C-h\": backward-kill-word\n\"\\e\\x7f\": backward-kill-word\n",
-        );
-    }
-    p
-}
-
 fn spawn_pair(
     app: &AppHandle,
     state: &State<PtyManager>,
@@ -494,7 +478,9 @@ fn spawn_pair(
             // Readline shells (bash) pick this up; other shells ignore it.
             // Never overrides an explicit user INPUTRC.
             if std::env::var_os("INPUTRC").is_none() {
-                cmd.env("INPUTRC", ensure_guimux_inputrc());
+                if let Some(path) = ensure_guimux_inputrc() {
+                    cmd.env("INPUTRC", path);
+                }
             }
         }
         match pair.slave.spawn_command(cmd) {
@@ -836,13 +822,4 @@ mod tests {
         assert!(b.contains("Get-Module PSReadLine"), "binding must be guarded");
     }
 
-    #[test]
-    #[cfg(not(windows))]
-    fn guimux_inputrc_binds_ctrl_delete() {
-        let p = ensure_guimux_inputrc();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("\\e[3;5~") && text.contains("kill-word"), "missing kill-word: {text}");
-        // xterm sends Ctrl+Backspace as ^H: without this it is one letter.
-        assert!(text.contains("\\C-h") && text.contains("backward-kill-word"), "missing C-h: {text}");
-    }
 }

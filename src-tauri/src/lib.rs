@@ -4,6 +4,8 @@ pub mod conpty_dll;
 pub mod fs;
 pub mod git;
 pub mod pty;
+#[cfg(any(not(windows), test))]
+pub mod pty_inputrc;
 pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
