@@ -40,6 +40,36 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn is_link_like(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
+    let mut current = path;
+    loop {
+        if let Ok(metadata) = fs::symlink_metadata(current) {
+            if is_link_like(&metadata) {
+                return Err(format!("invalid {what}: symlink or junction paths are not allowed"));
+            }
+        }
+        let Some(parent) = current.parent() else { break };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
 /// Rejects paths that would block or escape: NUL/COM1-style device names,
 /// `\\.\` device prefixes, and UNC paths.
 fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
@@ -70,6 +100,7 @@ fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
             }
         }
     }
+    reject_link_components(p, what)?;
     Ok(())
 }
 
@@ -136,18 +167,22 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
             break;
         }
         *budget -= 1;
-        // Symlinks: list the link itself, never recurse (cycle/escape risk).
-        if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+        // Links: list the link itself, never recurse (cycle/escape risk).
+        let entry_path = entry.path();
+        if fs::symlink_metadata(&entry_path)
+            .map(|metadata| is_link_like(&metadata))
+            .unwrap_or(false)
+        {
             children.push(Node {
                 name: fname,
-                path: entry.path().to_string_lossy().to_string(),
+                path: entry_path.to_string_lossy().to_string(),
                 is_dir: false,
                 children: None,
                 truncated: false,
             });
             continue;
         }
-        if let Some(node) = build_tree(&entry.path(), depth + 1, max_depth, budget) {
+        if let Some(node) = build_tree(&entry_path, depth + 1, max_depth, budget) {
             children.push(node);
         }
     }
@@ -193,6 +228,7 @@ fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     let from = PathBuf::from(&old);
     let to = PathBuf::from(&new);
+    reject_special_path(&from, "rename source")?;
     if !from.exists() {
         return Err(format!("not found: {old}"));
     }
@@ -453,7 +489,6 @@ pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
         return Err("pasted image too large".into());
     }
     let p = PathBuf::from(&path);
-    reject_special_path(&p, "path")?;
     if p.parent().and_then(|d| d.file_name()).map(|n| n != ".guimux-pastes").unwrap_or(true) {
         return Err("fs_write_bytes only writes into .guimux-pastes".into());
     }
@@ -467,6 +502,7 @@ pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
     }
     // Our own managed drop dir: create it, unlike fs_write's no-mkdir rule.
     let parent = p.parent().ok_or("invalid path")?;
+    reject_special_path(parent, "paste drop directory")?;
     if let Ok(meta) = std::fs::symlink_metadata(parent) {
         if meta.file_type().is_symlink() || !meta.is_dir() {
             return Err("invalid paste drop directory".into());
@@ -583,19 +619,19 @@ fn grep_search_with_limits(
             if !grep_visible(&name) {
                 continue;
             }
-            let ftype = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ftype.is_symlink() {
+            let fpath = entry.path();
+            if fs::symlink_metadata(&fpath)
+                .map(|metadata| is_link_like(&metadata))
+                .unwrap_or(false)
+            {
                 continue;
             }
+            let Ok(ftype) = entry.file_type() else { continue };
             if ftype.is_dir() {
-                stack.push(entry.path());
+                stack.push(fpath);
                 continue;
             }
             scanned += 1;
-            let fpath = entry.path();
             let mut file = match fs::File::open(&fpath) {
                 Ok(file) => file,
                 Err(_) => continue,
@@ -862,6 +898,68 @@ mod tests {
         symlink(&target, &link).unwrap();
         assert!(fs_write(link.to_string_lossy().to_string(), "after".into()).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "before");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_components_are_rejected_and_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("guimux-fs-components-{}", std::process::id()));
+        let outside = dir.join("outside");
+        let root = dir.join("root");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outside.join("secret.txt"), "needle").unwrap();
+        let link = root.join("link");
+        symlink(&outside, &link).unwrap();
+
+        assert!(fs_read(link.join("secret.txt").to_string_lossy().to_string()).is_err());
+        assert!(fs_write(link.join("new.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        assert!(fs_tree(link.to_string_lossy().to_string(), 1).is_err());
+        assert!(grep_search(root.to_string_lossy().to_string(), "needle".into(), None, None)
+            .unwrap()
+            .is_empty());
+        let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
+        let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
+        assert!(linked.children.is_none());
+
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn linked_components_are_rejected_and_not_searched() {
+        let dir = std::env::temp_dir().join(format!("guimux-fs-components-{}", std::process::id()));
+        let outside = dir.join("outside");
+        let root = dir.join("root");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outside.join("secret.txt"), "needle").unwrap();
+        let link = root.join("link");
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
+
+        assert!(fs_read(link.join("secret.txt").to_string_lossy().to_string()).is_err());
+        assert!(fs_write(link.join("new.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        assert!(fs_tree(link.to_string_lossy().to_string(), 1).is_err());
+        assert!(grep_search(root.to_string_lossy().to_string(), "needle".into(), None, None)
+            .unwrap()
+            .is_empty());
+        let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
+        let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
+        assert!(linked.children.is_none());
+
+        assert!(fs::remove_dir(&link).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 
