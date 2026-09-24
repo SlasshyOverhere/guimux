@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::io::Read;
 #[cfg(windows)]
+use std::path::Path;
+#[cfg(windows)]
 use winapi::um::winbase::SetDllDirectoryW;
 
 /// Vendored binary sizes and SHA-256 digests, recorded from node-pty 1.1.0's assets.
@@ -48,10 +50,48 @@ fn harden_dll_search_path() -> bool {
 }
 
 #[cfg(windows)]
-fn asset_matches(path: &std::path::Path, expected_size: u64, expected_hash: &str) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
+fn is_link_like(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(windows)]
+fn reject_link_components(path: &Path) -> Result<(), String> {
+    let mut current = path;
+    loop {
+        match std::fs::symlink_metadata(current) {
+            Ok(metadata) if is_link_like(&metadata) => {
+                return Err("ConPTY asset path contains a link or reparse point".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect ConPTY asset path: {error}")),
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn asset_matches(path: &Path, expected_size: u64, expected_hash: &str) -> bool {
+    if reject_link_components(path).is_err() {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
+    if is_link_like(&metadata) {
+        return false;
+    }
     if !metadata.is_file() || metadata.len() != expected_size {
         return false;
     }
@@ -78,6 +118,44 @@ fn asset_matches(path: &std::path::Path, expected_size: u64, expected_hash: &str
     actual == expected_hash
 }
 
+#[cfg(windows)]
+fn stage_asset(src: &Path, dst: &Path, expected_size: u64, expected_hash: &str) -> bool {
+    if !asset_matches(src, expected_size, expected_hash) || reject_link_components(dst).is_err() {
+        return false;
+    }
+    match std::fs::symlink_metadata(dst) {
+        Ok(metadata) if !is_link_like(&metadata) && metadata.is_file() => {
+            return asset_matches(dst, expected_size, expected_hash);
+        }
+        Ok(_) => return false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
+    }
+    let Ok(input) = std::fs::File::open(src) else {
+        return false;
+    };
+    let mut output = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+    {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if let Err(error) = std::io::copy(&mut input.take(expected_size + 1), &mut output) {
+        drop(output);
+        let _ = std::fs::remove_file(dst);
+        log_conpty(&format!("asset copy failed: {error}"));
+        return false;
+    }
+    drop(output);
+    if !asset_matches(dst, expected_size, expected_hash) {
+        let _ = std::fs::remove_file(dst);
+        return false;
+    }
+    true
+}
+
 /// Copy vendored assets next to the exe at startup (dev + portable runs),
 /// so portable-pty's sideload check (`conpty.dll` beside the binary) hits.
 /// Installed runs already have them side-by-side via bundle resources
@@ -98,20 +176,32 @@ pub fn ensure_bundled_conpty() -> bool {
             return true;
         }
     };
-    let mut valid = true;
+    let mut all_present = true;
     for (name, size, hash) in EXPECTED {
         let dst = exe_dir.join(name);
-        if asset_matches(&dst, *size, hash) {
-            continue;
-        }
-        if dst.exists() {
-            valid = false;
+        match std::fs::symlink_metadata(&dst) {
+            Ok(metadata) if !is_link_like(&metadata) && metadata.is_file() => {
+                if !asset_matches(&dst, *size, hash) {
+                    log_conpty("existing ConPTY asset failed integrity check; refusing startup");
+                    return false;
+                }
+            }
+            Ok(_) => {
+                log_conpty("existing ConPTY asset is not a regular file; refusing startup");
+                return false;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                all_present = false;
+            }
+            Err(error) => {
+                log_conpty(&format!(
+                    "cannot inspect existing ConPTY asset: {error}; refusing startup"
+                ));
+                return false;
+            }
         }
     }
-    if EXPECTED
-        .iter()
-        .all(|(name, size, hash)| asset_matches(&exe_dir.join(name), *size, hash))
-    {
+    if all_present {
         return true;
     }
     // Dev layout: exe at <root>/src-tauri/target/{debug,release} → vendored
@@ -125,12 +215,8 @@ pub fn ensure_bundled_conpty() -> bool {
     let src_dir = match src_dir {
         Some(d) => d,
         None => {
-            if valid {
-                log_conpty("vendored assets not found; using system ConPTY");
-            } else {
-                log_conpty("existing ConPTY assets failed integrity checks; refusing startup");
-            }
-            return valid;
+            log_conpty("vendored assets not found; using system ConPTY");
+            return true;
         }
     };
     for (name, size, hash) in EXPECTED {
@@ -142,21 +228,21 @@ pub fn ensure_bundled_conpty() -> bool {
             ));
             continue;
         }
-        match std::fs::copy(&src, &dst) {
-            Ok(_) if asset_matches(&dst, *size, hash) => {
-                log_conpty(&format!("{name} staged"));
-            }
-            Ok(_) => {
-                log_conpty(&format!("{name} staged copy failed integrity check"));
-            }
-            Err(e) => {
-                log_conpty(&format!("{name} copy failed: {e}; using system ConPTY"));
-            }
+        if stage_asset(&src, &dst, *size, hash) {
+            log_conpty(&format!("{name} staged"));
+        } else {
+            log_conpty(&format!("{name} could not be staged; using system ConPTY"));
         }
     }
-    valid = EXPECTED.iter().all(|(name, size, hash)| {
+    let valid = EXPECTED.iter().all(|(name, size, hash)| {
         let dst = exe_dir.join(name);
-        !dst.exists() || asset_matches(&dst, *size, hash)
+        match std::fs::symlink_metadata(&dst) {
+            Ok(metadata) => {
+                !is_link_like(&metadata) && metadata.is_file() && asset_matches(&dst, *size, hash)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
     });
     if !valid {
         log_conpty("ConPTY integrity checks failed; refusing startup");
@@ -184,6 +270,22 @@ mod tests {
             "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         ));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn staging_never_overwrites_an_existing_destination() {
+        let dir = std::env::temp_dir().join(format!("guimux-conpty-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (name, size, hash) = EXPECTED[0];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/conpty")
+            .join(name);
+        let dst = dir.join(name);
+        std::fs::write(&dst, b"keep").unwrap();
+        assert!(!stage_asset(&src, &dst, size, hash));
+        assert_eq!(std::fs::read(&dst).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
