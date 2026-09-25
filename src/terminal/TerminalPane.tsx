@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Columns2, GripVertical, Maximize2, Minimize2, Rows2, X } from "lucide-react";
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
+import type { PtyAttach, PtyOutput, PtySession } from "../types";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
@@ -276,8 +277,11 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const webglRef = useRef<WebglAddon | null>(null);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const sessionRef = useRef<number | null>(ptyId);
+  const sessionEpochRef = useRef<number | null>(null);
+  const shellKindRef = useRef<PtySession["shell_kind"]>("unknown");
   // Agent fan-out: one-shot command typed into a fresh shell, then cleared.
   const initCmdRef = useRef<string | null>(initCmd ?? null);
+  const initCmdEffectReadyRef = useRef(false);
   initCmdRef.current = initCmd ?? null;
   const exitedRef = useRef(false);
   // Mirrors the mount effect's `alive` flag for code that outlives a render.
@@ -297,6 +301,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
+  const snoopDecoderRef = useRef(new TextDecoder());
   const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
   // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
   // only forward when cols/rows actually changed — AND coalesce to one
@@ -379,7 +384,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const snoopLiveCwd = (bytes: Uint8Array) => {
     let text: string;
     try {
-      text = new TextDecoder().decode(bytes);
+      text = snoopDecoderRef.current.decode(bytes, { stream: true });
     } catch {
       return;
     }
@@ -420,8 +425,13 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
-    const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
-      const bytes = new Uint8Array(ev.payload);
+    const pending: PtyOutput[] = [];
+    let replaying = true;
+    const writeOutput = (output: PtyOutput) => {
+      const currentEpoch = sessionEpochRef.current;
+      if (currentEpoch != null && output.epoch < currentEpoch) return;
+      sessionEpochRef.current = output.epoch;
+      const bytes = new Uint8Array(output.bytes);
       snoopLiveCwd(bytes);
       if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
         const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
@@ -441,6 +451,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } catch (e) {
         console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
       }
+    };
+    const disposeOutput = await listen<PtyOutput>(`pty:output-${sid}`, (ev) => {
+      if (replaying) pending.push(ev.payload);
+      else writeOutput(ev.payload);
     });
     const disposeExit = await listen<number>(`pty:exit-${sid}`, () => {
       term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
@@ -455,11 +469,22 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       return;
     }
     unlisteners.current.push(disposeOutput, disposeExit);
-    const replay = await invoke<number[]>("pty_attach", { id: sid });
-    if (replay.length > 0) {
-      const bytes = new Uint8Array(replay);
-      snoopLiveCwd(bytes);
-      writeKeepPlace(term, bytes);
+    try {
+      const attached = await invoke<PtyAttach>("pty_attach", { id: sid });
+      shellKindRef.current = attached.shell_kind;
+      sessionEpochRef.current = attached.epoch;
+      if (attached.replay.length > 0) {
+        const bytes = new Uint8Array(attached.replay);
+        snoopLiveCwd(bytes);
+        writeKeepPlace(term, bytes);
+      }
+      for (const output of pending) writeOutput(output);
+      pending.length = 0;
+      replaying = false;
+    } catch (error) {
+      disposeOutput();
+      disposeExit();
+      throw error;
     }
   };
 
@@ -489,7 +514,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   const spawnFresh = async (term: Terminal, fit: FitAddon): Promise<number> => {
     const dims = fitSane(term, fit) ?? { cols: 80, rows: 24 };
-    const session: { id: number; cwd: string } = await invoke("pty_spawn", {
+    sessionEpochRef.current = null;
+    const session = await invoke<PtySession>("pty_spawn", {
       cwd,
       cols: dims.cols,
       rows: dims.rows,
@@ -498,6 +524,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     // dims must not re-send it (they'd no-op anyway, but keep the ledger true).
     lastDimsRef.current = dims;
     sessionRef.current = session.id;
+    sessionEpochRef.current = session.epoch;
+    shellKindRef.current = session.shell_kind;
+    snoopDecoderRef.current = new TextDecoder();
     setPtyId(paneId, session.id);
     return session.id;
   };
@@ -509,12 +538,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     const sid = sessionRef.current;
     const dims = saneDims(term) ?? { cols: 80, rows: 24 };
     lastDimsRef.current = dims;
+    snoopDecoderRef.current = new TextDecoder();
     // Same-id restart keeps the existing listeners alive: the backend
     // respawns the child and the reader thread re-emits on the same
     // `pty:output-{id}` channel, so output flows with no re-subscribe.
     try {
       if (sid != null) {
-        await invoke("pty_restart", { id: sid, cols: dims.cols, rows: dims.rows });
+        const session = await invoke<PtySession>("pty_restart", { id: sid, cols: dims.cols, rows: dims.rows });
+        shellKindRef.current = session.shell_kind;
+        sessionEpochRef.current = session.epoch;
       } else {
         throw new Error("no session yet");
       }
@@ -565,6 +597,31 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     [],
   );
 
+  const pasteShellPath = (path: string) => {
+    const sid = sessionRef.current;
+    const term = termRef.current;
+    const quoted = quoteForShell(path, shellKindRef.current);
+    if (!quoted) {
+      if (!navigator.clipboard) {
+        showPasteHint("This shell cannot paste paths safely");
+        return;
+      }
+      void navigator.clipboard
+        .writeText(path)
+        .then(() => showPasteHint("Path copied — paste it manually in this shell"))
+        .catch(() => showPasteHint("Path copy failed"));
+      return;
+    }
+    if (sid == null || !term || exitedRef.current) return;
+    term.focus();
+    setActivePane(paneId);
+    try {
+      term.input(quoted, true);
+    } catch {
+      invoke("pty_write", { id: sid, data: quoted }).catch(() => showPasteHint("Failed to paste path"));
+    }
+  };
+
   // Chord-initiated pastes (Ctrl+V et al below) are followed ~instantly by
   // the webview's own native `paste` event. The async pasteClipboard() owns
   // those gestures, so the sync reader must stand down briefly or every
@@ -590,9 +647,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
 
   // Image paste: save the blob under `<cwd>/.guimux-pastes/` and paste the
   // quoted path, so a screenshot Ctrl+V lands a file the shell (or an agent
-  // reading the path) can use. term.paste keeps bracketed-paste semantics.
+  // reading the path) can use.
   const pasteImageBlob = async (blob: Blob, chord: string) => {
-    const term = termRef.current;
     const ext =
       blob.type === "image/jpeg" ? "jpg"
       : blob.type === "image/gif" ? "gif"
@@ -613,11 +669,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       if (!base64) throw new Error("empty image data");
       const saved = await invoke<string>("fs_write_bytes", { path, base64 });
       pasteDebug(`chord=${chord} imageSaved=${blob.size}B ext=${ext} fallbackUsed=false`);
-      try {
-        term?.paste(quoteForShell(saved));
-      } catch {
-        sendRaw(quoteForShell(saved));
-      }
+      pasteShellPath(saved);
     } catch (e) {
       pasteDebug(`chord=${chord} imageSaveFailed fallbackUsed=false`);
       showPasteHint("Couldn't save pasted image");
@@ -1003,6 +1055,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       // first (so Restart recovers), then surface the Restart banner.
       // Input wiring below still runs; only the one-shot initCmd is held.
       let deadSession = false;
+      let freshSessionId: number | null = null;
       if (sessionId != null) {
         // Layout kept an id (remount after split / worktree switch).
         // pty_attach validates; rejection = spawn fresh, not blank.
@@ -1020,6 +1073,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
           unlisteners.current = [];
           try {
             sessionId = await spawnFresh(term, fit);
+            freshSessionId = sessionId;
             if (!alive) {
               invoke("pty_kill", { id: sessionId });
               return;
@@ -1027,6 +1081,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
             sessionRef.current = sessionId;
             await attach(term, sessionId);
           } catch (e) {
+            if (freshSessionId != null) invoke("pty_kill", { id: freshSessionId });
             term.writeln(`\x1b[31mfailed to spawn shell: ${e}\x1b[0m`);
             return;
           }
@@ -1034,16 +1089,18 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       } else {
         try {
           sessionId = await spawnFresh(term, fit);
+          freshSessionId = sessionId;
           if (!alive) {
             invoke("pty_kill", { id: sessionId });
             return;
           }
           sessionRef.current = sessionId;
+          await attach(term, sessionId);
         } catch (e) {
+          if (freshSessionId != null) invoke("pty_kill", { id: freshSessionId });
           term.writeln(`\x1b[31mfailed to spawn shell: ${e}\x1b[0m`);
           return;
         }
-        await attach(term, sessionId);
       }
 
       // Fire-and-forget: the pty input buffer holds the line until the shell
@@ -1097,6 +1154,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       unregisterLiveTerm(paneId);
       ro.disconnect();
       hostRef.current?.removeEventListener("paste", killNativePaste, true);
+      const sid = sessionRef.current;
+      if (sid != null) invoke("pty_detach", { id: sid }).catch(() => {});
       for (const un of unlisteners.current) un();
       unlisteners.current = [];
       // persist scrollback
@@ -1116,7 +1175,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
         paneAlive(st.layout, paneId) ||
         Object.values(st.layouts).some((n) => paneAlive(n, paneId));
       if (!kept) {
-        const sid = sessionRef.current;
         if (sid != null) invoke("pty_kill", { id: sid });
       }
       try {
@@ -1135,6 +1193,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // only fires initCmd once, so a command assigned later (reuse, no split)
   // is typed here. Fresh panes skip this (no session yet; mount handles it).
   useEffect(() => {
+    if (!initCmdEffectReadyRef.current) {
+      initCmdEffectReadyRef.current = true;
+      return;
+    }
     if (!initCmd) return;
     if (!termRef.current || sessionRef.current == null || exitedRef.current) return;
     const cmdText = initCmd;
@@ -1233,14 +1295,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       const inside = !!el && !!paneRef.current?.contains(el);
       if (!inside || exitedRef.current) return;
       if (sessionRef.current == null) return;
-      termRef.current?.focus();
-      setActivePane(paneId);
-      // term.paste() is lossy here: this pane's capture `paste` listener
-      // (single-paste-path fix) eats the synthetic event before xterm's
-      // handler, and clipboard permission is unreliable. term.input() feeds
-      // the same keystroke path typed text uses (core input -> onData ->
-      // pty_write) without touching the DOM paste pipeline at all.
-      termRef.current?.input(quoteForShell(path), true);
+      pasteShellPath(path);
     };
     window.addEventListener("gm-file-drop", onFileDrop);
     return () => window.removeEventListener("gm-file-drop", onFileDrop);
@@ -1296,15 +1351,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       dt.getData("application/guimux-file-path") ||
       (dt.files?.[0] as (File & { path?: string }) | undefined)?.path ||
       "";
-    const sid = sessionRef.current;
-    if (!path || sid == null) return;
-    // term.paste honors bracketed-paste mode; raw pty_write would not.
-    try {
-      termRef.current?.input(quoteForShell(path), true);
-    } catch {
-      invoke("pty_write", { id: sid, data: quoteForShell(path) });
-    }
-    termRef.current?.focus();
+    if (!path || sessionRef.current == null) return;
+    pasteShellPath(path);
   };
 
   return (

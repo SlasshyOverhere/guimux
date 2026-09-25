@@ -8,9 +8,11 @@ import { announceWrite } from "../announceWrite";
 import { dragFile, notifyFileDrop } from "../dragFile";
 import { confirmDialog, errorDialog } from "../dialogs";
 import { menuPos } from "../menuPos";
+import { normalizePath, pathStartsRoot } from "../path";
 import { PREF, numIn, readPref, writePref } from "../uiPrefs";
 import { ChevronRight, ChevronDown, File as FileIcon, Folder, Save, FileDiff, X, FilePlus2, RotateCcw, Pencil, Search } from "lucide-react";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
+import { canSaveBuffer, confirmUnsavedDiscard } from "./editorBuffer";
 import type { FsNode, GrepHit } from "../types";
 
 // ponytail: all file icons share the muted tone; per-extension colors only
@@ -22,14 +24,16 @@ const SEP = /[\\/]/;
 // (key={wt.id}), and local state alone took the user's edits with it.
 const buffers = new Map<string, { content: string; saved: string; dirty: boolean }>();
 
+function syncEditorDirtyCount() {
+  let count = 0;
+  for (const buffer of buffers.values()) if (buffer.dirty) count += 1;
+  useStore.getState().setEditorDirtyCount(count);
+}
+
 // Tree paths mix separators (worktree roots use `/`, DirEntry adds `\`), so
 // both comparisons below normalize before matching.
 const normSep = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
-const inRoot = (root: string, p: string) => {
-  const r = normSep(root);
-  const n = normSep(p);
-  return n === r || n.startsWith(r + "/");
-};
+const inRoot = (root: string, p: string) => pathStartsRoot(root, p);
 
 function baseName(p: string): string {
   const parts = p.split(SEP);
@@ -193,6 +197,9 @@ export function ExplorerPane({ root }: { root: string }) {
   const [savedContent, setSavedContent] = useState<string>("");
   const [dirty, setDirty] = useState(false);
   const [contentLoaded, setContentLoaded] = useState(false);
+  const loadedPathRef = useRef<string | null>(null);
+  const editorPathRef = useRef(editorPath);
+  editorPathRef.current = editorPath;
   const [gitDiff, setGitDiff] = useState<string>("");
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -212,6 +219,9 @@ export function ExplorerPane({ root }: { root: string }) {
   const [monacoReady, setMonacoReady] = useState(false);
   const [monacoError, setMonacoError] = useState<string | null>(null);
   const [monacoRetry, setMonacoRetry] = useState(0);
+  const rootRef = useRef(root);
+  rootRef.current = root;
+  const treeRequestRef = useRef(0);
   // Markdown preview: defaults on for .md files, toggled per-file.
   const [markdownPreview, setMarkdownPreview] = useState(true);
   useEffect(() => {
@@ -239,9 +249,17 @@ export function ExplorerPane({ root }: { root: string }) {
   }, [editorPath, monacoReady, monacoRetry, markdownPreview]);
 
   const refreshTree = () => {
+    const request = ++treeRequestRef.current;
+    const requestedRoot = root;
     invoke<FsNode>("fs_tree", { path: root, depth: 4 })
-      .then((t) => setTree(t))
-      .catch(() => setTree(null));
+      .then((t) => {
+        if (request !== treeRequestRef.current || normalizePath(requestedRoot) !== normalizePath(rootRef.current)) return;
+        setTree(t);
+      })
+      .catch(() => {
+        if (request !== treeRequestRef.current || normalizePath(requestedRoot) !== normalizePath(rootRef.current)) return;
+        setTree(null);
+      });
   };
 
   // External changes (git checkout, agent writes, another editor): the
@@ -253,7 +271,7 @@ export function ExplorerPane({ root }: { root: string }) {
     let unlisten: (() => void) | null = null;
     invoke("fs_watch", { path: root }).catch(() => {});
     listen<{ root: string }>("fs-changed", (ev) => {
-      if (cancelled || normSep(ev.payload.root) !== normSep(root)) return;
+      if (cancelled || normalizePath(ev.payload.root) !== normalizePath(root)) return;
       if (timer != null) clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = null;
@@ -275,25 +293,33 @@ export function ExplorerPane({ root }: { root: string }) {
 
   // Content search over the worktree, debounced; needs 2+ chars.
   useEffect(() => {
+    let cancelled = false;
     const q = query.trim();
     if (!searchOpen || q.length < 2) {
       setHits([]);
       setSearching(false);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
     setSearching(true);
     const t = window.setTimeout(() => {
       invoke<GrepHit[]>("grep_search", { path: root, query: q })
         .then((h) => {
+          if (cancelled) return;
           setHits(h);
           setSearching(false);
         })
         .catch(() => {
+          if (cancelled) return;
           setHits([]);
           setSearching(false);
         });
     }, 300);
-    return () => clearTimeout(t);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [query, searchOpen, root]);
 
   // A search hit opens its file first; reveal the line once the editor holds it.
@@ -395,10 +421,23 @@ export function ExplorerPane({ root }: { root: string }) {
     setRenaming(null);
     setMenu(null);
     const st = useStore.getState();
-    const open = st.editorPath;
-    if (open && !inRoot(root, open)) {
-      st.setEditorTabs(st.editorTabs.filter((t) => inRoot(root, t)));
+    const outside = st.editorTabs.filter((path) => !inRoot(root, path));
+    if (outside.length === 0) return;
+    const dirtyOutside = outside.filter((path) => buffers.get(path)?.dirty);
+    if (dirtyOutside.length === 0) {
+      st.setEditorTabs(st.editorTabs.filter((path) => inRoot(root, path)));
+      return;
     }
+    let cancelled = false;
+    void confirmUnsavedDiscard(dirtyOutside.length, confirmDialog, "leave this worktree").then((confirmed) => {
+      if (!confirmed || cancelled) return;
+      for (const path of dirtyOutside) buffers.delete(path);
+      syncEditorDirtyCount();
+      useStore.getState().setEditorTabs(useStore.getState().editorTabs.filter((path) => inRoot(root, path)));
+    });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -407,6 +446,7 @@ export function ExplorerPane({ root }: { root: string }) {
     // A dirty buffer outranks disk: this is the remount that used to lose it.
     const cached = buffers.get(editorPath);
     if (cached?.dirty) {
+      loadedPathRef.current = editorPath;
       setContent(cached.content);
       setSavedContent(cached.saved);
       setDirty(true);
@@ -418,10 +458,15 @@ export function ExplorerPane({ root }: { root: string }) {
     // Guarded: switching files mid-read let the stale response overwrite the
     // new file's content.
     let cancelled = false;
+    loadedPathRef.current = null;
+    setContent("");
+    setSavedContent("");
+    setDirty(false);
     setContentLoaded(false);
     invoke<string>("fs_read", { path: editorPath })
       .then((c) => {
         if (cancelled) return;
+        loadedPathRef.current = editorPath;
         setContent(c);
         setSavedContent(c);
         setDirty(false);
@@ -429,6 +474,7 @@ export function ExplorerPane({ root }: { root: string }) {
       })
       .catch((e) => {
         if (cancelled) return;
+        loadedPathRef.current = null;
         setContent(`// cannot open: ${e}`);
         setSavedContent("");
         setDirty(false);
@@ -444,9 +490,10 @@ export function ExplorerPane({ root }: { root: string }) {
   // Mirror only unsaved buffers: a clean one reloads from disk, and keeping
   // every opened file in memory would grow without bound.
   useEffect(() => {
-    if (!editorPath) return;
+    if (!editorPath || !canSaveBuffer(editorPath, loadedPathRef.current)) return;
     if (dirty) buffers.set(editorPath, { content, saved: savedContent, dirty: true });
     else buffers.delete(editorPath);
+    syncEditorDirtyCount();
   }, [editorPath, content, savedContent, dirty]);
 
   useEffect(() => {
@@ -465,11 +512,20 @@ export function ExplorerPane({ root }: { root: string }) {
 
   useEffect(() => {
     if (!editorPath || !diffMode) return;
+    let cancelled = false;
+    setGitDiff("");
     // Diff-only: the old effect ran `git diff` on every file open even when
     // the diff view was never shown, adding a spawn to the startup path.
-    invoke<string>("git_diff", { path: root, base: null })
-      .then(setGitDiff)
-      .catch(() => setGitDiff(""));
+    invoke<string>("git_diff", { path: root, base: null, file: editorPath })
+      .then((diff) => {
+        if (!cancelled) setGitDiff(diff);
+      })
+      .catch(() => {
+        if (!cancelled) setGitDiff("");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [root, editorPath, diffMode]);
 
   const shortName = useMemo(() => {
@@ -491,15 +547,26 @@ export function ExplorerPane({ root }: { root: string }) {
 
   const save = async () => {
     if (!editorPath) return;
-    announceWrite(editorPath);
+    if (!canSaveBuffer(editorPath, loadedPathRef.current)) {
+      void errorDialog("Save blocked: file content is not loaded");
+      return;
+    }
+    const path = editorPath;
+    const nextContent = content;
+    const expected = savedContent;
+    announceWrite(path);
     try {
-      await invoke("fs_write", { path: editorPath, content });
+      await invoke("fs_write_checked", { path, content: nextContent, expected });
     } catch (e) {
       void errorDialog(`save failed: ${e}`);
       return;
     }
-    setSavedContent(content);
-    setDirty(false);
+    buffers.delete(path);
+    syncEditorDirtyCount();
+    if (editorPathRef.current === path) {
+      setSavedContent(nextContent);
+      setDirty(false);
+    }
     // Own writes land through the watcher too, but a save can also create
     // the file (untitled flow): refresh at once instead of waiting out the
     // coalesce window.
@@ -523,8 +590,9 @@ export function ExplorerPane({ root }: { root: string }) {
     // Live edits mirror into `buffers` on render; check both so a close
     // issued between keystroke and mirror still guards.
     const isDirty = buffers.get(target)?.dirty || (target === editorPath && dirty);
-    if (isDirty && !(await confirmDialog("Discard unsaved changes?"))) return;
+    if (isDirty && !(await confirmUnsavedDiscard(1, confirmDialog, "close this file"))) return;
     buffers.delete(target);
+    syncEditorDirtyCount();
     closeEditor(target);
   };
 
@@ -536,22 +604,24 @@ export function ExplorerPane({ root }: { root: string }) {
   };
 
   const newFile = async () => {
-    const p = `${root}/untitled`;
-    try {
-      await invoke("fs_read", { path: p });
-    } catch {
-      // doesn't exist yet: create it empty so the editor opens real content
+    for (let i = 0; i < 100; i++) {
+      const name = i === 0 ? "untitled" : `untitled-${i + 1}`;
+      const path = siblingPath(root, name);
       try {
-        announceWrite(p);
-        await invoke("fs_write", { path: p, content: "" });
-      } catch {
-        /* fall through: editor will show the read error */
+        const created = await invoke<boolean>("fs_create_empty", { path });
+        if (!created) continue;
+        announceWrite(path);
+        openEditor(path, false);
+        // The editor covers the tree, so the rename affordance lives in the
+        // header pencil: start there immediately for the fresh untitled file.
+        startRename(path);
+        return;
+      } catch (e) {
+        void errorDialog(`new file failed: ${e}`);
+        return;
       }
     }
-    openEditor(p, false);
-    // The editor covers the tree, so the rename affordance lives in the
-    // header pencil: start there immediately for the fresh untitled file.
-    startRename(p);
+    void errorDialog("could not find an available new file name");
   };
 
   const renameRowProps = {
@@ -831,7 +901,9 @@ export function ExplorerPane({ root }: { root: string }) {
               {shortName}
             </span>
           )}
-          {dirty ? (
+          {!contentLoaded ? (
+            <span className="tnum shrink-0 text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>not loaded</span>
+          ) : dirty ? (
             <span className="tnum shrink-0 text-[11px] font-semibold" style={{ color: "var(--gm-amber)" }}>edited</span>
           ) : (
             <span className="gm-meta tnum shrink-0">saved</span>
@@ -888,7 +960,8 @@ export function ExplorerPane({ root }: { root: string }) {
               )}
               <button
                 title="Save (Ctrl+S)"
-                className="gm-icon-btn ml-1 h-[30px] gap-1.5 px-3 text-[12px] font-semibold"
+                disabled={!contentLoaded}
+                className="gm-icon-btn ml-1 h-[30px] gap-1.5 px-3 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
                 style={
                   dirty
                     ? { background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }
@@ -941,14 +1014,19 @@ export function ExplorerPane({ root }: { root: string }) {
                 className="w-full rounded-md py-2 text-[12.5px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
                 style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
                 onClick={async () => {
-                  if (editorPath && contentLoaded) {
+                  const path = editorPath;
+                  if (path && canSaveBuffer(path, loadedPathRef.current)) {
+                    const nextContent = content;
                     try {
-                      announceWrite(editorPath);
-                      await invoke("fs_write", { path: editorPath, content });
+                      announceWrite(path);
+                      await invoke("fs_write_checked", { path, content: nextContent, expected: savedContent });
                     } catch (e) {
                       void errorDialog(`save failed: ${e}`);
                       return;
                     }
+                    buffers.delete(path);
+                    syncEditorDirtyCount();
+                    if (editorPathRef.current !== path) return;
                   }
                   closeEditor();
                 }}

@@ -4,7 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { errorDialog } from "../dialogs";
-import type { FsNode, Project } from "../types";
+import { useModalFocus } from "../modalFocus";
+import type { FsNode, Project, Worktree } from "../types";
 import {
   Bot,
   FolderOpen,
@@ -47,8 +48,8 @@ export function Palette() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [files, setFiles] = useState<FsNode[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useModalFocus<HTMLDivElement>(paletteOpen);
 
   const projects: Project[] = useStore((s) => s.projects);
   const activeProjectId = useStore((s) => s.activeProjectId);
@@ -58,25 +59,30 @@ export function Palette() {
     if (!paletteOpen) return;
     setQuery("");
     setSelected(0);
-    const t = setTimeout(() => inputRef.current?.focus(), 10);
     // Escape closes even when focus leaves the input (e.g. tabs out).
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setPaletteOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => {
-      clearTimeout(t);
       window.removeEventListener("keydown", onKey);
     };
   }, [paletteOpen]);
 
   useEffect(() => {
+    let cancelled = false;
     // Lazy: only scan when the palette opens. The old effect walked the
     // tree on every repoRoot change (startup included) for results nobody
     // saw until Ctrl+K.
-    if (!repoRoot || !paletteOpen) return;
+    if (!repoRoot || !paletteOpen) {
+      setFiles([]);
+      return () => {
+        cancelled = true;
+      };
+    }
     invoke<FsNode>("fs_tree", { path: repoRoot, depth: 3 })
       .then((t) => {
+        if (cancelled) return;
         const flat: FsNode[] = [];
         const walk = (n: FsNode) => {
           if (!n.is_dir) flat.push(n);
@@ -85,7 +91,12 @@ export function Palette() {
         if (t) walk(t);
         setFiles(flat);
       })
-      .catch(() => setFiles([]));
+      .catch(() => {
+        if (!cancelled) setFiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [repoRoot, paletteOpen]);
 
   const openFolder = async () => {
@@ -128,9 +139,23 @@ export function Palette() {
         group: "Commands",
         icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
-          invoke("worktree_create", { repoRoot, name: null, base: null }).catch((e) =>
-            errorDialog(`${e}`),
-          );
+          void (async () => {
+            const created = await invoke<Worktree>("worktree_create", { repoRoot, name: null, base: null });
+            const st = useStore.getState();
+            if (st.repoRoot !== repoRoot) return;
+            st.setWorktrees([...st.worktrees.filter((w) => w.id !== created.id), created]);
+            st.setActiveWorktree(created.id);
+            try {
+              const fresh = await invoke<Worktree[]>("worktree_list", { repoRoot });
+              const cur = useStore.getState();
+              if (cur.repoRoot === repoRoot && fresh.some((w) => w.id === created.id)) {
+                cur.setWorktrees(fresh);
+                cur.setActiveWorktree(created.id);
+              }
+            } catch {
+              /* keep the optimistic row if the follow-up list fails */
+            }
+          })().catch((e) => errorDialog(`${e}`));
         },
       });
     }
@@ -249,6 +274,7 @@ export function Palette() {
       onClick={() => setPaletteOpen(false)}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
@@ -258,7 +284,6 @@ export function Palette() {
       >
         <div className="flex items-center gap-2 px-4" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
           <input
-            ref={inputRef}
             role="combobox"
             aria-expanded="true"
             aria-controls="gm-palette-list"

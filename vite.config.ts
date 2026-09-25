@@ -67,7 +67,7 @@ export default defineConfig({
   envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {
     target: "chrome105",
-    minify: "esbuild",
+    minify: "oxc",
     sourcemap: false,
   },
 });

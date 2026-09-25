@@ -44,12 +44,21 @@ describe("physicalToCss", () => {
 });
 
 describe("quoteForShell", () => {
-  it("quotes with a trailing space for prompt pasting", () => {
-    assert.equal(quoteForShell("C:\\a\\b.txt"), '"C:\\a\\b.txt" ');
+  it("uses literal PowerShell quoting", () => {
+    assert.equal(quoteForShell("C:\\a\\$(Get-Process).txt", "powershell"), "'C:\\a\\$(Get-Process).txt' ");
+    assert.equal(quoteForShell("C:\\a'b.txt", "powershell"), "'C:\\a''b.txt' ");
   });
 
-  it("doubles a trailing backslash so it cannot escape the quote", () => {
-    assert.equal(quoteForShell("C:\\a\\"), '"C:\\a\\\\" ');
+  it("uses literal POSIX and fish quoting", () => {
+    assert.equal(quoteForShell("/tmp/$(touch pwned)", "posix"), "'/tmp/$(touch pwned)' ");
+    assert.equal(quoteForShell("/tmp/a'b", "posix"), "'/tmp/a''b' ");
+    assert.equal(quoteForShell("/tmp/a\\b", "fish"), "'/tmp/a\\\\b' ");
+    assert.equal(quoteForShell("/tmp/a'b", "fish"), "'/tmp/a\\'b' ");
+  });
+
+  it("refuses automatic insertion for shells without safe literal quoting", () => {
+    assert.equal(quoteForShell("C:\\100%\\a.txt", "cmd"), null);
+    assert.equal(quoteForShell("C:\\a.txt", "unknown"), null);
   });
 });
 

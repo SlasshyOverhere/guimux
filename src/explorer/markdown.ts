@@ -22,7 +22,10 @@ function esc(s: string): string {
 
 function sanitizeHref(href: string): string | null {
   const h = href.trim();
-  if (/^(https?:\/\/|mailto:|#|\/|\.\.?\/)/.test(h)) return esc(h);
+  if (!h || /[\u0000-\u001f\u007f\\]/.test(h)) return null;
+  if (/^(https?:\/\/|mailto:|#)/i.test(h)) return esc(h);
+  if (/^\.{1,2}\//.test(h)) return esc(h);
+  if (/^\/(?!\/)/.test(h)) return esc(h);
   return null;
 }
 
@@ -46,7 +49,7 @@ function inline(line: string, spans: string[], chunks: string[]): string {
   });
   // Autolinked bare URLs in angle brackets.
   s = s.replace(/&lt;(https?:\/\/[^&\s]+)&gt;/g, (_, url: string) => {
-    chunks.push(`<a href="${url}" rel="noreferrer">${url}</a>`);
+    chunks.push(`<a href="${url}" rel="noopener noreferrer">${url}</a>`);
     return `${P1}${chunks.length - 1}${P1}`;
   });
   // Images render as alt text only: no remote loads from file content.
@@ -55,7 +58,7 @@ function inline(line: string, spans: string[], chunks: string[]): string {
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m: string, text: string, href: string) => {
     const safe = sanitizeHref(href);
     if (!safe) return emph(text);
-    chunks.push(`<a href="${safe}" rel="noreferrer">${emph(text)}</a>`);
+    chunks.push(`<a href="${safe}" rel="noopener noreferrer">${emph(text)}</a>`);
     return `${P1}${chunks.length - 1}${P1}`;
   });
   s = emph(s);

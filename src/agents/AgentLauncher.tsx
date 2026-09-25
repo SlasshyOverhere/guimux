@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { useStore } from "../store";
 import { errorDialog } from "../dialogs";
+import { useModalFocus } from "../modalFocus";
 
 // Tiles lay out at most 2 across and cap at 12 per worktree (see
 // launchAgents), so width never collapses: allow up to 6 per agent here to
@@ -45,6 +46,7 @@ export function AgentLauncher() {
   const agents = useStore((s) => s.settings.agents);
   const setSettings = useStore((s) => s.setSettings);
   const launchAgents = useStore((s) => s.launchAgents);
+  const dialogRef = useModalFocus<HTMLDivElement>(open);
   // Per-agent pane counts + per-agent flags. Flags prefill from the saved
   // agent defaults and are written back on launch, so they persist.
   const [counts, setCounts] = useState<Record<string, number>>({});
@@ -130,7 +132,12 @@ export function AgentLauncher() {
         ],
       });
     }
-    launchAgents(items);
+    const launched = launchAgents(items);
+    if (launched < total) {
+      void errorDialog(
+        `Only ${launched} of ${total} tiles fit in this worktree. Close a pane and launch again.`,
+      );
+    }
     setCustomName("");
     setCustomCmd("");
     setCustomFlags("");
@@ -144,6 +151,7 @@ export function AgentLauncher() {
       onClick={() => setOpen(false)}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Launch agents"

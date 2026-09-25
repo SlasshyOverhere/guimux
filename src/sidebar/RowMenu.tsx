@@ -22,7 +22,11 @@ export function RowMenu({ x, y, size, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     ref.current?.querySelector("button")?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
   }, []);
 
   const nodes = () => [...(ref.current?.querySelectorAll("button") ?? [])];
