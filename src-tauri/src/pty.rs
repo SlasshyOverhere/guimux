@@ -961,11 +961,16 @@ mod tests {
 
     #[test]
     fn classifies_shells_for_safe_path_pasting() {
-        assert_eq!(shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"), "powershell");
-        assert_eq!(shell_kind_for("cmd.exe"), "cmd");
         assert_eq!(shell_kind_for("/bin/bash"), "posix");
         assert_eq!(shell_kind_for("/usr/bin/fish"), "fish");
         assert_eq!(shell_kind_for("custom-shell"), "unknown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn classifies_windows_shells_for_safe_path_pasting() {
+        assert_eq!(shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"), "powershell");
+        assert_eq!(shell_kind_for("cmd.exe"), "cmd");
     }
 
     #[test]
