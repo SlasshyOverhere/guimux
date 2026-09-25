@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
 use notify::Watcher as _NotifyWatcher;
 use tauri::{command, AppHandle, Emitter};
@@ -20,6 +20,8 @@ const MAX_GREP_DIRS: usize = 20_000; // directories visited per search
 const MAX_GREP_ENTRIES: usize = 200_000; // directory entries examined per search
 const MAX_WATCH_DIRS: usize = 10_000; // directories watched per root
 const MAX_WATCH_ENTRIES: usize = 200_000; // directory entries examined per root
+const WATCH_EVENT_CAP: usize = 1_024;
+const WATCH_COALESCE_CAP: usize = 1_024;
 const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "__pycache__"];
 /// Windows reserved names (also `NUL.txt`): open/read would block the IPC thread.
 const RESERVED: &[&str] = &[
@@ -743,15 +745,15 @@ struct WatchedRoots {
     live: std::collections::HashMap<String, mpsc::Sender<()>>,
 }
 
-static COALESCE_TX: std::sync::LazyLock<Mutex<Option<mpsc::Sender<String>>>> =
+static COALESCE_TX: std::sync::LazyLock<Mutex<Option<mpsc::SyncSender<String>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
-fn coalesce_tx(app: &AppHandle) -> mpsc::Sender<String> {
+fn coalesce_tx(app: &AppHandle) -> mpsc::SyncSender<String> {
     let mut slot = COALESCE_TX.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(tx) = slot.clone() {
         return tx;
     }
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::sync_channel::<String>(WATCH_COALESCE_CAP);
     let app = app.clone();
     // One thread for all roots: trailing-edge 600ms coalescing per root, so
     // a `git checkout` (hundreds of writes) delivers one `fs-changed`.
@@ -835,20 +837,19 @@ fn add_watch_tree(
         if is_link_like(&metadata) || !metadata.is_dir() {
             continue;
         }
-        if !watched.insert(dir.clone()) {
-            continue;
-        }
-        if *budget == 0 {
-            watched.remove(&dir);
-            break;
-        }
-        *budget -= 1;
-        if watcher
-            .watch(&dir, notify::RecursiveMode::NonRecursive)
-            .is_err()
-        {
-            watched.remove(&dir);
-            continue;
+        if watched.insert(dir.clone()) {
+            if *budget == 0 {
+                watched.remove(&dir);
+                break;
+            }
+            *budget -= 1;
+            if watcher
+                .watch(&dir, notify::RecursiveMode::NonRecursive)
+                .is_err()
+            {
+                watched.remove(&dir);
+                continue;
+            }
         }
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         for entry in entries {
@@ -876,13 +877,17 @@ fn spawn_watch_manager(
     watch_root: PathBuf,
     dirs: Vec<PathBuf>,
 ) -> Result<mpsc::Sender<()>, String> {
-    let (event_tx, event_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::sync_channel(WATCH_EVENT_CAP);
     let (stop_tx, stop_rx) = mpsc::channel();
     let fire = root.clone();
     let notify_tx = coalesce_tx(app);
+    let overflow = std::sync::Arc::new(AtomicBool::new(false));
+    let event_overflow = std::sync::Arc::clone(&overflow);
     let mut watcher = notify::RecommendedWatcher::new(
         move |result: Result<notify::Event, notify::Error>| {
-            let _ = event_tx.send(result);
+            if event_tx.try_send(result).is_err() {
+                event_overflow.store(true, Ordering::SeqCst);
+            }
         },
         notify::Config::default(),
     )
@@ -900,6 +905,16 @@ fn spawn_watch_manager(
             match stop_rx.try_recv() {
                 Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if overflow.swap(false, Ordering::SeqCst) {
+                add_watch_tree(
+                    &mut watcher,
+                    &mut watched,
+                    &watch_root,
+                    &watch_root,
+                    &mut budget,
+                );
+                let _ = notify_tx.try_send(fire.clone());
             }
             match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
                 Ok(Ok(event)) => {
@@ -919,7 +934,7 @@ fn spawn_watch_manager(
                             watched.retain(|known| known != &path && !known.starts_with(&path));
                         }
                     }
-                    let _ = notify_tx.send(fire.clone());
+                    let _ = notify_tx.try_send(fire.clone());
                 }
                 Ok(Err(_)) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
