@@ -393,6 +393,17 @@ fn classify_stale(main_root: &Path, path: &Path) -> (bool, String) {
     (inside, canon)
 }
 
+/// Branch of a folder git no longer tracks: best-effort, since `branch
+/// --show-current` cannot run once the `.git` link is gone. A stale folder is
+/// still removed; only the branch may survive for the user to prune by hand.
+fn stale_branch(path: &Path, delete_branch: bool) -> Option<String> {
+    if !delete_branch {
+        return None;
+    }
+    let branch = current_branch(path).unwrap_or_default();
+    (!branch.is_empty()).then_some(branch)
+}
+
 fn delete_branch_guarded(root: &Path, b: &str, force: bool) -> Result<(), String> {
     if b.is_empty() || b.starts_with('-') || b.contains('\0') {
         return Err("invalid branch name".into());
@@ -454,15 +465,6 @@ pub fn worktree_remove(
         run_git(&root, &["worktree", "prune"])?;
         return Ok(());
     }
-    let branch = if delete_branch {
-        let branch = current_branch(&path)?;
-        if branch.is_empty() {
-            return Err("cannot delete a detached worktree branch".into());
-        }
-        Some(branch)
-    } else {
-        None
-    };
     // Git already forgot this id (moved folder, deleted
     // `.git/worktrees/<name>`, external `git worktree remove` without a
     // refresh): fail structured so the UI can show the path, offer prune,
@@ -479,10 +481,8 @@ pub fn worktree_remove(
                     ));
                 }
                 run_git(&root, &["worktree", "prune"])?;
-                if delete_branch {
-                    if let Some(b) = branch.as_deref() {
-                        delete_branch_guarded(&root, b, force)?;
-                    }
+                if let Some(b) = stale_branch(&path, delete_branch) {
+                    delete_branch_guarded(&root, &b, force)?;
                 }
                 return Ok(());
             }
@@ -494,6 +494,17 @@ pub fn worktree_remove(
             "GUIMUX_STALE_OUTSIDE path={canon} repo={repo} worktree is not registered with git and is outside the managed dir; will not delete. Run `git worktree prune` to drop the stale entry or `git worktree repair` to re-register it, then retry"
         ));
     }
+    // Past the registration check the folder is a live worktree, so its branch
+    // is readable and a detached HEAD genuinely has nothing to delete.
+    let branch = if delete_branch {
+        let branch = current_branch(&path)?;
+        if branch.is_empty() {
+            return Err("cannot delete a detached worktree branch".into());
+        }
+        Some(branch)
+    } else {
+        None
+    };
     // --force also discards uncommitted work, so refuse it until the caller
     // confirmed the loss. Ignored build output does not count as dirty.
     if !force {
@@ -910,6 +921,25 @@ mod tests {
         assert!(error.contains("cannot inspect git worktrees"), "unexpected error: {error}");
         assert!(worktree.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_worktree_still_reports_the_structured_error_with_delete_branch() {
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("stale-branch".into())).unwrap();
+        // git forgets the worktree; the folder stays on disk.
+        fs::remove_dir_all(repo.join(".git").join("worktrees")).unwrap();
+
+        // The sidebar always asks for the branch, and a forgotten worktree has
+        // no readable branch: that must not mask the stale-removal prompt.
+        let error = worktree_remove(root.clone(), wt.id.clone(), true, Some(false)).unwrap_err();
+        assert!(error.contains("GUIMUX_STALE_INSIDE"), "unexpected error: {error}");
+        assert!(Path::new(&wt.path).exists());
+
+        worktree_remove(root, wt.id.clone(), true, Some(true)).unwrap();
+        assert!(!Path::new(&wt.path).exists());
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
