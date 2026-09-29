@@ -1,15 +1,55 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter, State};
+
+#[cfg(windows)]
+use std::os::windows::ffi::OsStringExt;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use winapi::shared::minwindef::DWORD;
+#[cfg(windows)]
+use winapi::um::jobapi2::{
+    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
+};
+#[cfg(windows)]
+use winapi::um::sysinfoapi::GetSystemDirectoryW;
+#[cfg(windows)]
+use winapi::um::winbase::CREATE_NO_WINDOW;
+#[cfg(windows)]
+use winapi::um::winnt::{
+    JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+};
+
+#[cfg(not(windows))]
+use crate::pty_inputrc::ensure_guimux_inputrc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtySession {
     pub id: u64,
     pub cwd: String,
+    pub shell_kind: String,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyAttach {
+    pub replay: Vec<u8>,
+    pub shell_kind: String,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PtyOutput {
+    pub epoch: u64,
+    pub bytes: Vec<u8>,
 }
 
 struct PtyEntry {
@@ -26,11 +66,17 @@ struct PtyEntry {
     // RPC into conhost/OpenConsole) blocks only this pane — never another
     // pane's spawn/kill/write (was a global MASTERS lock).
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    #[cfg(windows)]
+    process_id: Option<u32>,
+    #[cfg(windows)]
+    job: Option<OwnedHandle>,
 }
 
 #[derive(Default)]
 pub struct PtyManager {
     next_id: AtomicU64,
+    next_slot: AtomicU64,
+    slots: Arc<Mutex<HashMap<u64, u64>>>,
     sessions: Mutex<HashMap<u64, PtyEntry>>,
 }
 
@@ -43,13 +89,122 @@ impl PtyManager {
             sessions.drain().map(|(_, entry)| entry).collect()
         };
         for mut entry in entries {
-            let _ = entry.killer.kill();
+            kill_entry(&mut entry);
             drop(entry.master);
         }
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
+
+    fn reserve_slot(&self, id: u64) -> Result<u64, String> {
+        let token = self
+            .next_slot
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.contains_key(&id) {
+            return Err(format!("pty session {id} already exists"));
+        }
+        if slots.len() >= MAX_SESSIONS {
+            return Err(format!(
+                "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+            ));
+        }
+        slots.insert(id, token);
+        Ok(token)
+    }
+
+    fn release_slot(&self, id: u64, token: u64) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.get(&id) == Some(&token) {
+            slots.remove(&id);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn create_process_job(
+    child: &(dyn portable_pty::Child + Send + Sync),
+) -> Result<OwnedHandle, String> {
+    use std::mem::{size_of, zeroed};
+    use std::ptr::{null, null_mut};
+
+    let raw = unsafe { CreateJobObjectW(null_mut(), null()) };
+    if raw.is_null() {
+        return Err(format!(
+            "CreateJobObjectW: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw as _) };
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle() as _,
+            JobObjectExtendedLimitInformation,
+            &mut limits as *mut _ as *mut _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
+        )
+    };
+    if configured == 0 {
+        return Err(format!(
+            "SetInformationJobObject: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let process = child
+        .as_raw_handle()
+        .ok_or_else(|| "child has no Windows process handle".to_string())?;
+    let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, process as _) };
+    if assigned == 0 {
+        return Err(format!(
+            "AssignProcessToJobObject: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(job)
+}
+
+#[cfg(windows)]
+fn system_taskkill() -> Option<PathBuf> {
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as DWORD) };
+    if length == 0 || length as usize >= buffer.len() {
+        return None;
+    }
+    let directory = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+    Some(PathBuf::from(directory).join("taskkill.exe"))
+}
+
+#[cfg(windows)]
+fn kill_windows_tree(pid: u32) {
+    let Some(taskkill) = system_taskkill() else {
+        return;
+    };
+    let pid = pid.to_string();
+    let _ = std::process::Command::new(taskkill)
+        .args(["/PID", pid.as_str(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+}
+
+fn kill_entry(entry: &mut PtyEntry) {
+    #[cfg(windows)]
+    {
+        let mut terminated = false;
+        if let Some(job) = entry.job.as_ref() {
+            terminated = unsafe { TerminateJobObject(job.as_raw_handle() as _, 1) } != 0;
+        }
+        if !terminated {
+            if let Some(pid) = entry.process_id {
+                kill_windows_tree(pid);
+            }
+        }
+    }
+    let _ = entry.killer.kill();
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -232,17 +387,44 @@ fn windows_shell_chain(cwd: &str) -> Vec<(String, Vec<String>)> {
 /// cwd per live session id, so `pty_restart` can respawn in place.
 static SPAWN_CWDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static SHELL_KINDS: std::sync::LazyLock<Mutex<HashMap<u64, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Output-before-attach fix: per-PTY ring buffer. The pump always appends
-/// (cap 256KB, oldest dropped); live `pty:output-{id}` emits only after the
-/// frontend sends explicit `pty_attach(id)`, which replays the buffer.
+fn shell_kind_for(shell: &str) -> &'static str {
+    let name = Path::new(shell)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "pwsh" | "powershell" => "powershell",
+        "cmd" => "cmd",
+        "fish" => "fish",
+        "bash" | "sh" | "zsh" | "ksh" | "dash" => "posix",
+        _ => "unknown",
+    }
+}
+
+/// Output-before-attach fix: per-PTY state makes the replay/attachment handoff
+/// atomic. Detached output is capped at 256KB; attached output is emitted live.
 const REPLAY_CAP: usize = 256 * 1024;
 /// H-003 caps: at most 64 live shells (24-pane UI + headroom), 1MB per write.
 const MAX_SESSIONS: usize = 64;
 const MAX_PTY_WRITE: usize = 1 << 20;
-static BUFFERS: std::sync::LazyLock<Mutex<HashMap<u64, VecDeque<u8>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static ATTACHED: std::sync::LazyLock<Mutex<HashMap<u64, bool>>> =
+struct OutputState {
+    epoch: u64,
+    attached: bool,
+    replay: VecDeque<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+enum OutputDisposition {
+    Emit,
+    Buffered,
+    Stale,
+}
+
+static OUTPUTS: std::sync::LazyLock<Mutex<HashMap<u64, OutputState>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Exit-watcher epochs: restart/kill bumps the epoch so a stale watcher for
 /// the old child never emits `pty:exit-{id}` at the reused numeric id.
@@ -260,22 +442,23 @@ fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.clamp(1, 1000), rows.clamp(1, 500))
 }
 
-fn push_buffer(id: u64, epoch: u64, bytes: &[u8]) {
-    // Epoch check BEFORE taking BUFFERS (lock order EPOCHS → BUFFERS, same
-    // as bump_epoch_reset_buffer): a pump thread that read bytes just before
-    // a restart/kill can never slip them into the reused id's fresh replay
-    // buffer — the old window showed dead-shell garbage in restarted panes.
-    let epochs = EPOCHS.lock().unwrap_or_else(|e| e.into_inner());
-    if epochs.get(&id).copied() != Some(epoch) {
-        return; // stale pump from a killed/restarted session
+fn queue_output(id: u64, epoch: u64, bytes: &[u8]) -> OutputDisposition {
+    let mut outputs = OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = outputs.get_mut(&id) else {
+        return OutputDisposition::Stale;
+    };
+    if state.epoch != epoch {
+        return OutputDisposition::Stale;
+    }
+    if state.attached {
+        return OutputDisposition::Emit;
     }
     // VecDeque: dropping from the front never memmoves the retained tail
     // (M-003: Vec::drain shifted ~256KB on every 8KB read while detached).
-    let mut map = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
-    let buf = map.entry(id).or_default();
-    buf.extend(bytes.iter().copied());
-    let excess = buf.len().saturating_sub(REPLAY_CAP);
-    buf.drain(..excess);
+    state.replay.extend(bytes.iter().copied());
+    let excess = state.replay.len().saturating_sub(REPLAY_CAP);
+    state.replay.drain(..excess);
+    OutputDisposition::Buffered
 }
 
 /// Spawn-latency caches: bootstrap base64 per cwd, resolved pwsh path once.
@@ -313,13 +496,38 @@ fn next_epoch(id: u64) -> u64 {
     e
 }
 
-/// Spawn/restart path: bump the epoch AND install a fresh replay buffer as
-/// one logical step (EPOCHS → BUFFERS lock order, matching push_buffer) so
-/// no stale pump can write between the bump and the reset.
-fn bump_epoch_reset_buffer(id: u64) -> u64 {
+/// Spawn/restart path: install fresh output state with the new epoch so a
+/// stale pump can neither append to replay nor emit into the new session.
+fn reset_output(id: u64, attached: bool) -> u64 {
     let e = next_epoch(id);
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, VecDeque::new());
+    OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        OutputState {
+            epoch: e,
+            attached,
+            replay: VecDeque::new(),
+        },
+    );
     e
+}
+
+fn attach_output(id: u64) -> Option<(u64, Vec<u8>)> {
+    let mut outputs = OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = outputs.get_mut(&id)?;
+    state.attached = true;
+    let epoch = state.epoch;
+    let replay = std::mem::take(&mut state.replay).into_iter().collect();
+    Some((epoch, replay))
+}
+
+fn detach_output(id: u64) {
+    if let Some(state) = OUTPUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(&id)
+    {
+        state.attached = false;
+    }
 }
 
 /// Watch the SHELL child (not the pty pipe): only a true shell death may
@@ -331,7 +539,14 @@ fn bump_epoch_reset_buffer(id: u64) -> u64 {
 /// The watcher captures its spawn epoch and stays silent unless still
 /// current, so `pty_restart` (same numeric id) never delivers the old
 /// child's exit to the new session.
-fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+fn spawn_exit_watcher(
+    app: AppHandle,
+    id: u64,
+    epoch: u64,
+    slot: u64,
+    slots: Arc<Mutex<HashMap<u64, u64>>>,
+    mut child: Box<dyn portable_pty::Child + Send + Sync>,
+) {
     std::thread::spawn(move || {
         let code: u32 = loop {
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -344,13 +559,23 @@ fn spawn_exit_watcher(app: AppHandle, id: u64, epoch: u64, mut child: Box<dyn po
             }
         };
         if epoch_current(id, epoch) {
+            let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+            if slots.get(&id) == Some(&slot) {
+                slots.remove(&id);
+            }
             EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
         }
     });
 }
 
-fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Read + Send>, t_start: std::time::Instant) {
+fn spawn_output_pump(
+    app: AppHandle,
+    id: u64,
+    epoch: u64,
+    mut reader: Box<dyn Read + Send>,
+    t_start: std::time::Instant,
+) {
     // EOF just ends the stream. This thread never emits exit.
     // Every byte is buffered; live emit starts only after `pty_attach`.
     // The epoch guard stops a pre-restart pump from leaking stale bytes
@@ -362,21 +587,25 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if !epoch_current(id, epoch) {
-                        break;
-                    }
                     if pty_debug() && first {
                         first = false;
-                        eprintln!("[gm-pty] id={id} first-byte {}ms after spawn start", t_start.elapsed().as_millis());
+                        eprintln!(
+                            "[gm-pty] id={id} first-byte {}ms after spawn start",
+                            t_start.elapsed().as_millis()
+                        );
                     }
-                    let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
-                    if attached {
-                        let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
-                    } else {
-                        // Attached panes have no reader for the replay buffer
-                        // (pty_attach drained it), so rebuilding a 256KB copy
-                        // per chunk only burned memory and memcpy.
-                        push_buffer(id, epoch, &buf[..n]);
+                    match queue_output(id, epoch, &buf[..n]) {
+                        OutputDisposition::Emit => {
+                            let _ = app.emit(
+                                &format!("pty:output-{id}"),
+                                PtyOutput {
+                                    epoch,
+                                    bytes: buf[..n].to_vec(),
+                                },
+                            );
+                        }
+                        OutputDisposition::Buffered => {}
+                        OutputDisposition::Stale => break,
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -384,25 +613,6 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
             }
         }
     });
-}
-
-/// Guimux readline config: binds Ctrl+Delete (ESC[3;5~) to kill-word and
-/// Ctrl+Backspace/Ctrl+H (^H, which is what terminals send for it) to
-/// backward-kill-word, without touching the user's `~/.inputrc`. Written once
-/// to the temp dir; missing includes are ignored by readline so a bare
-/// container still gets the bindings.
-#[cfg(not(windows))]
-fn ensure_guimux_inputrc() -> PathBuf {
-    // Versioned name: a stale v1 file from an earlier run must not pin old
-    // bindings (it is written once and then reused).
-    let p = std::env::temp_dir().join("guimux-inputrc-v2");
-    if !p.exists() {
-        let _ = std::fs::write(
-            &p,
-            "$include /etc/inputrc\n$include ~/.inputrc\n\"\\e[3;5~\": kill-word\n\"\\C-h\": backward-kill-word\n\"\\e\\x7f\": backward-kill-word\n",
-        );
-    }
-    p
 }
 
 fn spawn_pair(
@@ -414,15 +624,28 @@ fn spawn_pair(
     rows: u16,
     live: bool,
 ) -> Result<PtySession, String> {
+    let slot = state.reserve_slot(id)?;
+    let result = spawn_pair_inner(app, state, id, cwd, cols, rows, live, slot);
+    if result.is_err() {
+        state.release_slot(id, slot);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_pair_inner(
+    app: &AppHandle,
+    state: &State<PtyManager>,
+    id: u64,
+    cwd: String,
+    cols: u16,
+    rows: u16,
+    live: bool,
+    slot: u64,
+) -> Result<PtySession, String> {
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
     let t_start = std::time::Instant::now();
-    // Cap live shells: each holds a 256KB replay buffer (H-003).
-    if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
-        return Err(format!(
-            "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
-        ));
-    }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
     if pty_debug() {
@@ -454,6 +677,7 @@ fn spawn_pair(
 
     let mut spawn_err = String::new();
     let mut child = None;
+    let mut shell_kind = "unknown";
     for (shell, shell_args) in &attempts {
         let mut cmd = CommandBuilder::new(shell.clone());
         for arg in shell_args {
@@ -468,7 +692,9 @@ fn spawn_pair(
             // Readline shells (bash) pick this up; other shells ignore it.
             // Never overrides an explicit user INPUTRC.
             if std::env::var_os("INPUTRC").is_none() {
-                cmd.env("INPUTRC", ensure_guimux_inputrc());
+                if let Some(path) = ensure_guimux_inputrc() {
+                    cmd.env("INPUTRC", path);
+                }
             }
         }
         match pair.slave.spawn_command(cmd) {
@@ -477,6 +703,7 @@ fn spawn_pair(
                     eprintln!("[gm-pty] id={id} process-started shell={shell} +{}ms", t_start.elapsed().as_millis());
                 }
                 child = Some(c);
+                shell_kind = shell_kind_for(shell);
                 break;
             }
             // Store-alias stub (code 5) or AV block: walk the chain.
@@ -492,6 +719,16 @@ fn spawn_pair(
         None => {
             drop(pair);
             return Err(format!("failed to spawn shell: {spawn_err}"));
+        }
+    };
+    #[cfg(windows)]
+    let process_id = child.process_id();
+    #[cfg(windows)]
+    let job = match create_process_job(child.as_ref()) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            eprintln!("[gm-pty] id={id} process job unavailable: {error}");
+            None
         }
     };
     let (reader, writer) = match (pair.master.try_clone_reader(), pair.master.take_writer()) {
@@ -510,6 +747,10 @@ fn spawn_pair(
                 writer: Arc::new(Mutex::new(writer)),
                 killer: child.clone_killer(),
                 master: Arc::new(Mutex::new(pair.master)),
+                #[cfg(windows)]
+                process_id,
+                #[cfg(windows)]
+                job,
             },
         );
     }
@@ -517,15 +758,30 @@ fn spawn_pair(
         let mut map = SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(id, cwd.clone());
     }
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, live);
-    let epoch = bump_epoch_reset_buffer(id);
+    SHELL_KINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, shell_kind.to_string());
+    let epoch = reset_output(id, live);
 
     // Exit authority = shell process liveness (GetExitCodeProcess), never
     // pipe EOF. The watcher owns the real Child; the stored killer stays
     // behind for pty_kill/pty_restart.
-    spawn_exit_watcher(app.clone(), id, epoch, child);
+    spawn_exit_watcher(
+        app.clone(),
+        id,
+        epoch,
+        slot,
+        Arc::clone(&state.slots),
+        child,
+    );
     spawn_output_pump(app.clone(), id, epoch, reader, t_start);
-    Ok(PtySession { id, cwd })
+    Ok(PtySession {
+        id,
+        cwd,
+        shell_kind: shell_kind.to_string(),
+        epoch,
+    })
 }
 
 #[command]
@@ -546,15 +802,27 @@ pub fn pty_spawn(
 /// ids so the pane can detect a dead session (e.g. killed across a worktree
 /// switch) and spawn fresh instead of sitting blank.
 #[command]
-pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
-    if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
-        return Err("no such pty session".into());
-    }
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, true);
+pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
     // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
     // raw bytes); kept because the frontend consumes number[] — switch both
     // to base64 together if replay size ever matters.
-    Ok(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap_or_default().into_iter().collect())
+    let (epoch, replay) = attach_output(id).ok_or("no such pty session")?;
+    let shell_kind = SHELL_KINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| "unknown".into());
+    Ok(PtyAttach {
+        replay,
+        shell_kind,
+        epoch,
+    })
+}
+
+#[command]
+pub fn pty_detach(id: u64) {
+    detach_output(id);
 }
 
 /// Liveness probe for remounts: false when the session is unknown OR its
@@ -650,10 +918,9 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     let master_to_close = {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.remove(&id).map(|mut entry| {
-            // Killer handle = TerminateProcess on the shell HANDLE. Never
-            // touches the exit-watcher's owned Child, which exits its poll
-            // on its own.
-            let _ = entry.killer.kill();
+            // The job/tree kill includes descendants; the portable-pty killer
+            // remains the fallback for hosts without a Windows job.
+            kill_entry(&mut entry);
             entry.master
         })
     };
@@ -662,10 +929,18 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     // still be cloned-here-then-held by a concurrent resize; dropping our
     // Arc lets the last holder close the PTY.)
     drop(master_to_close);
+    state
+        .slots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    OUTPUTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     // Bump the epoch so the dead child's watcher can never emit exit at this
     // id again (matters for restart, which reuses the id right after).
     next_epoch(id);
@@ -685,10 +960,58 @@ mod tests {
     }
 
     #[test]
+    fn classifies_shells_for_safe_path_pasting() {
+        assert_eq!(shell_kind_for("/bin/bash"), "posix");
+        assert_eq!(shell_kind_for("/usr/bin/fish"), "fish");
+        assert_eq!(shell_kind_for("custom-shell"), "unknown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn classifies_windows_shells_for_safe_path_pasting() {
+        assert_eq!(shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"), "powershell");
+        assert_eq!(shell_kind_for("cmd.exe"), "cmd");
+    }
+
+    #[test]
     fn alias_stub_rejected() {
         assert!(!is_real_exe(std::path::Path::new(
             "C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe"
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_fallback_uses_system_directory() {
+        let path = system_taskkill().expect("system directory");
+        assert!(path.is_absolute());
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("taskkill.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_job_terminates_real_pty_child() {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.arg("/K");
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        let job = create_process_job(child.as_ref()).expect("assign process job");
+        assert!(child.try_wait().expect("poll child").is_none());
+        assert!(unsafe { TerminateJobObject(job.as_raw_handle() as _, 1) } != 0);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(child.try_wait().expect("wait child").is_some());
     }
 
     #[test]
@@ -703,14 +1026,28 @@ mod tests {
     #[test]
     fn replay_buffer_caps_oldest_first() {
         let id = 0xB0FFEBu64;
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
-        push_buffer(id, 1, &[b'a'; 10]);
-        push_buffer(id, 1, &[b'b'; REPLAY_CAP + 100]);
-        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, 0);
+        let epoch = reset_output(id, false);
+        assert_eq!(
+            queue_output(id, epoch, &[b'a'; 10]),
+            OutputDisposition::Buffered
+        );
+        assert_eq!(
+            queue_output(id, epoch, &[b'b'; REPLAY_CAP + 100]),
+            OutputDisposition::Buffered
+        );
+        let (_, buf) = attach_output(id).unwrap();
         assert_eq!(buf.len(), REPLAY_CAP);
         // oldest bytes ('a's) were dropped
         assert!(buf.iter().all(|&b| b == b'b'));
+        assert_eq!(queue_output(id, epoch, b"live"), OutputDisposition::Emit);
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
@@ -718,18 +1055,30 @@ mod tests {
     fn stale_pump_cannot_pollute_replay_buffer() {
         // Regression: a pump thread that read bytes just before a restart
         // could push them into the reused id's fresh replay buffer between
-        // pty_kill's BUFFERS.remove and spawn_pair's insert.
+        // pty_kill's output-state removal and spawn_pair's replacement.
         let id = 0x5EEDu64;
-        BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, 1);
-        // old-epoch pump arrives AFTER the restart bumped the epoch
-        push_buffer(id, 1, b"old-shell-garbage");
-        let e2 = bump_epoch_reset_buffer(id);
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, 0);
+        let e1 = reset_output(id, false);
+        assert_eq!(
+            queue_output(id, e1, b"old-shell-garbage"),
+            OutputDisposition::Buffered
+        );
+        let e2 = reset_output(id, false);
         assert_ne!(e2, 1);
-        push_buffer(id, 1, b"late stale bytes"); // must be dropped
-        push_buffer(id, e2, b"fresh");
-        let buf = BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap();
+        assert_eq!(
+            queue_output(id, e1, b"late stale bytes"),
+            OutputDisposition::Stale
+        );
+        assert_eq!(queue_output(id, e2, b"fresh"), OutputDisposition::Buffered);
+        let (_, buf) = attach_output(id).unwrap();
         assert_eq!(buf, b"fresh".to_vec());
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
@@ -747,6 +1096,48 @@ mod tests {
     #[test]
     fn attach_rejects_unknown_session() {
         assert!(pty_attach(0xDEAD_DEAD).is_err());
+    }
+
+    #[test]
+    fn detach_stops_live_delivery_until_reattach() {
+        let id = 0x00DE_7AC4_u64;
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, 0);
+        let epoch = reset_output(id, true);
+        pty_detach(id);
+        assert_eq!(
+            queue_output(id, epoch, b"buffered"),
+            OutputDisposition::Buffered
+        );
+        OUTPUTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    }
+
+    #[test]
+    fn exited_shells_release_capacity_without_stale_release() {
+        let manager = PtyManager::default();
+        let mut tokens = Vec::new();
+        for id in 0..MAX_SESSIONS as u64 {
+            tokens.push(manager.reserve_slot(id).unwrap());
+        }
+        assert!(manager.reserve_slot(MAX_SESSIONS as u64).is_err());
+
+        manager.release_slot(0, tokens[0]);
+        let replacement = manager.reserve_slot(MAX_SESSIONS as u64).unwrap();
+        manager.release_slot(0, tokens[0]);
+        assert_eq!(
+            manager
+                .slots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(MAX_SESSIONS as u64)),
+            Some(&replacement)
+        );
     }
 
     #[test]
@@ -778,13 +1169,4 @@ mod tests {
         assert!(b.contains("Get-Module PSReadLine"), "binding must be guarded");
     }
 
-    #[test]
-    #[cfg(not(windows))]
-    fn guimux_inputrc_binds_ctrl_delete() {
-        let p = ensure_guimux_inputrc();
-        let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("\\e[3;5~") && text.contains("kill-word"), "missing kill-word: {text}");
-        // xterm sends Ctrl+Backspace as ^H: without this it is one letter.
-        assert!(text.contains("\\C-h") && text.contains("backward-kill-word"), "missing C-h: {text}");
-    }
 }

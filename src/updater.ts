@@ -38,17 +38,26 @@ export const INITIAL_UPDATER_STATE: UpdaterState = {
 
 type Patch = (p: Partial<UpdaterState>) => void;
 
-// Last check result, shared between startup auto-check and Settings UI:
-// opening Settings after an auto-check shows the result without re-checking.
-let lastCheck: { status: UpdaterStatus; info: UpdateInfo | null } | null = null;
+// Last result, shared between startup auto-check and Settings UI: opening
+// Settings after a check or install shows the terminal state without redoing it.
+interface LastCheck {
+  status: UpdaterStatus;
+  info: UpdateInfo | null;
+  error: string | null;
+}
 
-export function getLastCheck(): { status: UpdaterStatus; info: UpdateInfo | null } | null {
+let lastCheck: LastCheck | null = null;
+
+export function getLastCheck(): LastCheck | null {
   return lastCheck;
 }
 
-// Every check completion (success or error) broadcasts here so an open
-// Settings panel live-updates even when the boot auto-check finishes late.
-// lastCheck above keeps only successful results for late mounters.
+function remember(status: UpdaterStatus, info: UpdateInfo | null, error: string | null = null) {
+  lastCheck = { status, info, error };
+}
+
+// Every check completion broadcasts here so an open Settings panel
+// live-updates even when the boot auto-check finishes late.
 export interface CheckCompletion {
   status: "up-to-date" | "available" | "error";
   info: UpdateInfo | null;
@@ -110,10 +119,11 @@ export async function maybeAutoCheck(enabled: boolean): Promise<void> {
 export async function checkForUpdates(set: Patch): Promise<UpdateInfo | null> {
   return flight.run(async () => {
     set({ status: "checking", error: null });
+    remember("checking", null);
     try {
       const update = await check();
       if (!update) {
-        lastCheck = { status: "up-to-date", info: null };
+        remember("up-to-date", null);
         set({ status: "up-to-date", info: null, progress: null });
         broadcast({ status: "up-to-date", info: null, error: null });
         return null;
@@ -125,7 +135,7 @@ export async function checkForUpdates(set: Patch): Promise<UpdateInfo | null> {
           body: update.body ?? null,
           date: update.date ?? null,
         };
-        lastCheck = { status: "available", info };
+        remember("available", info);
         set({ status: "available", info, progress: null });
         broadcast({ status: "available", info, error: null });
         return info;
@@ -134,6 +144,7 @@ export async function checkForUpdates(set: Patch): Promise<UpdateInfo | null> {
       }
     } catch (e) {
       const error = updaterErrorMessage(e);
+      remember("error", null, error);
       set({ status: "error", error, progress: null });
       broadcast({ status: "error", info: null, error });
       return null;
@@ -152,30 +163,37 @@ export async function downloadAndInstallUpdate(set: Patch): Promise<boolean> {
       try {
         const update = await check();
         if (!update) {
-          lastCheck = { status: "up-to-date", info: null };
+          remember("up-to-date", null);
           set({ status: "up-to-date", info: null, progress: null });
           return false;
         }
         try {
+          const info: UpdateInfo = {
+            currentVersion: update.currentVersion,
+            version: update.version,
+            body: update.body ?? null,
+            date: update.date ?? null,
+          };
+          remember("downloading", info);
           set({
-            info: {
-              currentVersion: update.currentVersion,
-              version: update.version,
-              body: update.body ?? null,
-              date: update.date ?? null,
-            },
+            info,
+            status: "downloading",
+            error: null,
           });
           await update.downloadAndInstall((ev) => {
             if (ev.event === "Started") set({ progress: null });
             else if (ev.event === "Finished") set({ progress: 100 });
           });
-          set({ status: "ready", progress: 100 });
+          remember("ready", info);
+          set({ status: "ready", info, progress: 100 });
           return true;
         } finally {
           await update.close();
         }
       } catch (e) {
-        set({ status: "error", error: updaterErrorMessage(e), progress: null });
+        const error = updaterErrorMessage(e);
+        remember("error", null, error);
+        set({ status: "error", error, progress: null });
         return false;
       }
     })) ?? false

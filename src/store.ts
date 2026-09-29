@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { paneEmptiness } from "./terminal/paneEmpty";
 import type { Project, Worktree } from "./types";
 import { DEFAULT_SETTINGS, type Settings } from "./types";
+import { pathStartsRoot } from "./path";
 
 // ---- Pane tree model -------------------------------------------------------
 // Binary split tree. Each leaf = one terminal pane.
@@ -64,16 +65,6 @@ function cleanRestoredNode(node: PaneNode): PaneNode {
     first: cleanRestoredNode(node.first),
     second: cleanRestoredNode(node.second),
   };
-}
-
-// Path prefix must land on a separator: "C:/proj" also prefixes "C:/proj-old",
-// which seeded another project's worktree and spawned a shell in it.
-function underRoot(root: string | null, path: string): boolean {
-  if (!root) return false;
-  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
-  const r = norm(root);
-  const p = norm(path);
-  return p === r || p.startsWith(r + "/");
 }
 
 function readVis(key: string): boolean {
@@ -217,6 +208,7 @@ interface AppState {
   editorPath: string | null;
   editorTabs: string[];
   diffMode: boolean;
+  editorDirtyCount: number;
 
   // palette
   paletteOpen: boolean;
@@ -242,7 +234,7 @@ interface AppState {
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
-  launchAgents: (items: { command: string; count: number }[]) => void;
+  launchAgents: (items: { command: string; count: number }[]) => number;
   dropWorktreeLayout: (id: string) => number[];
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
@@ -256,6 +248,7 @@ interface AppState {
   openEditor: (path: string | null, diff?: boolean) => void;
   closeEditor: (path?: string | null) => void;
   setEditorTabs: (tabs: string[]) => void;
+  setEditorDirtyCount: (count: number) => void;
   setPaletteOpen: (open: boolean) => void;
   setSettings: (patch: Partial<Settings>) => void;
   hydrateSettings: (s: Settings) => void;
@@ -288,6 +281,7 @@ export const useStore = create<AppState>((set, get) => ({
   editorPath: null,
   editorTabs: [],
   diffMode: false,
+  editorDirtyCount: 0,
 
   paletteOpen: false,
 
@@ -308,7 +302,7 @@ export const useStore = create<AppState>((set, get) => ({
       p ? (p.isGit ? (p.gitRoot ?? p.path) : p.path) : null;
     const seedWts = seed?.worktrees.filter((w) => {
       // Seed must belong to the active project or the shell spawns elsewhere.
-      return underRoot(rootOf(proj), w.path);
+      return pathStartsRoot(rootOf(proj), w.path);
     }) ?? [];
     const seedActive = seed?.activeWorktreeId && seedWts.some((w) => w.id === seed.activeWorktreeId)
       ? seed.activeWorktreeId
@@ -338,7 +332,7 @@ export const useStore = create<AppState>((set, get) => ({
         const list = seed.worktreesByProject[p.id];
         if (!list) continue;
         const root = rootOf(p);
-        const kept = list.filter((w) => underRoot(root, w.path));
+        const kept = list.filter((w) => pathStartsRoot(root, w.path));
         if (kept.length > 0) seedCache[p.id] = kept.slice(0, 50);
       }
     }
@@ -472,22 +466,40 @@ export const useStore = create<AppState>((set, get) => ({
       // projects' cached trees share this map and must survive while hidden.
       const live = new Set(wts.map((w) => w.id));
       const old = new Set(s.worktrees.map((w) => w.id));
-      for (const [id, node] of Object.entries(s.layouts)) {
-        if (old.has(id) && !live.has(id) && id !== s.activeWorktreeId) {
+      const currentLayouts =
+        s.activeWorktreeId && s.layout ? { ...s.layouts, [s.activeWorktreeId]: s.layout } : s.layouts;
+      const activeMissing = s.activeWorktreeId != null && !live.has(s.activeWorktreeId);
+      const fallback = activeMissing ? wts.find((w) => w.is_main) ?? wts[0] : undefined;
+      const activeWorktreeId = activeMissing ? fallback?.id ?? null : s.activeWorktreeId;
+      for (const [id, node] of Object.entries(currentLayouts)) {
+        if (old.has(id) && !live.has(id)) {
           for (const p of collectPaneObjs(node)) {
             if (p.ptyId != null) invoke("pty_kill", { id: p.ptyId }).catch(() => {});
           }
         }
       }
       const layouts = Object.fromEntries(
-        Object.entries(s.layouts).filter(([id]) => !old.has(id) || live.has(id) || id === s.activeWorktreeId),
+        Object.entries(currentLayouts).filter(([id]) => !old.has(id) || live.has(id)),
       );
+      const layout = activeWorktreeId
+        ? layouts[activeWorktreeId] ?? { kind: "pane", id: nextId(), ptyId: null }
+        : null;
+      const nextLayouts = activeWorktreeId && layout ? { ...layouts, [activeWorktreeId]: layout } : layouts;
+      const switched = activeWorktreeId !== s.activeWorktreeId;
       return {
         worktrees: wts,
+        activeWorktreeId,
+        layout,
+        layouts: nextLayouts,
+        activePaneId: switched
+          ? layout
+            ? collectPanes(layout)[0] ?? null
+            : null
+          : s.activePaneId,
+        maximizedPaneId: switched ? null : s.maximizedPaneId,
         worktreesByProject: s.activeProjectId
           ? { ...s.worktreesByProject, [s.activeProjectId]: wts }
           : s.worktreesByProject,
-        layouts,
       };
     }),
   setActiveWorktree: (id) => {
@@ -590,11 +602,11 @@ export const useStore = create<AppState>((set, get) => ({
   // and truncate below ~50, so width is sacred and height is spent instead.
   launchAgents: (items) => {
     const { activeWorktreeId, layouts, layout } = get();
-    if (!activeWorktreeId) return;
+    if (!activeWorktreeId) return 0;
     const cur = layouts[activeWorktreeId] ?? layout;
     const existing = cur ? collectPaneObjs(cur) : [];
     const room = Math.max(0, 12 - existing.length);
-    if (room <= 0) return;
+    if (room <= 0) return 0;
     const cmds: string[] = [];
     for (const item of items) {
       const cmd = item.command.trim();
@@ -602,7 +614,7 @@ export const useStore = create<AppState>((set, get) => ({
       const n = Math.min(6, Math.max(1, Math.floor(item.count) || 1));
       for (let i = 0; i < n; i++) cmds.push(cmd);
     }
-    if (cmds.length === 0) return;
+    if (cmds.length === 0) return 0;
     // Empty panes (prompt line only, e.g. fresh `PS D:\x>`) are reused in
     // place, so a launch into an empty terminal never splits. Anything else
     // (typed input, command output, a running agent) forces a split. The
@@ -632,14 +644,14 @@ export const useStore = create<AppState>((set, get) => ({
     const freshCmds = cmds.slice(reuseCount, reuseCount + room);
     if (freshCmds.length === 0) {
       // Everything fit into clean panes: no split at all.
-      if (!patched) return;
+      if (!patched) return 0;
       set({
         layout: patched,
         layouts: { ...layouts, [activeWorktreeId]: patched },
         activePaneId: reusable[0].id,
         maximizedPaneId: null,
       });
-      return;
+      return reuseCount;
     }
     const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
     if (!patched) {
@@ -650,7 +662,7 @@ export const useStore = create<AppState>((set, get) => ({
         activePaneId: panes[0].id,
         maximizedPaneId: null,
       });
-      return;
+      return freshCmds.length;
     }
     // Retile everything into one equal grid. Appending the fresh tiles beside
     // the old tree left lopsided ratios (a reused pane kept 1/4 width while
@@ -661,7 +673,8 @@ export const useStore = create<AppState>((set, get) => ({
       layouts: { ...layouts, [activeWorktreeId]: node },
       activePaneId: reuseCount > 0 ? reusable[0].id : panes[0].id,
       maximizedPaneId: null,
-        });
+      });
+    return reuseCount + freshCmds.length;
   },
   markPaneDirty: (paneId) => {
     // Fires on every keystroke: skip the tree rebuild when already dirty so
@@ -774,6 +787,7 @@ export const useStore = create<AppState>((set, get) => ({
       const active = s.editorPath && kept.includes(s.editorPath) ? s.editorPath : kept[kept.length - 1];
       return { editorPath: active, editorTabs: kept };
     }),
+  setEditorDirtyCount: (count) => set({ editorDirtyCount: Math.max(0, Math.floor(count)) }),
   setPaletteOpen: (open) => set({ paletteOpen: open }),
   setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   hydrateSettings: (s) => set({ settings: { ...DEFAULT_SETTINGS, ...s } }),

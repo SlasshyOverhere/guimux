@@ -40,6 +40,14 @@ export { detectToProject };
 // Drag must ignore anything clickable: on Windows a native drag started on
 // mousedown swallows the follow-up click, which bricked every dropdown row
 // and click-outside overlay in the bar (they are divs, not <button>s).
+function sameProjectPath(a: string, b: string): boolean {
+  const normalize = (p: string) => {
+    const n = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    return navigator.platform.startsWith("Win") ? n.toLowerCase() : n;
+  };
+  return normalize(a) === normalize(b);
+}
+
 const noDrag = (t: HTMLElement) =>
   !!t.closest("button, [role='button'], input, textarea, a, [data-no-drag]");
 
@@ -329,23 +337,40 @@ export default function App() {
         st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject, layouts: saved.layouts, activePaneId: saved.activePaneId });
         // Re-detect refreshes branch/gitRoot and drops deleted folders.
         const settled = await Promise.all(
-          saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
+          saved.projects.map(async (p) => {
+            try {
+              return await detectToProject(p.path);
+            } catch (e) {
+              // Missing folders are stale state; Git/permission failures are
+              // transient and must not silently delete a valid project.
+              return String(e).includes("PROJECT_PATH_MISSING:") ? null : p;
+            }
+          }),
         );
         if (cancelled) return;
         const fresh = settled.filter((p): p is Project => p !== null);
         if (cancelled) return;
+        let cur = useStore.getState();
+        for (const old of saved.projects) {
+          if (!fresh.some((p) => sameProjectPath(p.path, old.path))) cur.removeProject(old.id);
+        }
+        cur = useStore.getState();
         if (fresh.length === 0) {
-          useStore.getState().hydrate([], null);
+          if (cur.projects.length === 0) cur.hydrate([], null);
+          return;
+        }
+        // detectToProject normalizes to git root, so ids may shift; remap by
+        // path and keep the existing id/cache when the project survived.
+        const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
+        const byPath = oldActive ? fresh.find((p) => sameProjectPath(p.path, oldActive.path)) : undefined;
+        const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
+        const oldKept = saved.projects.find((p) => sameProjectPath(p.path, kept.path));
+        if (oldKept) {
+          cur.updateProject(oldKept.id, { ...kept, id: oldKept.id });
+          if (cur.activeProjectId !== oldKept.id) cur.setActiveProject(oldKept.id);
         } else {
-          // detectToProject normalizes to git root, so ids may shift; remap by path.
-          const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
-          const byPath = oldActive ? fresh.find((p) => p.path === oldActive.path) : undefined;
-          const cur = useStore.getState();
-          // Keep the seeded shell if the project survived re-detect: a second
-          // hydrate would wipe layout/worktrees mid-mount and respawn the PTY.
-          const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
-          cur.updateProject(kept.id, { isGit: kept.isGit, gitRoot: kept.gitRoot, branch: kept.branch });
-          if (kept.id !== cur.activeProjectId) cur.setActiveProject(kept.id);
+          cur.addProject(kept);
+          cur.setActiveProject(kept.id);
         }
       } else {
         st.hydrate([], null);

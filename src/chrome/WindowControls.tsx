@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, Copy, X } from "lucide-react";
+import { confirmUnsavedDiscard } from "../explorer/editorBuffer";
+import { confirmDialog } from "../dialogs";
+import { useStore } from "../store";
 
 export function WindowControls() {
   const [maxed, setMaxed] = useState(false);
+  const allowClose = useRef(false);
   useEffect(() => {
     let off: (() => void) | undefined;
     (async () => {
@@ -11,6 +15,29 @@ export function WindowControls() {
         setMaxed(await getCurrentWindow().isMaximized());
         off = await getCurrentWindow().onResized(async () => setMaxed(await getCurrentWindow().isMaximized()));
       } catch { /* vite browser dev: buttons no-op */ }
+    })();
+    return () => off?.();
+  }, []);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    (async () => {
+      try {
+        const win = getCurrentWindow();
+        off = await win.onCloseRequested(async (event) => {
+          if (allowClose.current) return;
+          const count = useStore.getState().editorDirtyCount;
+          if (count === 0) return;
+          event.preventDefault();
+          if (!(await confirmUnsavedDiscard(count, confirmDialog, "close guimux"))) return;
+          allowClose.current = true;
+          try {
+            await win.close();
+          } catch (error) {
+            allowClose.current = false;
+            throw error;
+          }
+        });
+      } catch { /* vite browser dev: window close no-op */ }
     })();
     return () => off?.();
   }, []);

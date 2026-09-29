@@ -23,6 +23,11 @@ dirs = "5"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 notify = "6"
+
+[target.'cfg(windows)'.dependencies]
+sha2 = "0.10.9"
+winapi = { version = "0.3", features = ["jobapi2", "sysinfoapi", "winbase", "winnt"] }
+
 [dependencies.tauri-plugin-mcp-bridge]
 version = "0.13.0"
 optional = true
