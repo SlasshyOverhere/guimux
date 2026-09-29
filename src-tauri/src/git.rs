@@ -407,6 +407,28 @@ pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     Ok(files)
 }
 
+/// `Path::strip_prefix` compares components byte for byte, so a `c:\repo` path
+/// never matches a `C:/repo` root on Windows. Fall back to a case-insensitive
+/// component match there so a differently spelled root is still in scope.
+fn strip_repo_prefix(path: &Path, repo: &Path) -> Option<PathBuf> {
+    if let Ok(rest) = path.strip_prefix(repo) {
+        return Some(rest.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let parts: Vec<_> = path.components().collect();
+        let root: Vec<_> = repo.components().collect();
+        let matches = parts.len() >= root.len()
+            && parts
+                .iter()
+                .zip(&root)
+                .all(|(a, b)| a.as_os_str().eq_ignore_ascii_case(b.as_os_str()));
+        matches.then(|| parts[root.len()..].iter().collect())
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 #[command]
 pub fn git_diff(path: String, base: Option<String>, file: Option<String>) -> Result<String, String> {
     let repo = PathBuf::from(&path);
@@ -430,11 +452,10 @@ pub fn git_diff(path: String, base: Option<String>, file: Option<String>) -> Res
         }
         let requested = PathBuf::from(&file);
         let relative = if requested.is_absolute() {
-            requested
-                .strip_prefix(&repo)
-                .map_err(|_| "diff file is outside the repository".to_string())?
+            strip_repo_prefix(&requested, &repo)
+                .ok_or("diff file is outside the repository")?
         } else {
-            requested.as_path()
+            requested.clone()
         };
         if relative.as_os_str().is_empty()
             || relative == Path::new(".")
@@ -592,6 +613,16 @@ mod tests {
         fs::write(dir.join("b.txt"), "other").unwrap();
         let scoped = git_diff(dir.to_string_lossy().to_string(), None, Some("a.txt".into())).unwrap();
         assert!(!scoped.contains("other"));
+        // An absolute file path, with the root spelled in a different case:
+        // Windows prefix matching must still scope it.
+        let mut recased = dir.to_string_lossy().to_string();
+        if cfg!(windows) {
+            recased = recased.to_lowercase();
+        }
+        let absolute =
+            git_diff(recased, None, Some(dir.join("a.txt").to_string_lossy().to_string())).unwrap();
+        assert!(absolute.contains("+changed"), "absolute scoped diff missing");
+        assert!(!absolute.contains("other"));
         let _ = fs::remove_dir_all(&dir);
     }
 
