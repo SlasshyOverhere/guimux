@@ -785,7 +785,10 @@ fn coalesce_tx(app: &AppHandle) -> mpsc::SyncSender<String> {
     tx
 }
 
-fn collect_watch_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
+/// Bounded walk of the directories to watch. `Ok(None)` means the root is past
+/// the caps, so the caller watches it recursively instead: a big repo losing
+/// live refresh entirely is a worse outcome than a less bounded watch.
+fn collect_watch_dirs(root: &Path) -> Result<Option<Vec<PathBuf>>, String> {
     let mut dirs = Vec::new();
     let mut seen = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
@@ -795,14 +798,14 @@ fn collect_watch_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
             continue;
         }
         if dirs.len() >= MAX_WATCH_DIRS {
-            return Err("watch directory limit exceeded".into());
+            return Ok(None);
         }
         dirs.push(dir.clone());
         let entries = fs::read_dir(&dir)
             .map_err(|e| format!("cannot inspect watch directory {}: {e}", dir.to_string_lossy()))?;
         for entry in entries {
             if entries_seen >= MAX_WATCH_ENTRIES {
-                return Err("watch entry limit exceeded".into());
+                return Ok(None);
             }
             entries_seen += 1;
             let Ok(entry) = entry else { continue };
@@ -817,7 +820,7 @@ fn collect_watch_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    Ok(dirs)
+    Ok(Some(dirs))
 }
 
 fn add_watch_tree(
@@ -871,11 +874,14 @@ fn add_watch_tree(
     }
 }
 
+/// `recursive` is the oversized-root fallback: one watch on the root, with
+/// notify covering the subtrees, so no per-directory bookkeeping is needed.
 fn spawn_watch_manager(
     app: &AppHandle,
     root: String,
     watch_root: PathBuf,
     dirs: Vec<PathBuf>,
+    recursive: bool,
 ) -> Result<mpsc::Sender<()>, String> {
     let (event_tx, event_rx) = mpsc::sync_channel(WATCH_EVENT_CAP);
     let (stop_tx, stop_rx) = mpsc::channel();
@@ -892,11 +898,14 @@ fn spawn_watch_manager(
         notify::Config::default(),
     )
     .map_err(|e| e.to_string())?;
+    let mode = if recursive {
+        notify::RecursiveMode::Recursive
+    } else {
+        notify::RecursiveMode::NonRecursive
+    };
     let mut watched = HashSet::new();
     for dir in dirs {
-        watcher
-            .watch(&dir, notify::RecursiveMode::NonRecursive)
-            .map_err(|e| e.to_string())?;
+        watcher.watch(&dir, mode).map_err(|e| e.to_string())?;
         watched.insert(dir);
     }
     let mut budget = MAX_WATCH_DIRS.saturating_sub(watched.len());
@@ -907,31 +916,43 @@ fn spawn_watch_manager(
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             if overflow.swap(false, Ordering::SeqCst) {
-                add_watch_tree(
-                    &mut watcher,
-                    &mut watched,
-                    &watch_root,
-                    &watch_root,
-                    &mut budget,
-                );
+                if !recursive {
+                    add_watch_tree(
+                        &mut watcher,
+                        &mut watched,
+                        &watch_root,
+                        &watch_root,
+                        &mut budget,
+                    );
+                }
                 let _ = notify_tx.try_send(fire.clone());
             }
             match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
                 Ok(Ok(event)) => {
-                    for path in event.paths {
-                        if !path.starts_with(&watch_root) {
-                            continue;
-                        }
-                        if path.is_dir() {
-                            add_watch_tree(
-                                &mut watcher,
-                                &mut watched,
-                                &watch_root,
-                                &path,
-                                &mut budget,
-                            );
-                        } else {
-                            watched.retain(|known| known != &path && !known.starts_with(&path));
+                    if !recursive {
+                        for path in event.paths {
+                            if !path.starts_with(&watch_root) {
+                                continue;
+                            }
+                            if path.is_dir() {
+                                add_watch_tree(
+                                    &mut watcher,
+                                    &mut watched,
+                                    &watch_root,
+                                    &path,
+                                    &mut budget,
+                                );
+                            } else {
+                                let gone: Vec<PathBuf> = watched
+                                    .iter()
+                                    .filter(|known| *known == &path || known.starts_with(&path))
+                                    .cloned()
+                                    .collect();
+                                for known in &gone {
+                                    let _ = watcher.unwatch(known);
+                                    watched.remove(known);
+                                }
+                            }
                         }
                     }
                     let _ = notify_tx.try_send(fire.clone());
@@ -952,7 +973,18 @@ pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
     if !p.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
-    let dirs = collect_watch_dirs(&p)?;
+    // Past the walk caps the root is still watched, just recursively: dropping
+    // the watch would silently freeze the explorer on a large repo.
+    let (dirs, recursive) = match collect_watch_dirs(&p)? {
+        Some(dirs) => (dirs, false),
+        None => {
+            eprintln!(
+                "[gm-fs] {} exceeds the bounded watch walk; watching it recursively",
+                p.to_string_lossy()
+            );
+            (vec![p.clone()], true)
+        }
+    };
     // Slash-normalized like every other path id, so the frontend's `==`
     // against worktree roots holds on Windows.
     let root = p.to_string_lossy().replace('\\', "/");
@@ -962,7 +994,7 @@ pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
             return Ok(());
         }
     }
-    let stop = spawn_watch_manager(&app, root.clone(), p, dirs)?;
+    let stop = spawn_watch_manager(&app, root.clone(), p, dirs, recursive)?;
     let mut map = WATCHERS.lock().unwrap_or_else(|e| e.into_inner());
     if map.live.len() >= 16 {
         if let Some(old) = map.order.first().cloned() {
@@ -1165,7 +1197,11 @@ mod tests {
         let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
         let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
         assert!(linked.children.is_none());
-        assert!(!collect_watch_dirs(&root).unwrap().iter().any(|dir| dir == &link));
+        assert!(!collect_watch_dirs(&root)
+            .unwrap()
+            .unwrap_or_default()
+            .iter()
+            .any(|dir| dir == &link));
 
         let _ = fs::remove_file(&link);
         let _ = fs::remove_dir_all(&dir);
@@ -1199,7 +1235,11 @@ mod tests {
         let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
         let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
         assert!(linked.children.is_none());
-        assert!(!collect_watch_dirs(&root).unwrap().iter().any(|dir| dir == &link));
+        assert!(!collect_watch_dirs(&root)
+            .unwrap()
+            .unwrap_or_default()
+            .iter()
+            .any(|dir| dir == &link));
 
         assert!(fs::remove_dir(&link).is_ok());
         let _ = fs::remove_dir_all(&dir);

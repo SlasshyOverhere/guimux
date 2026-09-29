@@ -269,7 +269,9 @@ export function ExplorerPane({ root }: { root: string }) {
     let cancelled = false;
     let timer: number | null = null;
     let unlisten: (() => void) | null = null;
-    invoke("fs_watch", { path: root }).catch(() => {});
+    // Live refresh stops silently if the watch cannot be armed, so say so
+    // instead of leaving the tree looking merely stale.
+    invoke("fs_watch", { path: root }).catch((e) => console.warn(`[gm-fs] watch failed for ${root}:`, e));
     listen<{ root: string }>("fs-changed", (ev) => {
       if (cancelled || normalizePath(ev.payload.root) !== normalizePath(root)) return;
       if (timer != null) clearTimeout(timer);
