@@ -404,14 +404,21 @@ fn stale_branch(path: &Path, delete_branch: bool) -> Option<String> {
     (!branch.is_empty()).then_some(branch)
 }
 
-fn delete_branch_guarded(root: &Path, b: &str, force: bool) -> Result<(), String> {
+/// Branch cleanup only ever runs once the worktree folder is already gone, so
+/// a failure here is not a failed removal: log it and let the caller's refresh
+/// show the surviving branch. Reporting it as an error skipped the sidebar's
+/// shell reap and list refresh.
+fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
     if b.is_empty() || b.starts_with('-') || b.contains('\0') {
-        return Err("invalid branch name".into());
+        eprintln!("[gm-worktree] refusing to delete branch {b:?}");
+        return;
     }
     // -d refuses an unmerged branch; -D only once the caller accepted the
     // loss of uncommitted work.
     let flag = if force { "-D" } else { "-d" };
-    run_git(root, &["branch", flag, "--", b]).map(|_| ())
+    if let Err(e) = run_git(root, &["branch", flag, "--", b]) {
+        eprintln!("[gm-worktree] branch {b} survived the worktree removal: {e}");
+    }
 }
 
 fn sanitize(name: &str) -> String {
@@ -482,7 +489,7 @@ pub fn worktree_remove(
                 }
                 run_git(&root, &["worktree", "prune"])?;
                 if let Some(b) = stale_branch(&path, delete_branch) {
-                    delete_branch_guarded(&root, &b, force)?;
+                    delete_branch_guarded(&root, &b, force);
                 }
                 return Ok(());
             }
@@ -575,7 +582,7 @@ pub fn worktree_remove(
         }
         run_git(&root, &["worktree", "prune"])?;
         if let Some(b) = branch.as_deref() {
-            delete_branch_guarded(&root, b, force)?;
+            delete_branch_guarded(&root, b, force);
         }
         return Ok(());
     }
@@ -587,8 +594,7 @@ pub fn worktree_remove(
         return Err(format!("{} (path={canon})", last_err));
     }
     if let Some(b) = branch.as_deref() {
-        delete_branch_guarded(&root, b, force)?;
-        return Ok(());
+        delete_branch_guarded(&root, b, force);
     }
     Ok(())
 }
