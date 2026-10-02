@@ -53,10 +53,9 @@ pub struct PtyOutput {
 }
 
 struct PtyEntry {
-    // Arc: pty_write clones it under the map lock, then does blocking pipe
-    // I/O with the map lock released — one back-pressured PTY no longer
-    // freezes all spawn/kill/resize (H-003).
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    // OrderedWriter keeps input in the order the frontend issued it while the
+    // blocking pipe write stays off the IPC thread (see its own docs).
+    writer: OrderedWriter,
     // Split ownership: the exit watcher owns the real Child (try_wait /
     // wait need &mut), while pty_kill drives this independent killer
     // handle (TerminateProcess on a process HANDLE — no &mut Child needed).
@@ -70,6 +69,46 @@ struct PtyEntry {
     process_id: Option<u32>,
     #[cfg(windows)]
     job: Option<OwnedHandle>,
+}
+
+/// Queue depth for the writer thread. Bounded so a shell that stops reading
+/// cannot grow the queue without limit; past it, `pty_write` applies real
+/// back-pressure instead of buffering a paste forever.
+const WRITE_QUEUE_DEPTH: usize = 64;
+
+/// Serializes writes to one PTY in the order they were queued.
+///
+/// `pty_write` has to stay a SYNC command: Tauri runs sync commands inline on
+/// the single IPC thread in message order, so enqueueing there is FIFO. As an
+/// async command each write became its own task and they contended for one
+/// mutex in scheduler order — measured at 500/500 trials reordered on Windows,
+/// where that mutex is a non-FIFO SRWLOCK. Reordered keystrokes in a terminal
+/// are a correctness bug, so the blocking pipe write moved here instead of onto
+/// the IPC thread.
+#[derive(Clone)]
+pub struct OrderedWriter {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+}
+
+impl OrderedWriter {
+    fn new(mut sink: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE_DEPTH);
+        std::thread::spawn(move || {
+            while let Ok(chunk) = rx.recv() {
+                if sink.write_all(&chunk).is_err() {
+                    break;
+                }
+                let _ = sink.flush();
+            }
+        });
+        Self { tx }
+    }
+
+    fn send(&self, bytes: Vec<u8>) -> Result<(), String> {
+        self.tx
+            .send(bytes)
+            .map_err(|_| "pty session is gone".to_string())
+    }
 }
 
 #[derive(Default)]
@@ -756,7 +795,7 @@ fn spawn_pair_inner(
         sessions.insert(
             id,
             PtyEntry {
-                writer: Arc::new(Mutex::new(writer)),
+                writer: OrderedWriter::new(writer),
                 killer: child.clone_killer(),
                 master: Arc::new(Mutex::new(pair.master)),
                 #[cfg(windows)]
@@ -868,24 +907,25 @@ pub fn pty_restart(
     spawn_pair(&app, &state, id, cwd, cols, rows, true)
 }
 
+// Sync on purpose: the enqueue has to happen on the single IPC thread so
+// queued bytes keep their order (see OrderedWriter). The body never touches
+// the pipe, so a shell that stops reading cannot freeze the window — it can
+// only fill the bounded queue and apply back-pressure.
 #[command]
 pub fn pty_write(state: State<PtyManager>, id: u64, data: String) -> Result<(), String> {
     if data.len() > MAX_PTY_WRITE {
         return Err(format!("pty write too large ({} bytes > 1MB)", data.len()));
     }
     // Clone the per-session writer under the map lock, then release it
-    // before blocking pipe I/O (H-003).
+    // before the (bounded) queue wait (H-003).
     let writer = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.get(&id).map(|e| e.writer.clone()).ok_or("no such pty session")?
     };
-    let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
     // Passthrough: xterm sends \r for Enter and ConPTY
     // wants it as-is. The old \r -> \r\r\n chain double-submitted every
     // Enter, which PSReadLine read as line-continuation (the stray `>>`).
-    //write_all via MutexGuard deref
-    w.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    w.flush().map_err(|e| e.to_string())
+    writer.send(data.into_bytes())
 }
 
 #[command(async)]
@@ -1035,6 +1075,56 @@ mod tests {
         assert!(unsafe { TerminateJobObject(job.as_raw_handle() as _, 1) } != 0);
         std::thread::sleep(std::time::Duration::from_millis(120));
         assert!(child.try_wait().expect("wait child").is_some());
+    }
+
+    struct Recorder {
+        seen: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn queued_writes_drain_in_the_order_they_were_queued() {
+        // The regression this guards: as an async command each write raced the
+        // others for one mutex and arrived scrambled (500/500 trials measured).
+        // Chunks are multi-byte and self-identifying so any reordering or
+        // splitting is visible, and the run deliberately exceeds the queue
+        // depth so the back-pressure wait is covered too.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let writer = OrderedWriter::new(Box::new(Recorder {
+            seen: seen.clone(),
+        }));
+        let chunks: Vec<Vec<u8>> = (0..(WRITE_QUEUE_DEPTH as u16 * 4))
+            .map(|i| format!("[{i:04}]").into_bytes())
+            .collect();
+        let want: Vec<u8> = chunks.concat();
+        for chunk in &chunks {
+            writer.send(chunk.clone()).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while seen.lock().unwrap_or_else(|e| e.into_inner()).len() < want.len()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let got = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "writer thread did not drain the queue"
+        );
+        assert_eq!(
+            got, want,
+            "queued writes reached the sink out of order"
+        );
     }
 
     #[test]
