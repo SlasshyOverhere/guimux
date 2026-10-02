@@ -13,6 +13,7 @@ Guimux: lean Tauri 2 + React worktree/terminal workbench. Worktree = git dir (pa
 - `cd src-tauri && cargo test` — Rust tests (`worktree_lifecycle`, `worktree_remove_guards_uncommitted_work`, `status_and_diff`, `encoded_command_matches_powershell`, `alias_stub_rejected`, plus pty replay/epoch and fs cap tests). Single test: `cd src-tauri && cargo test <name>`.
 - `.github/workflows/ci.yml` runs typecheck + `npm test` + `npm run build`, and `cargo test` on windows-latest and ubuntu-22.04, on every push to main and every PR. `release.yml` only handles tagged builds.
 - `npm run tauri build` — production bundle (icons + `assets/conpty/*` resources).
+- `node scripts/daily-release.mjs plan|bump|notes` — release versioning used by the scheduled workflow (patch bump, conventional-commit release notes). Pure helpers are covered by `scripts/dailyRelease.test.mjs`.
 
 ## Architecture
 
@@ -34,6 +35,7 @@ Guimux: lean Tauri 2 + React worktree/terminal workbench. Worktree = git dir (pa
 - Debug flags: `GUIMUX_PTY_DEBUG=1` (backend spawn timestamps on stderr); `localStorage guimux-stress=1` + reload runs the dev-only split/write/close stress loop (console `[gm-stress]`; `__gmStressStop()` stops it).
 - A save made in the app's editor is announced to the dev server (`announceWrite` + the `guimux-ignore-app-writes` plugin in `vite.config.ts`), so it does not hot-reload the app that made it. An edit from another editor still does.
 - App zoom via CSS `zoom` on `<html>` (0.5-2); terminals refit via ResizeObserver. Ctrl+D splits h (outside inputs/terminal), Ctrl+K palette skipped when terminal focused (kill-line).
+- Releases: `.github/workflows/daily-release.yml` runs at 03:17 UTC daily. It treats release tags as the released-state record — commits already covered by a tag produce **no** release and no version bump. Only genuinely new commits on `main`, with the `frontend`, `rust (ubuntu-22.04)` and `rust (windows-latest)` CI gates green, get released: patch bump, tag, then `gh workflow run release.yml --ref <tag>`. GITHUB_TOKEN pushes emit no workflow events, so that explicit dispatch is what starts the build. `release.yml` takes an optional `release_notes` input; manual tag pushes still get auto-generated notes.
 - `cargo build --release` alone produces a BROKEN binary: tauri-build embeds devUrl `http://localhost:8471` instead of the built assets, so the window is blank and no shells spawn. Build with `npx tauri build --no-bundle`. Before trusting any measurement, confirm the app works: launch it, then `Get-CimInstance Win32_Process -Filter "ParentProcessId=<pid>"` must list `OpenConsole.exe` and `powershell.exe` as children; zero children means a blank webview.
 
 ## Custom Instructions

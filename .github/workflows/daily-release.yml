@@ -1,0 +1,165 @@
+name: daily-release
+
+# Once a day, look at main. If (and only if) it has commits that no release
+# has covered yet, and all three CI gates are green for it, bump the patch
+# version, tag, and hand off to the release workflow.
+# Already-released commits => nothing happens, silently.
+
+on:
+  schedule:
+    # 03:17 UTC daily: off the hour, so it misses the cron rush at :00.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.plan.outputs.should-release }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      last-tag: ${{ steps.plan.outputs.last-tag }}
+      base-sha: ${{ steps.plan.outputs.base-sha }}
+      gate: ${{ steps.gate.outputs.value }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          # Tags are the released-state record, so the whole history is needed.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - id: plan
+        run: |
+          node scripts/daily-release.mjs plan --base-ref origin/main --out plan.json
+          node --input-type=module -e "
+            import { readFileSync, appendFileSync } from 'node:fs';
+            const p = JSON.parse(readFileSync('plan.json', 'utf8'));
+            const out = \`should-release=\${p.shouldRelease}
+          version=\${p.nextVersion}
+          tag=\${p.tag}
+          last-tag=\${p.lastTag ?? ''}
+          base-sha=\${p.baseSha}\`;
+            appendFileSync(process.env.GITHUB_OUTPUT, out + '\n');
+            appendFileSync(
+              process.env.GITHUB_STEP_SUMMARY,
+              'New commits on main since ' + (p.lastTag ?? 'no tag') + ':\n\n' +
+                p.commits.map((c) => '- ' + c.subject).join('\n') + '\n',
+            );
+          "
+
+      - name: Gate on CI
+        id: gate
+        if: steps.plan.outputs.should-release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ steps.plan.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          required=(frontend "rust (ubuntu-22.04)" "rust (windows-latest)")
+          run_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&per_page=30" \
+              --jq "[.workflow_runs[] | select(.head_sha == \"$BASE_SHA\")] | first | .id // empty"
+          )"
+          if [ -z "$run_id" ]; then
+            echo "No ci run for $BASE_SHA yet; will retry on the next schedule." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.status + ":" + (.conclusion // "")')"
+          echo "ci run $run_id is $status" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != "completed:success" ]; then
+            echo "CI has not passed for this commit; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs")"
+          missing=0
+          for job in "${required[@]}"; do
+            conclusion="$(
+              printf '%s' "$jobs_json" \
+                | jq -r --arg name "$job" '.jobs[] | select(.name == $name) | .conclusion' \
+                | head -1
+            )"
+            if [ "$conclusion" != "success" ]; then
+              echo "::warning::required CI job '$job' is '${conclusion:-missing}'"
+              missing=1
+            fi
+          done
+          # macOS is built by release.yml itself, so it is reported here but
+          # does not gate the daily release.
+          macos="$(
+            printf '%s' "$jobs_json" \
+              | jq -r '.jobs[] | select(.name == "rust (macos-latest)") | .conclusion' \
+              | head -1
+          )"
+          echo "macOS CI: ${macos:-not configured}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$missing" -ne 0 ]; then
+            echo "A required gate is not green; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "value=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.should-release == 'true' && needs.plan.outputs.gate == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: true
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Bump version and build release notes
+        id: prepare
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          LAST_TAG: ${{ needs.plan.outputs.last-tag }}
+        run: |
+          node scripts/daily-release.mjs bump "$VERSION"
+          node scripts/daily-release.mjs notes "$LAST_TAG" HEAD --out notes.md --version "$VERSION"
+          cat notes.md
+
+      - name: Commit, tag and hand off
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          git commit -m "chore(release): $TAG"
+          # Another push may have landed while CI was running; rebase and retry once.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin main && break
+            [ "$attempt" -lt 3 ] || { echo "could not fast-forward main"; exit 1; }
+            sleep 5
+          done
+          git tag -a "$TAG" -m "guimux $TAG"
+          git push origin main
+          git push origin "$TAG"
+          # GITHUB_TOKEN pushes do not emit workflow events, so trigger the
+          # release build explicitly against the tag.
+          gh workflow run release.yml --ref "$TAG" -f release_notes="$(cat notes.md)"
+          echo "Dispatched release.yml for $TAG"
