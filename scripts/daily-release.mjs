@@ -172,7 +172,8 @@ export function bump(version) {
       );
     } else if (file === "src-tauri/Cargo.lock") {
       next = text.replace(
-        /(name = "guimux"\nversion = ")[^"]+(")/,
+        // \r? because a Windows checkout of Cargo.lock keeps CRLF endings.
+        /(name = "guimux"\r?\nversion = ")[^"]+(")/,
         `$1${version}$2`,
       );
     } else if (file === "src-tauri/Cargo.toml") {
