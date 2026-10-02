@@ -734,6 +734,10 @@ export const useStore = create<AppState>((set, get) => ({
   setPaneCwd: (paneId, cwd) =>
     set((s) => {
       if (!s.layout) return {};
+      // The shell reports its cwd on every prompt (OSC 7); without this guard
+      // each prompt rebuilt the pane tree and re-ran App's persist effect.
+      const existing = collectPaneObjs(s.layout).find((p) => p.id === paneId);
+      if (!existing || existing.cwd === cwd) return {};
       const patch = (node: PaneNode): PaneNode => {
         if (node.kind === "pane") {
           return node.id === paneId ? { ...node, cwd } : node;

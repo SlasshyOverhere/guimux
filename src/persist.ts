@@ -185,23 +185,28 @@ export async function loadPersisted(): Promise<PersistedState | null> {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let pending: PersistedState | null = null;
 
+function flushPersisted() {
+  timer = null;
+  const next = pending;
+  pending = null;
+  if (!next) return;
+  // Both mirrors are debounced: the sync localStorage write ran sanitize +
+  // JSON.stringify + a blocking disk write on every store change.
+  writeLocal(next);
+  const store = tauriStore;
+  if (!store) return;
+  void store
+    .set(KEY, next)
+    .then(() => store.save())
+    .catch(() => {
+      /* Tauri store unavailable (browser dev) — localStorage already written */
+    });
+}
+
 export function savePersisted(s: PersistedState) {
   const clean = sanitize(s);
   if (!clean) return;
   pending = clean;
-  // Always keep the localStorage mirror fresh (instant, sync).
-  writeLocal(clean);
   if (timer) return;
-  timer = setTimeout(async () => {
-    timer = null;
-    const next = pending;
-    pending = null;
-    if (!next || !tauriStore) return;
-    try {
-      await tauriStore.set(KEY, next);
-      await tauriStore.save();
-    } catch {
-      /* Tauri store unavailable (browser dev) — localStorage already written */
-    }
-  }, 150);
+  timer = setTimeout(flushPersisted, 150);
 }
