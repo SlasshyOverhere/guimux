@@ -59,13 +59,20 @@ fn is_link_like(metadata: &fs::Metadata) -> bool {
     false
 }
 
-/// Is this path component the first entry of an absolute path (`/var`,
-/// `C:\Users`)? Those indirections belong to the operating system, not to a
-/// project tree.
-fn is_top_level_component(path: &Path) -> bool {
-    match path.parent() {
-        Some(parent) => parent.parent().is_none(),
-        None => false,
+/// Is this path component an OS-owned root link? macOS ships
+/// `/tmp -> private/tmp`, `/var -> private/var` and `/etc -> private/etc`, and
+/// refusing them made every path under the temp dir unusable there. Nothing
+/// else is exempt: an allowlist, not "whatever sits at the root", so a planted
+/// `C:\link` junction is still refused the way it was before.
+fn is_os_root_link(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(path.to_str(), Some("/tmp" | "/var" | "/etc"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -73,11 +80,9 @@ fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
     let mut current = path;
     loop {
         if let Ok(metadata) = fs::symlink_metadata(current) {
-            // A symlinked top-level directory is OS infrastructure: macOS ships
-            // `/tmp -> private/tmp` and `/var -> private/var`, so rejecting them
-            // made every path under the temp dir unreadable on macOS. Links
-            // *inside* a tree are still refused — that is the redirection case.
-            if is_link_like(&metadata) && !is_top_level_component(current) {
+            // Only the OS's own root indirections are traversed. Links anywhere
+            // else are refused — that is the redirection case.
+            if is_link_like(&metadata) && !is_os_root_link(current) {
                 return Err(format!("invalid {what}: symlink or junction paths are not allowed"));
             }
         }
@@ -1046,18 +1051,24 @@ mod tests {
     }
 
     #[test]
-    fn top_level_link_components_are_allowed() {
-        // macOS: /tmp -> /private/tmp and /var -> /private/var are symlinks the
-        // OS owns. Refusing them broke every path under the temp dir there.
-        assert!(is_top_level_component(Path::new("/var")));
-        assert!(is_top_level_component(Path::new("/tmp")));
-        assert!(!is_top_level_component(Path::new("/var/folders")));
-        assert!(!is_top_level_component(Path::new("/Users/me/proj/link")));
+    fn only_os_root_links_are_allowed() {
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_os_root_link(Path::new("/var")));
+            assert!(is_os_root_link(Path::new("/tmp")));
+            assert!(is_os_root_link(Path::new("/etc")));
+            // Not on the list, so it is refused like any other root link.
+            assert!(!is_os_root_link(Path::new("/srv")));
+        }
         #[cfg(windows)]
         {
-            assert!(is_top_level_component(Path::new(r"C:\Users")));
-            assert!(!is_top_level_component(Path::new(r"C:\Users\me\link")));
+            // Windows gets no exemption at all: a root-level junction is a
+            // redirection an attacker can plant, not OS infrastructure.
+            assert!(!is_os_root_link(Path::new(r"C:\Users")));
+            assert!(!is_os_root_link(Path::new(r"C:\link")));
         }
+        assert!(!is_os_root_link(Path::new("/var/folders")));
+        assert!(!is_os_root_link(Path::new("/Users/me/proj/link")));
         // The temp dir the tests actually use must survive the guard.
         let dir = std::env::temp_dir().join(format!("guimux-toplevel-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
