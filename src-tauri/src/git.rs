@@ -813,6 +813,56 @@ mod tests {
     }
 
     #[test]
+    fn a_non_zero_exit_surfaces_gits_own_message() {
+        let notrepo = std::env::temp_dir().join(format!("guimux-notrepo-msg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&notrepo);
+        fs::create_dir_all(&notrepo).unwrap();
+
+        let error = git(&notrepo, &["branch", "-a"]).unwrap_err();
+        assert!(
+            error.starts_with("git branch -a failed: "),
+            "unexpected shape: {error}"
+        );
+        assert!(
+            error.contains("not a git repository"),
+            "git's stderr was dropped: {error}"
+        );
+
+        // The commands the sidebar calls must keep the same shape rather than
+        // inventing their own wording.
+        for (expected, error) in [
+            (
+                "git push failed: ",
+                git_push(notrepo.to_string_lossy().to_string()).unwrap_err(),
+            ),
+            (
+                "git fetch --prune failed: ",
+                git_fetch(notrepo.to_string_lossy().to_string()).unwrap_err(),
+            ),
+        ] {
+            assert!(error.starts_with(expected), "unexpected shape: {error}");
+            assert!(
+                error.contains("not a git repository"),
+                "git's stderr was dropped: {error}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&notrepo);
+    }
+
+    #[test]
+    fn our_own_validation_messages_still_win_over_git() {
+        let notrepo = std::env::temp_dir().join(format!("guimux-validate-msg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&notrepo);
+        fs::create_dir_all(&notrepo).unwrap();
+        let error = git_commit(notrepo.to_string_lossy().to_string(), "   ".into(), None).unwrap_err();
+        assert_eq!(error, "commit message is empty");
+        let _ = fs::remove_dir_all(&notrepo);
+    }
+
+    /// A repo whose remote is up but silent must be killed, not waited on
+    /// forever: raw `git push` at such a peer never returns (measured 75s+).
+    #[test]
     fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
         use std::net::TcpListener;
         use std::time::Instant;
