@@ -76,6 +76,26 @@ function barDoubleClick(e: React.MouseEvent) {
   }).catch(() => {});
 }
 
+const BOOT_TIMEOUT_MS = 8000;
+const LIST_TIMEOUT_MS = 15000;
+
+// Boot must never hang on a store read or git call that never settles.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 function Topbar() {
   const worktrees = useStore((s) => s.worktrees);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
@@ -311,44 +331,52 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const saved = await loadPersisted();
-      if (cancelled) return;
-      const st = useStore.getState();
-      if (saved?.settings) st.hydrateSettings(saved.settings);
-      // After hydration: read before this point, the check always saw
-      // DEFAULT_SETTINGS, so turning the auto-check off never took effect at
-      // startup. Fire-and-forget: never blocks boot or terminals.
-      void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
-      if (saved && saved.projects.length > 0) {
-        // Paint instantly from disk, revalidate in background. The old flow
-        // awaited N git rev-parses before the first hydrate, so boot sat on
-        // "Starting terminal…" for 10-30s on cold Windows spawns. Now the
-        // seeded shell mounts at once; re-detect + loader correct it after.
-        const seedWts = saved.worktrees ?? [];
-        const seedActive = saved.activeWorktreeId ?? null;
-        st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject, layouts: saved.layouts, activePaneId: saved.activePaneId });
-        // Re-detect refreshes branch/gitRoot and drops deleted folders.
-        const settled = await Promise.all(
-          saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
-        );
+      try {
+        const saved = await withTimeout(loadPersisted(), BOOT_TIMEOUT_MS, "load persisted state");
         if (cancelled) return;
-        const fresh = settled.filter((p): p is Project => p !== null);
-        if (cancelled) return;
-        if (fresh.length === 0) {
-          useStore.getState().hydrate([], null);
+        const st = useStore.getState();
+        if (saved?.settings) st.hydrateSettings(saved.settings);
+        // After hydration: read before this point, the check always saw
+        // DEFAULT_SETTINGS, so turning the auto-check off never took effect at
+        // startup. Fire-and-forget: never blocks boot or terminals.
+        void maybeAutoCheck(useStore.getState().settings.autoCheckForUpdates);
+        if (saved && saved.projects.length > 0) {
+          // Paint instantly from disk, revalidate in background. The old flow
+          // awaited N git rev-parses before the first hydrate, so boot sat on
+          // "Starting terminal…" for 10-30s on cold Windows spawns. Now the
+          // seeded shell mounts at once; re-detect + loader correct it after.
+          const seedWts = saved.worktrees ?? [];
+          const seedActive = saved.activeWorktreeId ?? null;
+          st.hydrate(saved.projects, saved.activeProjectId, { worktrees: seedWts, activeWorktreeId: seedActive, worktreesByProject: saved.worktreesByProject, layouts: saved.layouts, activePaneId: saved.activePaneId });
+          // Re-detect refreshes branch/gitRoot and drops deleted folders.
+          const settled = await Promise.all(
+            saved.projects.map((p) => detectToProject(p.path).catch(() => null)),
+          );
+          if (cancelled) return;
+          const fresh = settled.filter((p): p is Project => p !== null);
+          if (cancelled) return;
+          if (fresh.length === 0) {
+            useStore.getState().hydrate([], null);
+          } else {
+            // detectToProject normalizes to git root, so ids may shift; remap by path.
+            const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
+            const byPath = oldActive ? fresh.find((p) => p.path === oldActive.path) : undefined;
+            const cur = useStore.getState();
+            // Keep the seeded shell if the project survived re-detect: a second
+            // hydrate would wipe layout/worktrees mid-mount and respawn the PTY.
+            const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
+            cur.updateProject(kept.id, { isGit: kept.isGit, gitRoot: kept.gitRoot, branch: kept.branch });
+            if (kept.id !== cur.activeProjectId) cur.setActiveProject(kept.id);
+          }
         } else {
-          // detectToProject normalizes to git root, so ids may shift; remap by path.
-          const oldActive = saved.projects.find((p) => p.id === saved.activeProjectId);
-          const byPath = oldActive ? fresh.find((p) => p.path === oldActive.path) : undefined;
-          const cur = useStore.getState();
-          // Keep the seeded shell if the project survived re-detect: a second
-          // hydrate would wipe layout/worktrees mid-mount and respawn the PTY.
-          const kept = byPath ?? fresh.find((p) => p.id === cur.activeProjectId) ?? fresh[0];
-          cur.updateProject(kept.id, { isGit: kept.isGit, gitRoot: kept.gitRoot, branch: kept.branch });
-          if (kept.id !== cur.activeProjectId) cur.setActiveProject(kept.id);
+          st.hydrate([], null);
         }
-      } else {
-        st.hydrate([], null);
+      } catch (e) {
+        // Surface the failure instead of parking forever on "Restoring…".
+        if (!cancelled) setRepoError(String(e));
+      } finally {
+        // Anything that threw before hydrate must not strand the UI.
+        if (!cancelled && !useStore.getState().hydrated) useStore.getState().hydrate([], null);
       }
     })();
     return () => {
@@ -421,7 +449,11 @@ export default function App() {
           let wts: Worktree[] | null = null;
           // No frame defer: the seeded shell already painted; revalidate now.
           try {
-            const listed = await invoke<Worktree[]>("worktree_list", { repoRoot: root });
+            const listed = await withTimeout(
+              invoke<Worktree[]>("worktree_list", { repoRoot: root }),
+              LIST_TIMEOUT_MS,
+              "worktree_list",
+            );
             if (listed.length > 0) wts = listed;
           } catch (e) {
             // Keep the seeded list on git failure (offline/locked): the old
