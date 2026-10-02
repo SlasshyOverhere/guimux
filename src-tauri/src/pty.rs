@@ -1213,6 +1213,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn process_job_terminates_real_pty_child() {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
