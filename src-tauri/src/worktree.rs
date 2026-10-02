@@ -165,7 +165,10 @@ pub fn worktree_list(repo_root: String) -> Result<Vec<Worktree>, String> {
         .collect())
 }
 
-/// One `git log --no-walk` for every worktree HEAD (empty map on failure).
+/// One `git log --no-walk` for every worktree HEAD. `--ignore-missing` is what
+/// keeps this per-row: without it a single unreadable HEAD (a stale or corrupt
+/// worktree record) makes git fail the whole batch with `fatal: bad object`
+/// and every row in the sidebar silently loses its date.
 fn batch_commit_ts(repo: &Path, heads: Vec<String>) -> std::collections::HashMap<String, i64> {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -173,7 +176,7 @@ fn batch_commit_ts(repo: &Path, heads: Vec<String>) -> std::collections::HashMap
     if heads.is_empty() {
         return map;
     }
-    let mut args: Vec<&str> = vec!["log", "--no-walk", "--format=%H %ct"];
+    let mut args: Vec<&str> = vec!["log", "--no-walk", "--ignore-missing", "--format=%H %ct"];
     args.extend(heads.iter().map(|s| s.as_str()));
     let Ok(out) = run_git(repo, &args) else {
         return map;
@@ -1021,6 +1024,45 @@ mod tests {
             "worktree_create never finished after the lock was released"
         );
         handle.join().unwrap();
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn one_unreadable_worktree_head_does_not_blank_the_whole_sidebar() {
+        // A corrupt worktree record makes `git worktree list` report a HEAD
+        // that is not an object. Without --ignore-missing the batch log died on
+        // it and every row lost its date; only that row may degrade.
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("corrupt-head".into())).unwrap();
+
+        let wt_git_dir = repo.join(".git").join("worktrees");
+        let entry = fs::read_dir(&wt_git_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(entry.join("HEAD"), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n").unwrap();
+
+        let list = worktree_list(root).unwrap();
+        let broken = list.iter().find(|w| w.path == wt.path).expect("worktree row");
+        assert!(
+            broken.last_commit.is_none(),
+            "the unreadable row should carry no timestamp"
+        );
+        let healthy: Vec<&Worktree> = list
+            .iter()
+            .filter(|w| w.path != wt.path)
+            .collect();
+        assert!(!healthy.is_empty(), "expected the main worktree in the list");
+        for w in healthy {
+            assert!(
+                w.last_commit.is_some(),
+                "one bad worktree blanked the timestamp of {}",
+                w.path
+            );
+        }
         let _ = fs::remove_dir_all(&repo);
     }
 
