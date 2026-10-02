@@ -1030,7 +1030,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn base64_encode_vectors() {
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
