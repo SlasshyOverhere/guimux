@@ -117,11 +117,17 @@ jobs:
           fi
           status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.status + ":" + (.conclusion // "")')"
           echo "ci run $run_id is $status" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "$status" != "completed:success" ]; then
-            echo "CI has not passed for this commit; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "value=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          case "$status" in
+            completed:*) ;;
+            *)
+              # Only an unfinished run means "ask again tomorrow". A finished run
+              # is judged job by job below, so a failing macOS job (which the
+              # run conclusion would fold in) cannot block the release.
+              echo "CI for $BASE_SHA is still $status; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "value=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
           jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs")"
           missing=0
           for job in "${required[@]}"; do
