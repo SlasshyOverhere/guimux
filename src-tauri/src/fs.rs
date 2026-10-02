@@ -502,7 +502,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     for c in bytes.chunks(4) {
         let mut n: u32 = 0;
         let mut pad = 0;
-        for (i, &b) in c.iter().enumerate() {
+        for &b in c {
             if b == b'=' {
                 pad += 1;
                 n <<= 6;
@@ -512,7 +512,6 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
                 }
                 n = (n << 6) | base64_val(b).ok_or("invalid base64 character")?;
             }
-            let _ = i;
         }
         if pad > 2 {
             return Err("invalid base64 padding".into());
@@ -542,7 +541,9 @@ fn valid_paste_name(name: &str) -> bool {
     matches!(ext.to_ascii_lowercase().as_str(), ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp")
 }
 
-#[command]
+// (async): base64-decoding a ~13MB paste plus the disk write blocked the UI
+// thread for the whole operation.
+#[command(async)]
 pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if base64.len() > MAX_PASTE_BYTES / 3 * 4 + 4 {
