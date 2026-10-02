@@ -519,40 +519,99 @@ pub struct AheadBehind {
     pub behind: u32,
 }
 
-fn counterpart(repo: &Path) -> Option<String> {
-    // Upstream first: the branch's own tracking ref when it has one.
-    if let Ok(out) = git(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) {
-        let u = out.trim().to_string();
-        if !u.is_empty() {
-            return Some(u);
+/// git exits 128 for a missing upstream, a missing ref, and a repo with no
+/// commits. Those are real zeroes, not failures. Everything else (not a
+/// repository, dubious ownership, a timeout) is a real failure and must reach
+/// the banner: a silent 0/0 makes a broken repo look exactly like a clean one.
+fn is_unmeasurable(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("no upstream configured")
+        || lower.contains("no such branch")
+        || lower.contains("not a valid ref")
+        || lower.contains("unknown revision")
+        || lower.contains("ambiguous argument")
+}
+
+/// Runs git and shapes the result. The single owner of that job: `git` is a
+/// thin wrapper that drops the stderr, and the ahead/behind path keeps it to
+/// tell "nothing to measure" from "git refused". `git_output`'s own errors
+/// pass through untouched so the rendered text never doubles up a prefix.
+fn git_probe(
+    repo: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, (String, String)> {
+    let (status, stdout, stderr, truncated) =
+        git_output(repo, args, timeout).map_err(|e| (String::new(), e))?;
+    let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+    if status.success() {
+        if truncated {
+            return Err((detail, "git output exceeded safety limit".into()));
         }
+        Ok(String::from_utf8_lossy(&stdout).to_string())
+    } else {
+        Err((
+            detail.clone(),
+            format!("git {} failed: {}", args.join(" "), detail),
+        ))
+    }
+}
+
+/// The branch ahead/behind is measured against. `Ok(None)` means there is
+/// genuinely nothing to measure (no upstream, no main/master, no commits yet);
+/// `Err` means git itself failed and the user has to see why.
+fn counterpart(repo: &Path) -> Result<Option<String>, String> {
+    // Upstream first: the branch's own tracking ref when it has one.
+    match git_probe(
+        repo,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        GIT_TIMEOUT,
+    ) {
+        Ok(out) => {
+            let u = out.trim().to_string();
+            if !u.is_empty() && reject_git_ref(&u, "upstream").is_ok() {
+                return Ok(Some(u));
+            }
+        }
+        Err((detail, _)) if is_unmeasurable(&detail) => {}
+        Err((_, rendered)) => return Err(rendered),
     }
     // No upstream (typical for guimux/ branches): fall back to main/master
     // so the badge still reads as commits unique to this worktree.
     for cand in ["main", "master"] {
-        if git(repo, &["show-ref", "--verify", &format!("refs/heads/{cand}")]).is_ok() {
-            return Some(cand.to_string());
+        match git_probe(
+            repo,
+            &["show-ref", "--verify", &format!("refs/heads/{cand}")],
+            GIT_TIMEOUT,
+        ) {
+            Ok(_) => return Ok(Some(cand.to_string())),
+            // A ref that simply is not there is the normal miss, not a failure.
+            Err((detail, _)) if is_unmeasurable(&detail) => continue,
+            Err((_, rendered)) => return Err(rendered),
         }
     }
-    None
+    Ok(None)
 }
 
 #[command(async)]
 pub fn git_ahead_behind(path: String) -> Result<AheadBehind, String> {
     let repo = PathBuf::from(&path);
-    let Some(base) = counterpart(&repo) else {
+    let Some(base) = counterpart(&repo)? else {
         return Ok(AheadBehind { ahead: 0, behind: 0 });
     };
     let spec = format!("HEAD...{base}");
-    match git(&repo, &["rev-list", "--left-right", "--count", &spec]) {
+    match git_probe(&repo, &["rev-list", "--left-right", "--count", &spec], GIT_TIMEOUT) {
         Ok(out) => {
             let mut it = out.split_whitespace();
-            let ahead = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let behind = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            Ok(AheadBehind { ahead, behind })
+            // An unparseable count is a git we do not understand, not a zero.
+            match (it.next().and_then(|s| s.parse().ok()), it.next().and_then(|s| s.parse().ok())) {
+                (Some(ahead), Some(behind)) => Ok(AheadBehind { ahead, behind }),
+                _ => Err("git rev-list returned an unreadable count".into()),
+            }
         }
         // Empty repo (no HEAD yet): nothing to be ahead of.
-        Err(_) => Ok(AheadBehind { ahead: 0, behind: 0 }),
+        Err((detail, _)) if is_unmeasurable(&detail) => Ok(AheadBehind { ahead: 0, behind: 0 }),
+        Err((_, rendered)) => Err(rendered),
     }
 }
 
@@ -730,6 +789,108 @@ mod tests {
         let error = project_detect(path.to_string_lossy().to_string()).unwrap_err();
         assert!(error.starts_with("PROJECT_PATH_MISSING:"), "unexpected error: {error}");
     }
+    #[test]
+    fn ahead_behind_uses_the_configured_upstream_and_not_main_or_master() {
+        // A real local remote, a real push, no mocks: `counterpart` takes the
+        // rev-parse @{u} success branch, which is the common case for any repo
+        // with a remote and was previously untested.
+        let dir = std::env::temp_dir().join(format!("guimux-upstream-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let remote = dir.join("remote.git");
+        let repo = dir.join("work");
+        fs::create_dir_all(&repo).unwrap();
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&remote)
+            .output()
+            .unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        }
+        fs::write(repo.join("a.txt"), "hello").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo).output().unwrap();
+        Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&remote)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let push = Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            push.status.success(),
+            "push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+
+        assert_eq!(
+            counterpart(&repo).unwrap(),
+            Some("origin/main".to_string()),
+            "the configured upstream must win over the main/master fallback"
+        );
+
+        // One commit past the upstream. Against `main` this would read 0/0, so
+        // ahead == 1 is what proves the upstream was actually the base.
+        fs::write(repo.join("b.txt"), "local").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+        Command::new("git").args(["commit", "-m", "local"]).current_dir(&repo).output().unwrap();
+        let ab = git_ahead_behind(repo.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (1, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_reports_git_failures_instead_of_a_clean_zero() {
+        // A directory that is not a repo used to come back Ok(0, 0), which the
+        // sidebar rendered as a legitimate "0 ahead" badge. A broken worktree
+        // must be distinguishable from a clean one.
+        let dir = std::env::temp_dir().join(format!("guimux-not-a-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let error = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap_err();
+        assert!(
+            error.contains("not a git repository"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_still_reports_zero_for_a_genuinely_unmeasurable_repo() {
+        // The cases that really are zero must stay zero, or the fix above just
+        // trades a silent lie for a red banner on every fresh repo.
+        let dir = std::env::temp_dir().join(format!("guimux-empty-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&dir).output().unwrap();
+        }
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 0));
+
+        // And a committed repo with no upstream and no main/master behind it.
+        fs::write(dir.join("a.txt"), "hello").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&dir).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().unwrap();
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `Read` that yields one full buffer and then fails, to prove a
+    /// mid-stream error is not mistaken for a clean end of file.
     struct OneShotThenError(bool);
 
     impl Read for OneShotThenError {
