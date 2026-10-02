@@ -2,7 +2,7 @@
 // and note grouping. Run: node --test scripts/dailyRelease.test.mjs
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { bumpPatch, compareSemver, maxVersion, parseSubject, releaseNotes } from "./daily-release.mjs";
+import { bumpPatch, compareSemver, maxVersion, parseSubject, parseVersion, releaseNotes } from "./daily-release.mjs";
 
 describe("bumpPatch", () => {
   it("increments only the patch component", () => {
@@ -15,6 +15,15 @@ describe("bumpPatch", () => {
     for (const bad of ["", "v1.2.3", "1.2", "1.2.3-rc1", "next"]) {
       assert.throws(() => bumpPatch(bad), /semver|not a plain/);
     }
+  });
+});
+
+describe("parseVersion", () => {
+  it("accepts plain semver only", () => {
+    assert.deepEqual(parseVersion("0.1.3"), { major: 0, minor: 1, patch: 3 });
+    assert.equal(parseVersion("0.1.2-test1"), null);
+    assert.equal(parseVersion("1.2"), null);
+    assert.equal(parseVersion(undefined), null);
   });
 });
 

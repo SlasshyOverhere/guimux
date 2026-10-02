@@ -19,9 +19,18 @@ const VERSION_FILES = [
 
 /** 0.1.3 -> 0.1.4. Patch only: the daily job must never surprise a major bump. */
 export function bumpPatch(version) {
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version).trim());
-  if (!m) throw new Error(`not a plain semver patch version: ${version}`);
-  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+  const v = parseVersion(version);
+  if (!v) throw new Error(`not a plain semver patch version: ${version}`);
+  return `${v.major}.${v.minor}.${v.patch + 1}`;
+}
+
+/**
+ * Strict x.y.z only. Prerelease tags such as v0.1.2-test1 are real releases
+ * but must never become the base we bump from, and must not crash the job.
+ */
+export function parseVersion(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version ?? "").trim());
+  return m ? { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) } : null;
 }
 
 export function compareSemver(a, b) {
@@ -93,9 +102,21 @@ function currentPackageVersion() {
   return JSON.parse(readFileSync("package.json", "utf8")).version;
 }
 
-function latestTag() {
+function allTags() {
   const out = exec(["tag", "--list", "v*", "--sort=-v:refname"]).trim();
-  return out ? out.split("\n")[0] : null;
+  return out ? out.split("\n") : [];
+}
+
+/** Newest v* tag by version, prereleases included: what has been released. */
+function latestTag(tags) {
+  return tags[0] ?? null;
+}
+
+/** Highest strict semver across tags and package.json, ignoring prereleases. */
+function versionBase(tags) {
+  const candidates = tags.map((t) => t.replace(/^v/, "")).filter((v) => parseVersion(v));
+  candidates.push(currentPackageVersion());
+  return candidates.reduce((acc, v) => (compareSemver(v, acc) > 0 ? v : acc));
 }
 
 function commitsSince(from, to) {
@@ -117,11 +138,11 @@ function commitsSince(from, to) {
 }
 
 export function plan(baseRef = "origin/main") {
-  const tag = latestTag();
-  const tagVersion = tag ? tag.replace(/^v/, "") : null;
-  // Tags are the released-state record: bump past whichever is higher so a
-  // hand-made tag can never collide with the next automated one.
-  const nextVersion = bumpPatch(maxVersion(tagVersion ?? "0.0.0", currentPackageVersion()));
+  const tags = allTags();
+  const tag = latestTag(tags);
+  // Bump past the highest real version seen anywhere (tags or package.json),
+  // so neither a hand-made tag nor a manual prerelease can collide with us.
+  const nextVersion = bumpPatch(versionBase(tags));
   const baseSha = exec(["rev-parse", baseRef]).trim();
   const commits = commitsSince(tag, baseSha);
   return {
