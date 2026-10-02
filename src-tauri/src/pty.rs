@@ -116,7 +116,9 @@ pub struct PtyManager {
     next_id: AtomicU64,
     next_slot: AtomicU64,
     slots: Arc<Mutex<HashMap<u64, u64>>>,
-    sessions: Mutex<HashMap<u64, PtyEntry>>,
+    // Arc so the exit watcher can reap the entry it watches for; a shell that
+    // exits must not leave its writer thread or its capacity slot behind.
+    sessions: Arc<Mutex<HashMap<u64, PtyEntry>>>,
 }
 
 impl PtyManager {
@@ -593,12 +595,20 @@ fn detach_output(id: u64) {
 /// The watcher captures its spawn epoch and stays silent unless still
 /// current, so `pty_restart` (same numeric id) never delivers the old
 /// child's exit to the new session.
+/// Drop a finished session's entry. Extracted so the reaping can be tested
+/// against a real pipe without standing up a Tauri app: it is the only thing
+/// that ends the writer thread for a shell that exited on its own.
+fn reap_session(sessions: &Mutex<HashMap<u64, PtyEntry>>, id: u64) {
+    sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+}
+
 fn spawn_exit_watcher(
     app: AppHandle,
     id: u64,
     epoch: u64,
     slot: u64,
     slots: Arc<Mutex<HashMap<u64, u64>>>,
+    sessions: Arc<Mutex<HashMap<u64, PtyEntry>>>,
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
 ) {
     std::thread::spawn(move || {
@@ -619,6 +629,14 @@ fn spawn_exit_watcher(
                     slots.remove(&id);
                 }
             }
+            // Reap the entry. Nothing else removes one for a shell that just
+            // exited: its writer thread would drain a dead pipe forever, and
+            // the entry counts against MAX_SESSIONS, so enough exits would
+            // refuse every later spawn with "too many live shells". Dropping
+            // the entry drops the queue's last sender, which ends the thread.
+            // Inside the epoch guard, so a stale watcher cannot reap the
+            // replacement session that reused this id.
+            reap_session(&sessions, id);
             EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
         }
@@ -841,6 +859,7 @@ fn spawn_pair_inner(
         epoch,
         slot,
         Arc::clone(&state.slots),
+        Arc::clone(&state.sessions),
         child,
     );
     spawn_output_pump(app.clone(), id, epoch, reader, t_start);
@@ -1070,7 +1089,130 @@ mod tests {
         );
     }
 
+    /// The freeze this queue was built to avoid: a bounded channel blocks
+    /// whoever fills it, and `pty_write` is a sync command on the single IPC
+    /// thread. Measured against a real ConPTY, a shell that never reads its
+    /// stdin does NOT push back on the writer, so the sink never stalls and
+    /// the queue never becomes the binding constraint. Pin that, so a future
+    /// portable-pty or platform change that does apply back-pressure shows up
+    /// here instead of as a frozen window.
     #[cfg(windows)]
+    #[test]
+    fn a_shell_that_never_reads_stdin_does_not_stall_the_write_path() {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
+        let pair = NativePtySystem::default()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut command = CommandBuilder::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 120"]);
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        let master = pair.master;
+        // Drain output the way the output pump does, so the output side is
+        // never what we are measuring.
+        let mut reader = master.try_clone_reader().expect("reader");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = std::io::Read::read(&mut reader, &mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+        let writer = OrderedWriter::new(master.take_writer().expect("writer"));
+
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let chunk = vec![b'x'; 64 * 1024];
+        let w = writer.clone();
+        std::thread::spawn(move || {
+            for i in 0..256 {
+                if w.send(chunk.clone()).is_err() {
+                    break;
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = i;
+            }
+            let _ = tx.send(true);
+        });
+
+        // 16MB is far past the queue depth, so the queue must have been
+        // drained the whole way rather than filled and blocked.
+        let drained = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok();
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "the child must stay alive"
+        );
+        assert!(drained, "the writer stalled: only {} of 256 chunks were accepted", accepted.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 256);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The quiet failure this reaps: a shell that exits on its own left its
+    /// entry — and so its writer thread — in place forever, because only
+    /// pty_kill/pty_restart removed one. The thread kept draining a dead pipe
+    /// silently, and every lingering entry counted against MAX_SESSIONS, so
+    /// enough exits refused every later spawn with "too many live shells".
+    /// The quiet failure this reaps: a shell that exits on its own left its
+    /// entry — and so its writer thread — in place forever, because only
+    /// pty_kill/pty_restart removed one. The thread kept draining a dead pipe
+    /// silently, and every lingering entry counted against MAX_SESSIONS, so
+    /// enough exits refused every later spawn with "too many live shells".
+    /// Dropping the entry also drops the queue's last sender, which is what
+    /// ends the writer thread (std mpsc recv fails once no sender remains).
+    #[cfg(windows)]
+    #[test]
+    fn reaping_a_finished_session_frees_its_entry() {
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+
+        let pair = NativePtySystem::default()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.args(["/C", "exit"]);
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        let master = pair.master;
+        let sessions: Mutex<HashMap<u64, PtyEntry>> = Mutex::new(HashMap::new());
+        sessions.lock().unwrap().insert(
+            4242,
+            PtyEntry {
+                writer: OrderedWriter::new(master.take_writer().expect("writer")),
+                killer: child.clone_killer(),
+                master: Arc::new(Mutex::new(master)),
+                process_id: None,
+                job: None,
+            },
+        );
+        let _ = child.wait();
+        assert_eq!(sessions.lock().unwrap().len(), 1);
+
+        reap_session(&sessions, 4242);
+
+        assert!(sessions.lock().unwrap().is_empty(), "the entry was not reaped");
+        // What pty_write does: it looks the session up, so a reaped one now
+        // reports "no such pty session" instead of queueing into a pipe that
+        // nobody drains any more.
+        assert!(
+            sessions.lock().unwrap().get(&4242).is_none(),
+            "a write to a finished session would still be swallowed silently"
+        );
+
+        // And the watcher is what has to do it, on the exit path. Checked
+        // against the source because the watcher needs an AppHandle to run.
+        let src = include_str!("pty.rs");
+        let body = &src[src.find("fn spawn_exit_watcher").expect("watcher")..];
+        let body = &body[..body.find("
+}").expect("watcher body")];
+        assert!(
+            body.contains("reap_session(&sessions, id)"),
+            "the exit watcher no longer reaps the session: {body}"
+        );
+    }
+
     #[test]
     fn process_job_terminates_real_pty_child() {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
