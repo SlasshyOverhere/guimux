@@ -25,14 +25,15 @@ export interface PtySession {
 export type ShellKind = "powershell" | "cmd" | "posix" | "fish" | "unknown";
 
 export interface PtyAttach {
-  replay: number[];
+  // base64, not number[]: serde renders a byte vec as a JSON array (~3.5x).
+  replay: string;
   shell_kind: ShellKind;
   epoch: number;
 }
 
 export interface PtyOutput {
   epoch: number;
-  bytes: number[];
+  bytes: string;
 }
 
 export interface FileStatus {

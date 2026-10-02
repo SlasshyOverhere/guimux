@@ -41,7 +41,7 @@ pub struct PtySession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyAttach {
-    pub replay: Vec<u8>,
+    pub replay: String,
     pub shell_kind: String,
     pub epoch: u64,
 }
@@ -49,7 +49,7 @@ pub struct PtyAttach {
 #[derive(Debug, Clone, Serialize)]
 pub struct PtyOutput {
     pub epoch: u64,
-    pub bytes: Vec<u8>,
+    pub bytes: String,
 }
 
 struct PtyEntry {
@@ -596,11 +596,13 @@ fn spawn_output_pump(
                     }
                     match queue_output(id, epoch, &buf[..n]) {
                         OutputDisposition::Emit => {
+                            // Base64, not Vec<u8>: serde renders a byte vec as
+                            // a JSON number array (~3.5x bloat on 8KB chunks).
                             let _ = app.emit(
                                 &format!("pty:output-{id}"),
                                 PtyOutput {
                                     epoch,
-                                    bytes: buf[..n].to_vec(),
+                                    bytes: base64_encode(&buf[..n]),
                                 },
                             );
                         }
@@ -714,7 +716,7 @@ fn spawn_pair_inner(
     // handles (conhost/OpenConsole pipe ends) are torn down via Drop if
     // reader/writer extraction or every shell spawn failed. The pair/slave
     // drop follows immediately, so nothing lingers.
-    let child = match child {
+    let mut child = match child {
         Some(c) => c,
         None => {
             drop(pair);
@@ -741,6 +743,16 @@ fn spawn_pair_inner(
 
     {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // Cap under the insert lock: with pty_spawn async, N panes boot at once
+        // and the old check-then-insert window let them all pass the cap.
+        if sessions.len() >= MAX_SESSIONS {
+            drop(sessions);
+            let _ = child.kill();
+            drop(pair);
+            return Err(format!(
+                "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+            ));
+        }
         sessions.insert(
             id,
             PtyEntry {
@@ -784,7 +796,7 @@ fn spawn_pair_inner(
     })
 }
 
-#[command]
+#[command(async)]
 pub fn pty_spawn(
     app: AppHandle,
     state: State<PtyManager>,
@@ -801,11 +813,8 @@ pub fn pty_spawn(
 /// the output-before-attach window is replayed, not dropped. Errors on unknown
 /// ids so the pane can detect a dead session (e.g. killed across a worktree
 /// switch) and spawn fresh instead of sitting blank.
-#[command]
+#[command(async)]
 pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
-    // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
-    // raw bytes); kept because the frontend consumes number[] — switch both
-    // to base64 together if replay size ever matters.
     let (epoch, replay) = attach_output(id).ok_or("no such pty session")?;
     let shell_kind = SHELL_KINDS
         .lock()
@@ -814,7 +823,9 @@ pub fn pty_attach(id: u64) -> Result<PtyAttach, String> {
         .cloned()
         .unwrap_or_else(|| "unknown".into());
     Ok(PtyAttach {
-        replay,
+        // Base64, not Vec<u8>: serde would render the replay as a JSON number
+        // array; the frontend decodes it back to bytes.
+        replay: base64_encode(&replay),
         shell_kind,
         epoch,
     })
@@ -834,7 +845,7 @@ pub fn pty_alive(id: u64) -> bool {
         && !EXITED.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
 }
 
-#[command]
+#[command(async)]
 pub fn pty_restart(
     app: AppHandle,
     state: State<PtyManager>,
@@ -877,7 +888,7 @@ pub fn pty_write(state: State<PtyManager>, id: u64, data: String) -> Result<(), 
     w.flush().map_err(|e| e.to_string())
 }
 
-#[command]
+#[command(async)]
 pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Result<(), String> {
     let _ = state;
     // A 0-size resize wedges ConPTY rendering (blank pane); clamp, never skip
@@ -957,6 +968,16 @@ mod tests {
         // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('test'))
         assert_eq!(base64_encode(&utf16le("test")), "dABlAHMAdAA=");
         assert_eq!(utf16le("A"), vec![0x41, 0x00]);
+    }
+
+    #[test]
+    #[test]
+    fn base64_encode_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        assert_eq!(base64_encode(b"test"), "dGVzdA==");
+        assert_eq!(base64_encode(&[0x00, 0xff, 0x10]), "AP8Q");
     }
 
     #[test]

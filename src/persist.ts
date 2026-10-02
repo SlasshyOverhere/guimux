@@ -1,6 +1,7 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import { DEFAULT_SETTINGS, type Project, type Settings, type Worktree } from "./types";
 import type { PaneNode } from "./store";
+import { collectLayoutPaneIds, sanitizeLayouts } from "./layouts";
 
 export interface PersistedState {
   projects: Project[];
@@ -86,53 +87,6 @@ function sanitizeWorktrees(wts: unknown): Worktree[] | undefined {
   return clean.length > 0 ? clean.slice(0, 50) : undefined;
 }
 
-// Persisted layouts must be small static trees: strip runtime session state
-// so a restart spawns fresh shells instead of attaching to dead pty ids or
-// re-firing a queued agent command.
-function sanitizeLayoutNode(node: unknown, depth = 0, seen = { n: 0 }): PaneNode | null {
-  if (!node || typeof node !== "object" || depth > 10 || seen.n > 24) return null;
-  const v = node as Record<string, unknown>;
-  if (v.kind === "pane") {
-    if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;
-    seen.n += 1;
-    const cwd = typeof v.cwd === "string" && v.cwd.length > 0 && v.cwd.length <= 500 ? v.cwd : null;
-    return { kind: "pane", id: v.id, ptyId: null, cwd, initCmd: null };
-  }
-  if (v.kind === "split") {
-    if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;
-    const direction = v.direction === "v" ? "v" : "h";
-    const ratio =
-      typeof v.ratio === "number" && Number.isFinite(v.ratio)
-        ? Math.min(0.9, Math.max(0.1, v.ratio))
-        : 0.5;
-    const first = sanitizeLayoutNode(v.first, depth + 1, seen);
-    const second = sanitizeLayoutNode(v.second, depth + 1, seen);
-    if (!first || !second) return null;
-    return { kind: "split", id: v.id, direction, ratio, first, second };
-  }
-  return null;
-}
-
-function collectLayoutPaneIds(node: PaneNode, out: Set<string>) {
-  if (node.kind === "pane") out.add(node.id);
-  else {
-    collectLayoutPaneIds(node.first, out);
-    collectLayoutPaneIds(node.second, out);
-  }
-}
-
-function sanitizeLayouts(input: unknown): Record<string, PaneNode> | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-  const out: Record<string, PaneNode> = {};
-  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-    if (Object.keys(out).length >= 50) break;
-    if (!key || key.length > 500) continue;
-    const clean = sanitizeLayoutNode(value);
-    if (clean) out[key] = clean;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 function sanitize(s: PersistedState | null | undefined): PersistedState | null {
   if (!s || !Array.isArray(s.projects)) return null;
   const projects = s.projects.filter(
@@ -185,23 +139,28 @@ export async function loadPersisted(): Promise<PersistedState | null> {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let pending: PersistedState | null = null;
 
+function flushPersisted() {
+  timer = null;
+  const next = pending;
+  pending = null;
+  if (!next) return;
+  // Both mirrors are debounced: the sync localStorage write ran sanitize +
+  // JSON.stringify + a blocking disk write on every store change.
+  writeLocal(next);
+  const store = tauriStore;
+  if (!store) return;
+  void store
+    .set(KEY, next)
+    .then(() => store.save())
+    .catch(() => {
+      /* Tauri store unavailable (browser dev) — localStorage already written */
+    });
+}
+
 export function savePersisted(s: PersistedState) {
   const clean = sanitize(s);
   if (!clean) return;
   pending = clean;
-  // Always keep the localStorage mirror fresh (instant, sync).
-  writeLocal(clean);
   if (timer) return;
-  timer = setTimeout(async () => {
-    timer = null;
-    const next = pending;
-    pending = null;
-    if (!next || !tauriStore) return;
-    try {
-      await tauriStore.set(KEY, next);
-      await tauriStore.save();
-    } catch {
-      /* Tauri store unavailable (browser dev) — localStorage already written */
-    }
-  }, 150);
+  timer = setTimeout(flushPersisted, 150);
 }

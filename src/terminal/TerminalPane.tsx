@@ -11,6 +11,7 @@ import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
 import type { PtyAttach, PtyOutput, PtySession } from "../types";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
+import { createOutputBatcher, decodeBase64, type OutputBatcher } from "./outputCodec";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -276,6 +277,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const fitRef = useRef<FitAddon | null>(null);
   const webglRef = useRef<WebglAddon | null>(null);
   const unlisteners = useRef<UnlistenFn[]>([]);
+  const outputBatcherRef = useRef<OutputBatcher | null>(null);
   const sessionRef = useRef<number | null>(ptyId);
   const sessionEpochRef = useRef<number | null>(null);
   const shellKindRef = useRef<PtySession["shell_kind"]>("unknown");
@@ -425,32 +427,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
-    const pending: PtyOutput[] = [];
+const pending: PtyOutput[] = [];
     let replaying = true;
     const writeOutput = (output: PtyOutput) => {
       const currentEpoch = sessionEpochRef.current;
       if (currentEpoch != null && output.epoch < currentEpoch) return;
       sessionEpochRef.current = output.epoch;
-      const bytes = new Uint8Array(output.bytes);
-      snoopLiveCwd(bytes);
-      if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
-        const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
-        console.log(
-          `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${(() => {
-            try {
-              const b = term.buffer.active;
-              return `vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length}`;
-            } catch {
-              return "(no buffer)";
-            }
-          })()}`,
-        );
-      }
-      try {
-        writeKeepPlace(term, bytes);
-      } catch (e) {
-        console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
-      }
+      // Batch it: the flush callback decodes, snoops and writes once per
+      // frame, in arrival order.
+      outputBatcherRef.current?.push(decodeBase64(output.bytes));
     };
     const disposeOutput = await listen<PtyOutput>(`pty:output-${sid}`, (ev) => {
       if (replaying) pending.push(ev.payload);
@@ -469,12 +454,15 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       return;
     }
     unlisteners.current.push(disposeOutput, disposeExit);
-    try {
+try {
       const attached = await invoke<PtyAttach>("pty_attach", { id: sid });
       shellKindRef.current = attached.shell_kind;
       sessionEpochRef.current = attached.epoch;
-      if (attached.replay.length > 0) {
-        const bytes = new Uint8Array(attached.replay);
+      // Replay goes straight to the terminal so it lands before the queued
+      // live chunks the batcher flushes on the next frame.
+      if (attached.replay) {
+        if (!aliveRef.current) return;
+        const bytes = decodeBase64(attached.replay);
         snoopLiveCwd(bytes);
         writeKeepPlace(term, bytes);
       }
@@ -909,6 +897,24 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     fitRef.current = fit;
     term.open(hostRef.current);
     registerLiveTerm(paneId, term);
+    // One decode + two snoops + one term.write per frame, not per chunk:
+    // thousands of 8KB chunks/sec pegged the UI thread. Order preserved.
+    const outputBatcher = createOutputBatcher((bytes) => {
+      if (!aliveRef.current) return;
+      snoopLiveCwd(bytes);
+      if (resizeDebug && Date.now() < traceOutputUntilRef.current) {
+        const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
+        console.log(
+          `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${bufferState(term)}`,
+        );
+      }
+      try {
+        writeKeepPlace(term, bytes);
+      } catch (e) {
+        console.error(`[gm-term] output write failed pane=${paneId} sid=${sessionRef.current}:`, e);
+      }
+    });
+    outputBatcherRef.current = outputBatcher;
     // Single paste path: the native `paste` DOM event carries the only
     // synchronous clipboard source (`clipboardData`), so read it here first
     // and send via term.paste() (bracketed-paste aware, one sender). The
@@ -1147,6 +1153,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       alive = false;
       aliveRef.current = false;
+      // Never flush into a disposed terminal.
+      outputBatcherRef.current?.cancel();
+      outputBatcherRef.current = null;
       if (resizeTimerRef.current != null) {
         clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;

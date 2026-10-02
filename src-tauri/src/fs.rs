@@ -203,7 +203,7 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
     })
 }
 
-#[command]
+#[command(async)]
 pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
@@ -232,7 +232,7 @@ fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let from = PathBuf::from(&old);
@@ -306,7 +306,7 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
-#[command]
+#[command(async)]
 pub fn fs_read(path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
@@ -421,7 +421,7 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
         .unwrap_or_else(|| "rename failed".into()))
 }
 
-#[command]
+#[command(async)]
 pub fn fs_write(path: String, content: String) -> Result<(), String> {
     write_text(&path, &content, None)
 }
@@ -442,7 +442,7 @@ pub fn fs_create_empty(path: String) -> Result<bool, String> {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn fs_write_checked(path: String, content: String, expected: String) -> Result<(), String> {
     if expected.len() as u64 > MAX_FILE {
         return Err("expected file content is too large".into());
@@ -592,7 +592,7 @@ fn grep_visible(name: &str) -> bool {
     true
 }
 
-#[command]
+#[command(async)]
 pub fn grep_search(
     path: String,
     query: String,
