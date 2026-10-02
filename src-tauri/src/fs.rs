@@ -433,7 +433,9 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+                }
             }
         }
     }
