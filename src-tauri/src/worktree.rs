@@ -657,6 +657,12 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     let path = PathBuf::from(&id);
     let main_wt = find_main_worktree(&path).ok_or("could not find main worktree")?;
     let branch = current_branch(&path)?;
+    // A detached HEAD reports no branch. `git merge -- --` then fails with
+    // "merge:  - not something we can merge", which tells the user nothing;
+    // nothing has been merged by the time we notice, so refuse up front.
+    if branch.is_empty() {
+        return Err("this worktree has a detached HEAD — check out a branch before merging".into());
+    }
     reject_git_ref(&branch, "branch")?;
     let base = find_base_branch(&main_wt, &branch)?;
     // A branch named `-f` (creatable with `git update-ref`) would otherwise be
@@ -1129,6 +1135,41 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&repo);
     }
+
+    #[test]
+    fn merging_a_detached_worktree_is_refused_before_anything_runs() {
+        // `branch --show-current` exits 0 with empty output when detached, so
+        // the empty string used to reach argv and produced
+        // "merge:  - not something we can merge" on a primary flow.
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("detached".into())).unwrap();
+        Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            current_branch(Path::new(&wt.path)).unwrap(),
+            "",
+            "fixture is not detached"
+        );
+
+        let error = worktree_merge(wt.id.clone()).unwrap_err();
+        assert_eq!(
+            error,
+            "this worktree has a detached HEAD — check out a branch before merging"
+        );
+        // Refused before any side effect: the main worktree keeps its branch
+        // and a half-run merge leaves no MERGE_HEAD behind.
+        assert_eq!(current_branch(&repo).unwrap(), "main");
+        assert!(
+            !repo.join(".git").join("MERGE_HEAD").exists(),
+            "the refusal left a MERGE_HEAD behind"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
 
     #[test]
     fn merge_refuses_to_guess_the_target_branch_when_git_fails() {
