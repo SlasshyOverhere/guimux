@@ -667,9 +667,17 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     if worktree_dirty(&main_wt)? {
         return Err("main worktree has uncommitted changes — commit or stash first".into());
     }
-    // Ensure main worktree is on the base branch
-    let cur = current_branch(&main_wt).unwrap_or_default();
-    let switched = cur != base;
+    // Ensure main worktree is on the base branch. No `--` here: `git checkout
+    // -- <x>` is a pathspec restore, not a branch switch. `reject_git_ref` is
+    // what keeps a branch named `-f` from becoming the force flag.
+    // `branch --show-current` exits 0 with empty output when detached, so an
+    // Err here is always a real git failure — defaulting it to "" would skip
+    // the switch and merge the branch into whatever is checked out instead.
+    let cur = current_branch(&main_wt)?;
+    if !cur.is_empty() {
+        reject_git_ref(&cur, "branch")?;
+    }
+    let switched = !cur.is_empty() && cur != base;
     if switched {
         run_git(&main_wt, &["checkout", &base])?;
     }
@@ -720,10 +728,14 @@ fn find_base_branch(main_wt: &Path, branch: &str) -> Result<String, String> {
             return Ok(cand.to_string());
         }
     }
-    let cur_branch = current_branch(main_wt).unwrap_or_default();
+    // `branch --show-current` exits 0 with empty output on a detached HEAD, so
+    // an Err is a real git failure and must be reported as such — defaulting it
+    // to "" blamed a broken repo for "no base branch found".
+    let cur_branch = current_branch(main_wt)?;
     if cur_branch.is_empty() {
         return Err("no base branch found".into());
     }
+    reject_git_ref(&cur_branch, "base branch")?;
     Ok(cur_branch)
 }
 
@@ -999,6 +1011,38 @@ mod tests {
         let _ = worktree_repair(root.clone(), None);
         let _ = fs::remove_dir_all(&repo);
     }
+
+    #[test]
+    fn merge_switches_the_main_worktree_to_the_base_branch() {
+        // `git checkout -- <branch>` is a pathspec restore, not a branch
+        // switch; the merge path has to actually land on the base branch.
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let wt = worktree_create(root.clone(), None, Some("switch-me".into())).unwrap();
+        fs::write(Path::new(&wt.path).join("s.txt"), "switched").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "wt change"])
+            .current_dir(&wt.path)
+            .output()
+            .unwrap();
+        // Park the main worktree somewhere else so the merge has to switch.
+        Command::new("git")
+            .args(["checkout", "-b", "somewhere-else"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        worktree_merge(wt.id.clone()).unwrap();
+        assert_eq!(current_branch(&repo).unwrap(), "main");
+        assert!(repo.join("s.txt").exists(), "merge did not land on the base branch");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn worktree_create_holds_the_create_lock_across_probe_and_add() {
         // The TOCTOU itself has no deterministic red-test: the branch name and
@@ -1066,4 +1110,48 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
+    #[test]
+    fn current_branch_distinguishes_detached_head_from_a_git_failure() {
+        // The premise both `current_branch(..)?` calls in the merge path rest
+        // on: a detached HEAD is a real empty answer (exit 0, no output), so an
+        // Err can only ever mean git failed and must never be read as "".
+        let repo = fixture_repo();
+        Command::new("git")
+            .args(["checkout", "-q", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_eq!(current_branch(&repo).unwrap(), "");
+        break_the_main_worktree(&repo);
+        assert!(
+            current_branch(&repo).is_err(),
+            "a broken worktree must not look like a detached HEAD"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn merge_refuses_to_guess_the_target_branch_when_git_fails() {
+        // `branch --show-current` exits 0 with empty output on a detached HEAD,
+        // so an Err is always a real git failure. Reporting "no base branch
+        // found" instead hid a broken main worktree behind a plausible reason.
+        let repo = fixture_repo();
+        break_the_main_worktree(&repo);
+        let error = find_base_branch(&repo, "guimux/whatever").unwrap_err();
+        assert!(
+            !error.contains("no base branch found"),
+            "a git failure was reported as a missing base branch: {error}"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Replaces `.git` with a gitdir pointer to nowhere, so every git call made
+    /// with this directory as its cwd fails the way a locked or moved repo does.
+    fn break_the_main_worktree(repo: &Path) {
+        let dot_git = repo.join(".git");
+        if dot_git.is_dir() {
+            fs::remove_dir_all(&dot_git).unwrap();
+        }
+        fs::write(&dot_git, "gitdir: /nonexistent-guimux-audit\n").unwrap();
+    }
 }
