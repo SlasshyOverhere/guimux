@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 
 const VERSION_FILES = [
   "package.json",
+  "package-lock.json",
   "src-tauri/tauri.conf.json",
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",
@@ -163,7 +164,13 @@ export function bump(version) {
   for (const file of VERSION_FILES) {
     const text = readFileSync(file, "utf8");
     let next;
-    if (file === "src-tauri/Cargo.lock") {
+    if (file === "package-lock.json") {
+      // The lock repeats the package version at the root and under packages[""].
+      next = text.replace(
+        /("name": "guimux",\r?\n\s*"version": ")[^"]+(")/g,
+        `$1${version}$2`,
+      );
+    } else if (file === "src-tauri/Cargo.lock") {
       next = text.replace(
         /(name = "guimux"\nversion = ")[^"]+(")/,
         `$1${version}$2`,
