@@ -230,7 +230,12 @@ pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
         return Err(format!("not a directory: {path}"));
     }
     let mut budget = MAX_NODES;
-    Ok(build_tree(&p, 0, depth.clamp(1, 6), &mut budget))
+    // None means the root itself could not be listed (vanished or unreadable
+    // between the is_dir check and read_dir). Surfacing that as an error beats
+    // Ok(None), which reads as "this folder is empty" in the explorer.
+    build_tree(&p, 0, depth.clamp(1, 6), &mut budget)
+        .map(Some)
+        .ok_or_else(|| format!("cannot read directory: {path}"))
 }
 
 /// Directory identity for a rename. Windows paths are case-insensitive and
