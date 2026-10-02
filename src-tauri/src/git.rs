@@ -20,6 +20,9 @@ const DIFF_CAP: usize = 1_000_000; // 1MB per file
 const STATUS_CAP: usize = 8 * 1024 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A push that transfers real objects over a slow link legitimately runs past
+/// GIT_TIMEOUT; killing it there failed mid-transfer with "timed out after 30s".
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// All git spawns go through here: on Windows a child console process flashes
@@ -630,7 +633,7 @@ pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Res
 #[command(async)]
 pub fn git_push(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git(&repo, &["push"])
+    git_with_timeout(&repo, &["push"], PUSH_TIMEOUT)
 }
 
 #[command(async)]
@@ -807,6 +810,62 @@ mod tests {
             error.contains("failed to spawn"),
             "the failure reason was swallowed: {error}"
         );
+    }
+
+    #[test]
+    fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
+        use std::net::TcpListener;
+        use std::time::Instant;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("git://{}/repo.git", listener.local_addr().unwrap());
+        // Hold every accepted socket open without ever writing the ref
+        // advertisement, so git blocks in read exactly as it would against a
+        // remote that stopped responding.
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming() {
+                match conn {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("guimux-silentpush-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(dir.join("f.txt"), b"data").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "init"]);
+        run(&["remote", "add", "origin", &url]);
+        run(&["config", "branch.main.remote", "origin"]);
+        run(&["config", "branch.main.merge", "refs/heads/main"]);
+
+        // 2s, not PUSH_TIMEOUT: this pins that the deadline is per-call and is
+        // enforced, without a 10-minute test.
+        let t0 = Instant::now();
+        let error = git_with_timeout(&dir, &["push"], Duration::from_secs(2)).unwrap_err();
+        let elapsed = t0.elapsed();
+        assert_eq!(error, "git push timed out after 2s", "unexpected error: {error}");
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "the kill did not happen promptly: {elapsed:?}"
+        );
+        // The whole point of the fix: a push is not bounded by the status-poll
+        // timeout any more.
+        assert!(
+            PUSH_TIMEOUT > GIT_TIMEOUT * 10,
+            "push timeout {PUSH_TIMEOUT:?} is not meaningfully longer than {GIT_TIMEOUT:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
