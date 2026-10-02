@@ -190,20 +190,15 @@ pub fn git_output(
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Every dynamic ref/path arg must be preceded by `"--"` at the call
     // site; static flag lists here are safe by construction.
-    let (status, stdout, stderr, truncated) = git_output(repo, args, GIT_TIMEOUT)?;
-    if status.success() {
-        if truncated {
-            return Err("git output exceeded safety limit".into());
-        }
-        Ok(String::from_utf8_lossy(&stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&stderr);
-        Err(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ))
-    }
+    git_with_timeout(repo, args, GIT_TIMEOUT)
+}
+
+/// `git_probe` owns running git and shaping the result; this drops the stderr
+/// the ahead/behind path needs to classify its failures. The timeout is a
+/// parameter because a push is not bounded by a poll: it moves bytes over the
+/// network, and GIT_TIMEOUT would kill it mid-transfer.
+fn git_with_timeout(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+    git_probe(repo, args, timeout).map_err(|(_, rendered)| rendered)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -789,6 +784,31 @@ mod tests {
         let error = project_detect(path.to_string_lossy().to_string()).unwrap_err();
         assert!(error.starts_with("PROJECT_PATH_MISSING:"), "unexpected error: {error}");
     }
+
+    /// Every user-visible git error flows through `git`/`git_probe`, so its
+    /// message shape is the app's actual contract with the banner. These pin
+    /// it: once-labelled prefix, git's own stderr kept, nothing swallowed.
+    #[test]
+    fn spawn_failures_render_gits_prefix_exactly_once() {
+        // An invalid cwd makes spawn() fail deterministically, which is the
+        // only path where git_output's own "[git] " label is produced.
+        let missing = std::env::temp_dir().join("guimux-spawn-fail-probe");
+        let _ = fs::remove_dir_all(&missing);
+        let error = git(&missing, &["log", "--oneline"]).unwrap_err();
+        assert!(
+            !error.contains("[git] [git]"),
+            "git's prefix was doubled: {error}"
+        );
+        assert!(
+            error.starts_with("[git] "),
+            "git's own prefix was dropped: {error}"
+        );
+        assert!(
+            error.contains("failed to spawn"),
+            "the failure reason was swallowed: {error}"
+        );
+    }
+
     #[test]
     fn ahead_behind_uses_the_configured_upstream_and_not_main_or_master() {
         // A real local remote, a real push, no mocks: `counterpart` takes the
