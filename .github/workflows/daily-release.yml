@@ -11,8 +11,9 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Least privilege per job: the plan only reads, only the release job pushes.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: daily-release
@@ -21,6 +22,11 @@ concurrency:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The gate reads ci.yml run status through the Actions API. Without this
+      # scope `gh api` 403s, the step dies, and nothing is ever released.
+      actions: read
     outputs:
       should-release: ${{ steps.plan.outputs.should-release }}
       version: ${{ steps.plan.outputs.version }}
