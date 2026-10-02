@@ -118,17 +118,6 @@ jobs:
           fi
           status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.status + ":" + (.conclusion // "")')"
           echo "ci run $run_id is $status" | tee -a "$GITHUB_STEP_SUMMARY"
-          case "$status" in
-            completed:*) ;;
-            *)
-              # Only an unfinished run means "ask again tomorrow". A finished run
-              # is judged job by job below, so a failing macOS job (which the
-              # run conclusion would fold in) cannot block the release.
-              echo "CI for $BASE_SHA is still $status; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
-              echo "value=false" >> "$GITHUB_OUTPUT"
-              exit 0
-              ;;
-          esac
           jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs")"
           missing=0
           for job in "${required[@]}"; do
@@ -142,8 +131,10 @@ jobs:
               missing=1
             fi
           done
-          # macOS is built by release.yml itself, so it is reported here but
-          # does not gate the daily release.
+          # Only the required jobs decide, judged by conclusion alone. Never by
+          # the run verdict: a finished run folds macOS into it, and an
+          # unfinished one means nothing yet. Either way a slow or broken macOS
+          # runner must not silently stop releases.
           macos="$(
             printf '%s' "$jobs_json" \
               | jq -r '.jobs[] | select(.name == "rust (macos-latest)") | .conclusion' \
