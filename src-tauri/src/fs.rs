@@ -59,11 +59,25 @@ fn is_link_like(metadata: &fs::Metadata) -> bool {
     false
 }
 
+/// Is this path component the first entry of an absolute path (`/var`,
+/// `C:\Users`)? Those indirections belong to the operating system, not to a
+/// project tree.
+fn is_top_level_component(path: &Path) -> bool {
+    match path.parent() {
+        Some(parent) => parent.parent().is_none(),
+        None => false,
+    }
+}
+
 fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
     let mut current = path;
     loop {
         if let Ok(metadata) = fs::symlink_metadata(current) {
-            if is_link_like(&metadata) {
+            // A symlinked top-level directory is OS infrastructure: macOS ships
+            // `/tmp -> private/tmp` and `/var -> private/var`, so rejecting them
+            // made every path under the temp dir unreadable on macOS. Links
+            // *inside* a tree are still refused — that is the redirection case.
+            if is_link_like(&metadata) && !is_top_level_component(current) {
                 return Err(format!("invalid {what}: symlink or junction paths are not allowed"));
             }
         }
@@ -1029,6 +1043,31 @@ mod tests {
         let path = system_explorer().unwrap();
         assert!(path.is_absolute());
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("explorer.exe"));
+    }
+
+    #[test]
+    fn top_level_link_components_are_allowed() {
+        // macOS: /tmp -> /private/tmp and /var -> /private/var are symlinks the
+        // OS owns. Refusing them broke every path under the temp dir there.
+        assert!(is_top_level_component(Path::new("/var")));
+        assert!(is_top_level_component(Path::new("/tmp")));
+        assert!(!is_top_level_component(Path::new("/var/folders")));
+        assert!(!is_top_level_component(Path::new("/Users/me/proj/link")));
+        #[cfg(windows)]
+        {
+            assert!(is_top_level_component(Path::new(r"C:\Users")));
+            assert!(!is_top_level_component(Path::new(r"C:\Users\me\link")));
+        }
+        // The temp dir the tests actually use must survive the guard.
+        let dir = std::env::temp_dir().join(format!("guimux-toplevel-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        assert!(
+            reject_special_path(&dir, "path").is_ok(),
+            "temp dir rejected on this platform: {}",
+            dir.to_string_lossy()
+        );
+        assert!(fs_read(dir.join("nope.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -280,11 +280,26 @@ fn is_link_like(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Is this path component the first entry of an absolute path (`/var`,
+/// `C:\Users`)? Those indirections belong to the operating system, not to a
+/// project tree.
+fn is_top_level_component(path: &Path) -> bool {
+    match path.parent() {
+        Some(parent) => parent.parent().is_none(),
+        None => false,
+    }
+}
+
 fn reject_link_components(path: &Path) -> Result<(), String> {
     let mut current = path;
     loop {
         match std::fs::symlink_metadata(current) {
-            Ok(metadata) if is_link_like(&metadata) => {
+            // A symlinked top-level directory is OS infrastructure: macOS ships
+            // `/tmp -> private/tmp` and `/var -> private/var`, so rejecting them
+            // made every worktree under the temp dir unremovable on macOS.
+            // Links *inside* a tree are still refused — that is the
+            // redirection case the guard exists for.
+            Ok(metadata) if is_link_like(&metadata) && !is_top_level_component(current) => {
                 return Err("refusing to operate on a symlink or junction worktree path".into());
             }
             Ok(_) => {}
