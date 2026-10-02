@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { useStore } from "../store";
 import { DEFAULT_SETTINGS } from "../types";
 import { UpdatesSection } from "./UpdatesSection";
+import { useModalFocus } from "../modalFocus";
 
 function Row({
   label,
@@ -45,6 +46,7 @@ export function SettingsPanel() {
   const setOpen = useStore((s) => s.setSettingsOpen);
   const settings = useStore((s) => s.settings);
   const setSettings = useStore((s) => s.setSettings);
+  const dialogRef = useModalFocus<HTMLDivElement>(open);
 
   useEffect(() => {
     if (!open) return;
@@ -63,6 +65,7 @@ export function SettingsPanel() {
       onClick={() => setOpen(false)}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"

@@ -4,12 +4,17 @@ pub mod conpty_dll;
 pub mod fs;
 pub mod git;
 pub mod pty;
+#[cfg(any(not(windows), test))]
+pub mod pty_inputrc;
 pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
-    conpty_dll::ensure_bundled_conpty();
+    if !conpty_dll::ensure_bundled_conpty() {
+        eprintln!("[gm-conpty] refusing startup because bundled ConPTY failed integrity checks");
+        return;
+    }
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     #[cfg(all(debug_assertions, feature = "debug-mcp"))]
@@ -43,6 +48,8 @@ pub fn run() {
             fs::fs_tree,
             fs::fs_read,
             fs::fs_write,
+            fs::fs_create_empty,
+            fs::fs_write_checked,
             fs::fs_write_bytes,
             fs::fs_rename,
             fs::fs_reveal,
@@ -50,6 +57,7 @@ pub fn run() {
             fs::grep_search,
             pty::pty_spawn,
             pty::pty_attach,
+            pty::pty_detach,
             pty::pty_alive,
             pty::pty_write,
             pty::pty_resize,
