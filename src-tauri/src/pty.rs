@@ -371,7 +371,9 @@ fn spawn_output_pump(app: AppHandle, id: u64, epoch: u64, mut reader: Box<dyn Re
                     }
                     let attached = ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied().unwrap_or(false);
                     if attached {
-                        let _ = app.emit(&format!("pty:output-{id}"), buf[..n].to_vec());
+                        // Base64, not Vec<u8>: serde renders a byte vec as a JSON
+                        // number array (~3.5x bloat on 8KB chunks).
+                        let _ = app.emit(&format!("pty:output-{id}"), base64_encode(&buf[..n]));
                     } else {
                         // Attached panes have no reader for the replay buffer
                         // (pty_attach drained it), so rebuilding a 256KB copy
@@ -550,15 +552,21 @@ pub fn pty_spawn(
 /// ids so the pane can detect a dead session (e.g. killed across a worktree
 /// switch) and spawn fresh instead of sitting blank.
 #[command(async)]
-pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
+pub fn pty_attach(id: u64) -> Result<String, String> {
     if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
         return Err("no such pty session".into());
     }
     ATTACHED.lock().unwrap_or_else(|e| e.into_inner()).insert(id, true);
-    // ponytail: Vec<u8> serializes as a JSON number array (~3.5x bloat vs
-    // raw bytes); kept because the frontend consumes number[] — switch both
-    // to base64 together if replay size ever matters.
-    Ok(BUFFERS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id).unwrap_or_default().into_iter().collect())
+    // Base64, not Vec<u8>: serde renders a byte vec as a JSON number array
+    // (~3.5x bloat). The frontend decodes it back to bytes.
+    let bytes: Vec<u8> = BUFFERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    Ok(base64_encode(&bytes))
 }
 
 /// Liveness probe for remounts: false when the session is unknown OR its
@@ -686,6 +694,15 @@ mod tests {
         // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('test'))
         assert_eq!(base64_encode(&utf16le("test")), "dABlAHMAdAA=");
         assert_eq!(utf16le("A"), vec![0x41, 0x00]);
+    }
+
+    #[test]
+    fn base64_encode_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(b"hi"), "aGk=");
+        assert_eq!(base64_encode(b"test"), "dGVzdA==");
+        assert_eq!(base64_encode(&[0x00, 0xff, 0x10]), "AP8Q");
     }
 
     #[test]

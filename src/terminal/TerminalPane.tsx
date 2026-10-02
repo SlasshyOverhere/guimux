@@ -10,6 +10,7 @@ import { Columns2, GripVertical, Maximize2, Minimize2, Rows2, X } from "lucide-r
 import { allPaneIds, useStore } from "../store";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
+import { createOutputBatcher, decodeBase64, type OutputBatcher } from "./outputCodec";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
 export const STRESS_KEY = "guimux-stress";
@@ -275,6 +276,7 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   const fitRef = useRef<FitAddon | null>(null);
   const webglRef = useRef<WebglAddon | null>(null);
   const unlisteners = useRef<UnlistenFn[]>([]);
+  const outputBatcherRef = useRef<OutputBatcher | null>(null);
   const sessionRef = useRef<number | null>(ptyId);
   // Agent fan-out: one-shot command typed into a fresh shell, then cleared.
   const initCmdRef = useRef<string | null>(initCmd ?? null);
@@ -420,27 +422,8 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Listeners first, THEN pty_attach: the backend buffers everything since
   // spawn and replays it, so the spawn→listen window drops nothing.
   const attach = async (term: Terminal, sid: number) => {
-    const disposeOutput = await listen<number[]>(`pty:output-${sid}`, (ev) => {
-      const bytes = new Uint8Array(ev.payload);
-      snoopLiveCwd(bytes);
-      if (localStorage.getItem("GUIMUX_RESIZE_DEBUG") === "1" && Date.now() < traceOutputUntilRef.current) {
-        const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
-        console.log(
-          `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${(() => {
-            try {
-              const b = term.buffer.active;
-              return `vp=${b.viewportY} base=${b.baseY} cursorY=${b.cursorY} len=${b.length}`;
-            } catch {
-              return "(no buffer)";
-            }
-          })()}`,
-        );
-      }
-      try {
-        writeKeepPlace(term, bytes);
-      } catch (e) {
-        console.error(`[gm-term] output write failed pane=${paneId} sid=${sid}:`, e);
-      }
+    const disposeOutput = await listen<string>(`pty:output-${sid}`, (ev) => {
+      outputBatcherRef.current?.push(decodeBase64(ev.payload));
     });
     const disposeExit = await listen<number>(`pty:exit-${sid}`, () => {
       term.writeln("\r\n\x1b[90m[process exited: hit Restart below to reopen the shell]\x1b[0m");
@@ -455,9 +438,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       return;
     }
     unlisteners.current.push(disposeOutput, disposeExit);
-    const replay = await invoke<number[]>("pty_attach", { id: sid });
-    if (replay.length > 0) {
-      const bytes = new Uint8Array(replay);
+    const replayB64 = await invoke<string>("pty_attach", { id: sid });
+    if (replayB64) {
+      if (!aliveRef.current) return;
+      const bytes = decodeBase64(replayB64);
       snoopLiveCwd(bytes);
       writeKeepPlace(term, bytes);
     }
@@ -857,6 +841,24 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     fitRef.current = fit;
     term.open(hostRef.current);
     registerLiveTerm(paneId, term);
+    // One decode + two snoops + one term.write per frame, not per chunk:
+    // thousands of 8KB chunks/sec pegged the UI thread. Order preserved.
+    const outputBatcher = createOutputBatcher((bytes) => {
+      if (!aliveRef.current) return;
+      snoopLiveCwd(bytes);
+      if (resizeDebug && Date.now() < traceOutputUntilRef.current) {
+        const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
+        console.log(
+          `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${bufferState(term)}`,
+        );
+      }
+      try {
+        writeKeepPlace(term, bytes);
+      } catch (e) {
+        console.error(`[gm-term] output write failed pane=${paneId} sid=${sessionRef.current}:`, e);
+      }
+    });
+    outputBatcherRef.current = outputBatcher;
     // Single paste path: the native `paste` DOM event carries the only
     // synchronous clipboard source (`clipboardData`), so read it here first
     // and send via term.paste() (bracketed-paste aware, one sender). The
@@ -1090,6 +1092,9 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     return () => {
       alive = false;
       aliveRef.current = false;
+      // Never flush into a disposed terminal.
+      outputBatcherRef.current?.cancel();
+      outputBatcherRef.current = null;
       if (resizeTimerRef.current != null) {
         clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
