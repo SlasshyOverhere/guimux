@@ -66,7 +66,7 @@ jobs:
             );
           "
 
-      - name: Re-dispatch an unfinished release
+      - name: Detect an unfinished release
         id: rebuild
         if: steps.plan.outputs.should-release != 'true'
         env:
@@ -76,15 +76,22 @@ jobs:
           set -euo pipefail
           rebuild=false
           if [ -n "$LAST_TAG" ]; then
-            # A tag whose release never published (or is still a draft) would
-            # otherwise leave the job silent forever, since the tag already
-            # marks those commits as shipped.
-            draft="$(
-              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LAST_TAG" --jq '.draft' \
-                2>/dev/null || echo true
+            # A tag whose release never published (missing, still a draft, or
+            # published with no assets) would otherwise leave the job silent
+            # forever, since the tag already marks those commits as shipped.
+            info="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LAST_TAG" 2>/dev/null || echo '{}'
             )"
-            if [ "$draft" = "true" ]; then
-              echo "::notice::$LAST_TAG has no published release; rebuilding it."
+            unfinished="$(
+              printf '%s' "$info" | jq -r '
+                if has("id")
+                then ((.draft // false) or ((.assets // []) | length == 0))
+                else true
+                end
+              '
+            )"
+            if [ "$unfinished" = "true" ]; then
+              echo "::notice::$LAST_TAG has no complete published release; rebuilding it."
               rebuild=true
             fi
           fi
@@ -145,9 +152,7 @@ jobs:
 
   release:
     needs: plan
-    if: >-
-      needs.plan.outputs.should-release == 'true' &&
-      (needs.plan.outputs.gate == 'true' || needs.plan.outputs.rebuild == 'true')
+    if: needs.plan.outputs.should-release == 'true' && needs.plan.outputs.gate == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -213,3 +218,28 @@ jobs:
           # GITHUB_TOKEN pushes emit no workflow events, so trigger the build.
           gh workflow run release.yml --ref "$TAG" -f release_notes="$(cat notes.md)"
           echo "Dispatched release.yml for $TAG"
+
+  # The tag already marks those commits as shipped, so an unpublished release
+  # has to be re-driven explicitly. It needs its own job: the release job bumps
+  # and tags a *new* version, which is exactly what a rebuild must not do.
+  rebuild:
+    needs: plan
+    if: >-
+      needs.plan.outputs.should-release != 'true' &&
+      needs.plan.outputs.rebuild == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Re-dispatching release.yml is the Actions API again.
+      actions: write
+    steps:
+      - name: Re-dispatch release.yml for the tag that never shipped
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LAST_TAG: ${{ needs.plan.outputs.last-tag }}
+        run: |
+          set -euo pipefail
+          # release.yml looks the release up by tag and uploads whatever assets
+          # are missing, so a repeat dispatch is harmless.
+          gh workflow run release.yml --ref "$LAST_TAG"
+          echo "Dispatched release.yml for $LAST_TAG"
