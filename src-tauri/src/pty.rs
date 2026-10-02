@@ -134,6 +134,8 @@ impl PtyManager {
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        EXITED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.slots.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
@@ -611,9 +613,11 @@ fn spawn_exit_watcher(
             }
         };
         if epoch_current(id, epoch) {
-            let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
-            if slots.get(&id) == Some(&slot) {
-                slots.remove(&id);
+            {
+                let mut slots = slots.lock().unwrap_or_else(|e| e.into_inner());
+                if slots.get(&id) == Some(&slot) {
+                    slots.remove(&id);
+                }
             }
             EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
             let _ = app.emit(&format!("pty:exit-{id}"), code as i32);
