@@ -3,7 +3,8 @@ name: daily-release
 # Once a day, look at main. If (and only if) it has commits that no release
 # has covered yet, and all three CI gates are green for it, bump the patch
 # version, tag, and hand off to the release workflow.
-# Already-released commits => nothing happens, silently.
+# Already-released commits => nothing happens, silently, unless the tag we
+# released last never actually got a release; then it is re-dispatched.
 
 on:
   schedule:
