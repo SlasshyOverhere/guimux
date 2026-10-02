@@ -8,6 +8,9 @@ use tauri::command;
 /// merge mutex (checkout+merge is not atomic across concurrent calls).
 static ID_CTR: AtomicU64 = AtomicU64::new(0);
 static MERGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// `worktree_create` picks its target dir with a check-then-act `exists()`
+/// loop; two panes creating a worktree at once could land on the same path.
+static CREATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
@@ -221,14 +224,17 @@ pub fn worktree_create(
     reject_link_components(&base_dir)?;
     let path = base_dir.join(format!("{}-wt", dir_name));
     reject_link_components(&path)?;
+    let base_ref = base.unwrap_or_else(|| "HEAD".into());
+    reject_git_ref(&base_ref, "base")?;
+    // The exists() probe and `worktree add` have to be one critical section:
+    // two panes creating at the same time otherwise pick the same target.
+    let _create_guard = CREATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut i = 0;
     let mut target = path.clone();
     while target.exists() {
         i += 1;
         target = base_dir.join(format!("{}-wt-{}", dir_name, i));
     }
-    let base_ref = base.unwrap_or_else(|| "HEAD".into());
-    reject_git_ref(&base_ref, "base")?;
     run_git(
         &root,
         &[
@@ -251,6 +257,16 @@ pub fn worktree_create(
         is_main: false,
         last_commit,
     })
+}
+
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            ' ' | '/' | '\\' | ':' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect()
 }
 
 /// FNV-1a over the root path: distinguishes same-named repos in the
@@ -439,16 +455,6 @@ fn delete_branch_guarded(root: &Path, b: &str, force: bool) {
     if let Err(e) = run_git(root, &["branch", flag, "--", b]) {
         eprintln!("[gm-worktree] branch {b} survived the worktree removal: {e}");
     }
-}
-
-fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            ' ' | '/' | '\\' | ':' => '-',
-            c if c.is_control() => '-',
-            c => c,
-        })
-        .collect()
 }
 
 /// Git for Windows prints paths with `/` (`worktree list --porcelain`,
@@ -990,4 +996,32 @@ mod tests {
         let _ = worktree_repair(root.clone(), None);
         let _ = fs::remove_dir_all(&repo);
     }
+    #[test]
+    fn worktree_create_holds_the_create_lock_across_probe_and_add() {
+        // The TOCTOU itself has no deterministic red-test: the branch name and
+        // the directory name both come from the same sanitized input, so two
+        // colliding creates always collide on the branch too. What is
+        // testable is the critical section itself — while CREATE_LOCK is held,
+        // a create cannot have reached `git worktree add`.
+        let repo = fixture_repo();
+        let root = repo.to_string_lossy().to_string();
+        let guard = CREATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let ok = worktree_create(root, None, Some("locked-out".into())).is_ok();
+            let _ = tx.send(ok);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(1000)).is_err(),
+            "worktree_create finished while CREATE_LOCK was held"
+        );
+        drop(guard);
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap(),
+            "worktree_create never finished after the lock was released"
+        );
+        handle.join().unwrap();
+        let _ = fs::remove_dir_all(&repo);
+    }
+
 }
