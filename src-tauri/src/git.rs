@@ -20,9 +20,10 @@ const DIFF_CAP: usize = 1_000_000; // 1MB per file
 const STATUS_CAP: usize = 8 * 1024 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
-/// A push that transfers real objects over a slow link legitimately runs past
-/// GIT_TIMEOUT; killing it there failed mid-transfer with "timed out after 30s".
-pub const PUSH_TIMEOUT: Duration = Duration::from_secs(600);
+/// `git push` and `git fetch` move objects over the network, so they legitimately
+/// run past GIT_TIMEOUT; killing one there failed mid-transfer with
+/// "timed out after 30s" and looked like a network fault.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// All git spawns go through here: on Windows a child console process flashes
@@ -198,8 +199,8 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 
 /// `git_probe` owns running git and shaping the result; this drops the stderr
 /// the ahead/behind path needs to classify its failures. The timeout is a
-/// parameter because a push is not bounded by a poll: it moves bytes over the
-/// network, and GIT_TIMEOUT would kill it mid-transfer.
+/// parameter because push and fetch are not bounded by a poll: they move bytes
+/// over the network, and GIT_TIMEOUT would kill them mid-transfer.
 fn git_with_timeout(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     git_probe(repo, args, timeout).map_err(|(_, rendered)| rendered)
 }
@@ -633,13 +634,13 @@ pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Res
 #[command(async)]
 pub fn git_push(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git_with_timeout(&repo, &["push"], PUSH_TIMEOUT)
+    git_with_timeout(&repo, &["push"], NETWORK_TIMEOUT)
 }
 
 #[command(async)]
 pub fn git_fetch(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git(&repo, &["fetch", "--prune"])
+    git_with_timeout(&repo, &["fetch", "--prune"], NETWORK_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -860,17 +861,15 @@ mod tests {
         let _ = fs::remove_dir_all(&notrepo);
     }
 
-    /// A repo whose remote is up but silent must be killed, not waited on
-    /// forever: raw `git push` at such a peer never returns (measured 75s+).
-    #[test]
-    fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
+    /// A remote that accepts the connection and never sends a ref
+    /// advertisement: the connection is alive but has stopped responding, which
+    /// is what a slow or wedged upstream looks like to git. Raw `git push` and
+    /// `git fetch` against one never return (measured past 75s), so the app-side
+    /// deadline is the only thing bounding them.
+    fn silent_remote() -> String {
         use std::net::TcpListener;
-        use std::time::Instant;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("git://{}/repo.git", listener.local_addr().unwrap());
-        // Hold every accepted socket open without ever writing the ref
-        // advertisement, so git blocks in read exactly as it would against a
-        // remote that stopped responding.
         std::thread::spawn(move || {
             let mut held = Vec::new();
             for conn in listener.incoming() {
@@ -880,8 +879,13 @@ mod tests {
                 }
             }
         });
+        url
+    }
 
-        let dir = std::env::temp_dir().join(format!("guimux-silentpush-{}", std::process::id()));
+    /// A repo with one commit whose origin is a silent remote, so both push and
+    /// fetch reach for the network instead of failing before they dial out.
+    fn repo_tracking_silent_remote(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("guimux-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
@@ -895,29 +899,49 @@ mod tests {
         std::fs::write(dir.join("f.txt"), b"data").unwrap();
         run(&["add", "-A"]);
         run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "init"]);
+        let url = silent_remote();
         run(&["remote", "add", "origin", &url]);
         run(&["config", "branch.main.remote", "origin"]);
         run(&["config", "branch.main.merge", "refs/heads/main"]);
+        dir
+    }
 
-        // 2s, not PUSH_TIMEOUT: this pins that the deadline is per-call and is
-        // enforced, without a 10-minute test.
+    /// The deadline is enforced and per call; the constant assertion is what
+    /// keeps push and fetch off the poll cap. Both tests use a 2s deadline
+    /// rather than NETWORK_TIMEOUT so they finish in seconds.
+    fn assert_killed_at(repo: &Path, args: &[&str], what: &str) {
+        use std::time::Instant;
         let t0 = Instant::now();
-        let error = git_with_timeout(&dir, &["push"], Duration::from_secs(2)).unwrap_err();
+        let error = git_with_timeout(repo, args, Duration::from_secs(2)).unwrap_err();
         let elapsed = t0.elapsed();
-        assert_eq!(error, "git push timed out after 2s", "unexpected error: {error}");
+        assert_eq!(
+            error,
+            format!("git {} timed out after 2s", args.join(" ")),
+            "unexpected error: {error}"
+        );
         assert!(
             elapsed < Duration::from_secs(20),
             "the kill did not happen promptly: {elapsed:?}"
         );
-        // The whole point of the fix: a push is not bounded by the status-poll
-        // timeout any more.
         assert!(
-            PUSH_TIMEOUT > GIT_TIMEOUT * 10,
-            "push timeout {PUSH_TIMEOUT:?} is not meaningfully longer than {GIT_TIMEOUT:?}"
+            NETWORK_TIMEOUT > GIT_TIMEOUT * 10,
+            "network timeout {NETWORK_TIMEOUT:?} is not meaningfully longer than {GIT_TIMEOUT:?} ({what})"
         );
+    }
+
+    #[test]
+    fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
+        let dir = repo_tracking_silent_remote("pushprobe");
+        assert_killed_at(&dir, &["push"], "push");
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_fetch_from_a_silent_remote_is_killed_at_its_own_deadline() {
+        let dir = repo_tracking_silent_remote("fetchprobe");
+        assert_killed_at(&dir, &["fetch", "--prune"], "fetch");
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn flag_shaped_refs_are_refused_everywhere() {
         assert!(reject_git_ref("main", "ref").is_ok());
