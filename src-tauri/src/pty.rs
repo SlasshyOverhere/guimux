@@ -1091,14 +1091,23 @@ mod tests {
 
     /// The freeze this queue was built to avoid: a bounded channel blocks
     /// whoever fills it, and `pty_write` is a sync command on the single IPC
-    /// thread. Measured against a real ConPTY, a shell that never reads its
-    /// stdin does NOT push back on the writer, so the sink never stalls and
-    /// the queue never becomes the binding constraint. Pin that, so a future
-    /// portable-pty or platform change that does apply back-pressure shows up
-    /// here instead of as a frozen window.
+    /// thread. The pipe is not free either: a ConPTY whose child never reads
+    /// stdin still meters input, sustained at ~0.35 MB/s for 1-8KB chunks
+    /// over an 8s flood and ~1.25 MB/s at 64KB, though its own console
+    /// buffer swallows the first few hundred KB. So a producer that saturates
+    /// the pipe is limited by the pipe, and an assertion sized to 16MB
+    /// measures that rate instead of the bug: 16MB needs ~45s at the slow
+    /// end, and the 30s budget this test used to carry lost the race on a
+    /// loaded box (231 of 256 chunks).
+    ///
+    /// What is worth pinning is the queue. Push well past WRITE_QUEUE_DEPTH
+    /// with a payload any real paste fits in, and every send has to land
+    /// inside the budget: if the drain thread ever stops draining, the queue
+    /// fills at 64 chunks and the first send past that blocks forever, which
+    /// is the freeze this test exists to catch.
     #[cfg(windows)]
     #[test]
-    fn a_shell_that_never_reads_stdin_does_not_stall_the_write_path() {
+    fn a_shell_that_never_reads_stdin_still_drains_the_write_queue() {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
         let pair = NativePtySystem::default()
@@ -1121,33 +1130,39 @@ mod tests {
         });
         let writer = OrderedWriter::new(master.take_writer().expect("writer"));
 
+        let sends = WRITE_QUEUE_DEPTH + 32;
+        let chunk = vec![b'x'; 4 * 1024];
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = accepted.clone();
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
-        let chunk = vec![b'x'; 64 * 1024];
         let w = writer.clone();
         std::thread::spawn(move || {
-            for i in 0..256 {
+            for _ in 0..sends {
                 if w.send(chunk.clone()).is_err() {
                     break;
                 }
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = i;
             }
             let _ = tx.send(true);
         });
 
-        // 16MB is far past the queue depth, so the queue must have been
-        // drained the whole way rather than filled and blocked.
+        // 96 chunks of 4KB is 384KB, a paste bigger than any terminal sees,
+        // and 32 chunks more than the queue holds, so the drain thread has to
+        // have moved at least that many for the producer to finish. Even at
+        // 20KB/s that is 20s of budget for a fifth of a megabyte.
         let drained = rx
-            .recv_timeout(std::time::Duration::from_secs(30))
+            .recv_timeout(std::time::Duration::from_secs(20))
             .is_ok();
         assert!(
             child.try_wait().expect("poll child").is_none(),
             "the child must stay alive"
         );
-        assert!(drained, "the writer stalled: only {} of 256 chunks were accepted", accepted.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 256);
+        assert!(
+            drained,
+            "the writer stalled: only {} of {sends} chunks were accepted",
+            accepted.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), sends);
         let _ = child.kill();
         let _ = child.wait();
     }
