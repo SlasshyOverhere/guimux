@@ -919,6 +919,14 @@ mod tests {
     }
 
     #[test]
+    fn flag_shaped_refs_are_refused_everywhere() {
+        assert!(reject_git_ref("main", "ref").is_ok());
+        assert!(reject_git_ref("-f", "ref").is_err());
+        assert!(reject_git_ref("--upload-pack=evil", "ref").is_err());
+        assert!(reject_git_ref("ma\0in", "ref").is_err());
+    }
+
+    #[test]
     fn ahead_behind_uses_the_configured_upstream_and_not_main_or_master() {
         // A real local remote, a real push, no mocks: `counterpart` takes the
         // rev-parse @{u} success branch, which is the common case for any repo

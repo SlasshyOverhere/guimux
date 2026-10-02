@@ -650,6 +650,9 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     let branch = current_branch(&path)?;
     reject_git_ref(&branch, "branch")?;
     let base = find_base_branch(&main_wt, &branch)?;
+    // A branch named `-f` (creatable with `git update-ref`) would otherwise be
+    // parsed by checkout as the force flag, discarding the user's work.
+    reject_git_ref(&base, "base branch")?;
     // Refuse with a dirty main worktree: a conflicted merge leaves MERGE_HEAD
     // behind (recover with `worktree_merge_abort`).
     if worktree_dirty(&main_wt)? {
@@ -739,6 +742,7 @@ fn unmerged_commits(main_wt: &Path, branch: &str) -> Result<Option<(usize, Strin
     }
     let base = find_base_branch(main_wt, branch)?;
     let range = format!("{base}..{branch}");
+    reject_git_ref(&range, "commit range")?;
     let (status, stdout, stderr, truncated) = git_output(
         main_wt,
         &["rev-list", "--count", &range],
