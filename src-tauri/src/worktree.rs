@@ -186,7 +186,7 @@ fn batch_commit_ts(repo: &Path, heads: Vec<String>) -> std::collections::HashMap
     map
 }
 
-#[command]
+#[command(async)]
 pub fn worktree_create(
     repo_root: String,
     base: Option<String>,
@@ -509,7 +509,7 @@ pub fn worktree_remove(
     Ok(())
 }
 
-#[command]
+#[command(async)]
 pub fn worktree_prune(repo_root: String) -> Result<(), String> {
     let anchor = PathBuf::from(&repo_root);
     let root = find_main_worktree(&anchor).unwrap_or(anchor);
@@ -517,7 +517,7 @@ pub fn worktree_prune(repo_root: String) -> Result<(), String> {
     Ok(())
 }
 
-#[command]
+#[command(async)]
 pub fn worktree_repair(repo_root: String, path: Option<String>) -> Result<String, String> {
     let anchor = PathBuf::from(&repo_root);
     let root = find_main_worktree(&anchor).unwrap_or(anchor);
@@ -530,7 +530,7 @@ pub fn worktree_repair(repo_root: String, path: Option<String>) -> Result<String
     }
 }
 
-#[command]
+#[command(async)]
 pub fn worktree_merge(id: String) -> Result<String, String> {
     // Serialize merges: checkout+merge is not atomic across concurrent calls.
     let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -581,7 +581,7 @@ pub fn worktree_merge(id: String) -> Result<String, String> {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn worktree_merge_abort(id: String) -> Result<String, String> {
     // Recovery for a conflicted `worktree_merge` (MERGE_HEAD left behind).
     let _guard = MERGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());

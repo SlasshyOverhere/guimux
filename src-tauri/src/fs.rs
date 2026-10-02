@@ -139,7 +139,7 @@ fn build_tree(path: &Path, depth: u32, max_depth: u32, budget: &mut usize) -> Op
     })
 }
 
-#[command]
+#[command(async)]
 pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
@@ -167,7 +167,7 @@ fn same_dir(a: Option<&Path>, b: Option<&Path>) -> bool {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn fs_rename(old: String, new: String) -> Result<(), String> {
     let from = PathBuf::from(&old);
     let to = PathBuf::from(&new);
@@ -209,7 +209,7 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
-#[command]
+#[command(async)]
 pub fn fs_read(path: String) -> Result<String, String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
@@ -228,7 +228,7 @@ pub fn fs_read(path: String) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| format!("not valid utf-8 or unreadable: {e}"))
 }
 
-#[command]
+#[command(async)]
 pub fn fs_write(path: String, content: String) -> Result<(), String> {
     if content.len() > MAX_WRITE {
         return Err(format!("content too large ({} bytes > 5MB)", content.len()));
@@ -388,7 +388,7 @@ fn grep_visible(name: &str) -> bool {
     true
 }
 
-#[command]
+#[command(async)]
 pub fn grep_search(
     path: String,
     query: String,

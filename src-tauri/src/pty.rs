@@ -417,12 +417,6 @@ fn spawn_pair(
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
     let t_start = std::time::Instant::now();
-    // Cap live shells: each holds a 256KB replay buffer (H-003).
-    if state.sessions.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAX_SESSIONS {
-        return Err(format!(
-            "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
-        ));
-    }
     // Never a zero-size PTY: a 0-col/row ConPTY wedges rendering (blank pane).
     let (cols, rows) = clamp_dims(cols, rows);
     if pty_debug() {
@@ -487,7 +481,7 @@ fn spawn_pair(
     // handles (conhost/OpenConsole pipe ends) are torn down via Drop if
     // reader/writer extraction or every shell spawn failed. The pair/slave
     // drop follows immediately, so nothing lingers.
-    let child = match child {
+    let mut child = match child {
         Some(c) => c,
         None => {
             drop(pair);
@@ -504,6 +498,16 @@ fn spawn_pair(
 
     {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // Cap under the insert lock: with pty_spawn async, N panes boot at once
+        // and the old check-then-insert window let them all pass the cap.
+        if sessions.len() >= MAX_SESSIONS {
+            drop(sessions);
+            let _ = child.kill();
+            drop(pair);
+            return Err(format!(
+                "too many live shells ({MAX_SESSIONS}); close a pane in another worktree and retry"
+            ));
+        }
         sessions.insert(
             id,
             PtyEntry {
@@ -528,7 +532,7 @@ fn spawn_pair(
     Ok(PtySession { id, cwd })
 }
 
-#[command]
+#[command(async)]
 pub fn pty_spawn(
     app: AppHandle,
     state: State<PtyManager>,
@@ -545,7 +549,7 @@ pub fn pty_spawn(
 /// the output-before-attach window is replayed, not dropped. Errors on unknown
 /// ids so the pane can detect a dead session (e.g. killed across a worktree
 /// switch) and spawn fresh instead of sitting blank.
-#[command]
+#[command(async)]
 pub fn pty_attach(id: u64) -> Result<Vec<u8>, String> {
     if !SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) {
         return Err("no such pty session".into());
@@ -566,7 +570,7 @@ pub fn pty_alive(id: u64) -> bool {
         && !EXITED.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
 }
 
-#[command]
+#[command(async)]
 pub fn pty_restart(
     app: AppHandle,
     state: State<PtyManager>,
@@ -609,7 +613,7 @@ pub fn pty_write(state: State<PtyManager>, id: u64, data: String) -> Result<(), 
     w.flush().map_err(|e| e.to_string())
 }
 
-#[command]
+#[command(async)]
 pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Result<(), String> {
     let _ = state;
     // A 0-size resize wedges ConPTY rendering (blank pane); clamp, never skip

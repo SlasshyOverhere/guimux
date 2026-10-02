@@ -70,7 +70,7 @@ fn dir_name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
-#[command]
+#[command(async)]
 pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
@@ -118,7 +118,7 @@ pub fn project_detect(path: String) -> Result<ProjectInfo, String> {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn git_init(path: String, branch: Option<String>) -> Result<String, String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
@@ -193,7 +193,7 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     Ok((String::from_utf8_lossy(&buf).to_string(), truncated))
 }
 
-#[command]
+#[command(async)]
 pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     let repo = PathBuf::from(&path);
     // core.quotepath=false (same as git_diff): without it non-ASCII paths
@@ -237,7 +237,7 @@ pub fn git_status(path: String) -> Result<Vec<FileStatus>, String> {
     Ok(files)
 }
 
-#[command]
+#[command(async)]
 pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
     let repo = PathBuf::from(&path);
     let mut args: Vec<String> = vec![
@@ -270,7 +270,7 @@ pub fn git_diff(path: String, base: Option<String>) -> Result<String, String> {
     Ok(diff)
 }
 
-#[command]
+#[command(async)]
 pub fn git_branches(repo_root: String) -> Result<Vec<String>, String> {
     let repo = PathBuf::from(&repo_root);
     let out = git(&repo, &["branch", "-a", "--format=%(refname:short)"])?;
@@ -309,7 +309,7 @@ fn counterpart(repo: &Path) -> Option<String> {
     None
 }
 
-#[command]
+#[command(async)]
 pub fn git_ahead_behind(path: String) -> Result<AheadBehind, String> {
     let repo = PathBuf::from(&path);
     let Some(base) = counterpart(&repo) else {
@@ -328,7 +328,7 @@ pub fn git_ahead_behind(path: String) -> Result<AheadBehind, String> {
     }
 }
 
-#[command]
+#[command(async)]
 pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Result<String, String> {
     let repo = PathBuf::from(&path);
     let msg = message.trim();
@@ -345,13 +345,13 @@ pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Res
     git(&repo, &["commit", "-m", &msg])
 }
 
-#[command]
+#[command(async)]
 pub fn git_push(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
     git(&repo, &["push"])
 }
 
-#[command]
+#[command(async)]
 pub fn git_fetch(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
     git(&repo, &["fetch", "--prune"])
