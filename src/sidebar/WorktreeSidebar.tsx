@@ -59,30 +59,50 @@ export function WorktreeSidebar() {
       (p) => p.isGit && (p.gitRoot ?? p.path) && !worktreesByProject[p.id] && !listedRoots[p.gitRoot ?? p.path],
     );
     if (missing.length === 0) return;
-    (async () => {
+    // Defer past the shell-spawn burst: this was the only startup git fan-out
+    // without one (status 3s, ahead/behind 5s), so N unvisited projects fired
+    // N list calls into it. App's loader owns the active project meanwhile.
+    const t = setTimeout(async () => {
+      const listed: Record<string, true> = {};
+      const results: { p: Project; wts: Worktree[]; before: Worktree[] }[] = [];
       for (const p of missing) {
+        if (cancelled) return;
         const root = p.gitRoot ?? p.path;
+        listed[root] = true;
         try {
           const before = useStore.getState().worktrees;
           const wts: Worktree[] = await invoke("worktree_list", { repoRoot: root });
-          if (cancelled || !wts.length) continue;
-          const st = useStore.getState();
-          // This fetch can outlive a create/remove and would then replace a
-          // newer list with an older one. The store swaps the array on every
-          // write, so identity is the "untouched since I started" test.
-          if (st.activeProjectId === p.id) {
-            if (st.worktrees === before) st.setWorktrees(wts);
-          } else {
-            st.setProjectWorktrees(p.id, wts);
-          }
+          if (cancelled) return;
+          if (wts.length) results.push({ p, wts, before });
         } catch {
           /* offline/locked: App's loader surfaces errors for the active project */
         }
-        if (!cancelled) setListedRoots((r) => ({ ...r, [root]: true as const }));
       }
-    })();
+      if (cancelled) return;
+      // Write once: a per-project write changed `cacheKeys`, the effect dep,
+      // so the cleanup cancelled the in-flight loop after every project.
+      useStore.setState((s) => {
+        const worktreesByProject = { ...s.worktreesByProject };
+        let worktrees = s.worktrees;
+        for (const { p, wts, before } of results) {
+          // Identity is the "untouched since I started" test: a create/remove
+          // can land during the fetch and must not be overwritten.
+          if (p.id === s.activeProjectId) {
+            if (worktrees === before) {
+              worktrees = wts;
+              worktreesByProject[p.id] = wts;
+            }
+          } else {
+            worktreesByProject[p.id] = wts;
+          }
+        }
+        return { worktreesByProject, worktrees };
+      });
+      if (!cancelled) setListedRoots((r) => ({ ...r, ...listed }));
+    }, 3000);
     return () => {
       cancelled = true;
+      clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.length, cacheKeys]);
