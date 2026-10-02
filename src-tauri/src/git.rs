@@ -194,15 +194,16 @@ pub fn git_output(
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Every dynamic ref/path arg must be preceded by `"--"` at the call
     // site; static flag lists here are safe by construction.
-    git_with_timeout(repo, args, GIT_TIMEOUT)
+    git_probe(repo, args, GIT_TIMEOUT).map_err(|(_, rendered)| rendered)
 }
 
-/// `git_probe` owns running git and shaping the result; this drops the stderr
-/// the ahead/behind path needs to classify its failures. The timeout is a
-/// parameter because push and fetch are not bounded by a poll: they move bytes
-/// over the network, and GIT_TIMEOUT would kill them mid-transfer.
-fn git_with_timeout(repo: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    git_probe(repo, args, timeout).map_err(|(_, rendered)| rendered)
+/// The only way to run a git command that moves objects over the network.
+/// Its deadline is baked in rather than passed in: while the timeout was an
+/// argument, routing a push or fetch back onto GIT_TIMEOUT was a one-token
+/// edit that no runtime test could see. There is now nothing to get wrong
+/// except calling the wrong one of these two functions.
+fn network_git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    git_probe(repo, args, NETWORK_TIMEOUT).map_err(|(_, rendered)| rendered)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,13 +635,13 @@ pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Res
 #[command(async)]
 pub fn git_push(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git_with_timeout(&repo, &["push"], NETWORK_TIMEOUT)
+    network_git(&repo, &["push"])
 }
 
 #[command(async)]
 pub fn git_fetch(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git_with_timeout(&repo, &["fetch", "--prune"], NETWORK_TIMEOUT)
+    network_git(&repo, &["fetch", "--prune"])
 }
 
 #[cfg(test)]
@@ -912,7 +913,9 @@ mod tests {
     fn assert_killed_at(repo: &Path, args: &[&str], what: &str) {
         use std::time::Instant;
         let t0 = Instant::now();
-        let error = git_with_timeout(repo, args, Duration::from_secs(2)).unwrap_err();
+        let error = git_probe(repo, args, Duration::from_secs(2))
+            .map_err(|(_, rendered)| rendered)
+            .unwrap_err();
         let elapsed = t0.elapsed();
         assert_eq!(
             error,
@@ -928,6 +931,37 @@ mod tests {
             "network timeout {NETWORK_TIMEOUT:?} is not meaningfully longer than {GIT_TIMEOUT:?} ({what})"
         );
     }
+
+    /// The runtime tests call `git_probe` directly, so they pin the kill and
+    /// the constant but not which entry point each command uses — the one
+    /// edit they cannot see. Checking that against the source is deliberate:
+    /// the runtime alternative has to outlast the 30s poll cap.
+    #[test]
+    fn push_and_fetch_both_reach_the_network_through_network_git() {
+        let src = include_str!("git.rs");
+        for cmd in ["pub fn git_push", "pub fn git_fetch"] {
+            let rest = &src[src.find(cmd).expect("command not found")..];
+            let body = &rest[..rest.find("
+}").expect("unterminated body")];
+            assert!(
+                body.contains("network_git("),
+                "{cmd} does not go through network_git:{body}"
+            );
+            assert!(
+                !body.contains("GIT_TIMEOUT"),
+                "{cmd} names the poll cap directly:{body}"
+            );
+        }
+        // And the deadline-taking entry point stays gone: it is what let a
+        // network command be capped at 30s without anyone noticing. The name
+        // is assembled so this test does not trip over its own text.
+        let banned = ["git_with", "timeout"].concat();
+        assert!(
+            !src.contains(&banned),
+            "a deadline-taking git entry point is back; push and fetch can be capped again"
+        );
+    }
+
 
     #[test]
     fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
