@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useStore } from "./store";
 import { WindowControls } from "./chrome/WindowControls";
+import { UpdateCard } from "./chrome/UpdateCard";
 import { loadPersisted, savePersisted } from "./persist";
 import { SplitView } from "./terminal/SplitView";
 import { WorktreeSidebar } from "./sidebar/WorktreeSidebar";
@@ -656,6 +657,7 @@ export default function App() {
         </div>
         <Palette />
         <SettingsPanel />
+        <UpdateCard />
       </div>
     );
   }
@@ -686,6 +688,7 @@ export default function App() {
       </div>
       <Palette />
       <SettingsPanel />
+      <UpdateCard />
       <AgentLauncher />
     </div>
   );
