@@ -535,6 +535,19 @@ fn next_epoch(id: u64) -> u64 {
     e
 }
 
+/// Kill-side epoch bump, only for ids we actually handed out. `next_epoch`
+/// always inserts, so bumping for an unknown id left a permanent EPOCHS entry
+/// and the webview can call `pty_kill` with any id it likes.
+fn bump_epoch_if_tracked(id: u64) {
+    if EPOCHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&id)
+    {
+        next_epoch(id);
+    }
+}
+
 /// Spawn/restart path: install fresh output state with the new epoch so a
 /// stale pump can neither append to replay nor emit into the new session.
 fn reset_output(id: u64, attached: bool) -> u64 {
@@ -996,7 +1009,7 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
         .remove(&id);
     // Bump the epoch so the dead child's watcher can never emit exit at this
     // id again (matters for restart, which reuses the id right after).
-    next_epoch(id);
+    bump_epoch_if_tracked(id);
     Ok(())
 }
 
@@ -1209,6 +1222,27 @@ mod tests {
     #[test]
     fn attach_rejects_unknown_session() {
         assert!(pty_attach(0xDEAD_DEAD).is_err());
+    }
+
+    #[test]
+    fn killing_an_unknown_id_leaves_no_epoch_entry() {
+        let id = 0x5A5A_5A5Au64;
+        EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        bump_epoch_if_tracked(id);
+        assert!(!EPOCHS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&id));
+
+        // A real session still gets bumped, so its pending watcher goes stale.
+        let live = next_epoch(id);
+        assert!(epoch_current(id, live));
+        bump_epoch_if_tracked(id);
+        assert!(!epoch_current(id, live));
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     #[test]
