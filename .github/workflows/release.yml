@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Markdown release notes (blank falls back to auto-generated)
+        required: false
+        type: string
+        default: ""
 
 jobs:
   verify:
@@ -87,6 +93,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "guimux ${{ github.ref_name }}"
+          releaseBody: ${{ inputs.release_notes }}
           releaseDraft: false
           uploadUpdaterJson: true
 

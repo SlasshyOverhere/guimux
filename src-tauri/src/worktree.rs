@@ -280,11 +280,31 @@ fn is_link_like(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Is this path component an OS-owned root link? macOS ships
+/// `/tmp -> private/tmp`, `/var -> private/var` and `/etc -> private/etc`, and
+/// refusing them made every worktree under the temp dir unremovable there.
+/// Nothing else is exempt, so a planted root junction is still refused. Must
+/// stay in step with the identical guard in `fs.rs`.
+fn is_os_root_link(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(path.to_str(), Some("/tmp" | "/var" | "/etc"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 fn reject_link_components(path: &Path) -> Result<(), String> {
     let mut current = path;
     loop {
         match std::fs::symlink_metadata(current) {
-            Ok(metadata) if is_link_like(&metadata) => {
+            // Only the OS's own root indirections are traversed. Links anywhere
+            // else are refused — that is the redirection case the guard exists
+            // for.
+            Ok(metadata) if is_link_like(&metadata) && !is_os_root_link(current) => {
                 return Err("refusing to operate on a symlink or junction worktree path".into());
             }
             Ok(_) => {}

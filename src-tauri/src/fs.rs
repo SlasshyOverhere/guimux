@@ -59,11 +59,30 @@ fn is_link_like(metadata: &fs::Metadata) -> bool {
     false
 }
 
+/// Is this path component an OS-owned root link? macOS ships
+/// `/tmp -> private/tmp`, `/var -> private/var` and `/etc -> private/etc`, and
+/// refusing them made every path under the temp dir unusable there. Nothing
+/// else is exempt: an allowlist, not "whatever sits at the root", so a planted
+/// `C:\link` junction is still refused the way it was before.
+fn is_os_root_link(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(path.to_str(), Some("/tmp" | "/var" | "/etc"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
     let mut current = path;
     loop {
         if let Ok(metadata) = fs::symlink_metadata(current) {
-            if is_link_like(&metadata) {
+            // Only the OS's own root indirections are traversed. Links anywhere
+            // else are refused — that is the redirection case.
+            if is_link_like(&metadata) && !is_os_root_link(current) {
                 return Err(format!("invalid {what}: symlink or junction paths are not allowed"));
             }
         }
@@ -1029,6 +1048,37 @@ mod tests {
         let path = system_explorer().unwrap();
         assert!(path.is_absolute());
         assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("explorer.exe"));
+    }
+
+    #[test]
+    fn only_os_root_links_are_allowed() {
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_os_root_link(Path::new("/var")));
+            assert!(is_os_root_link(Path::new("/tmp")));
+            assert!(is_os_root_link(Path::new("/etc")));
+            // Not on the list, so it is refused like any other root link.
+            assert!(!is_os_root_link(Path::new("/srv")));
+        }
+        #[cfg(windows)]
+        {
+            // Windows gets no exemption at all: a root-level junction is a
+            // redirection an attacker can plant, not OS infrastructure.
+            assert!(!is_os_root_link(Path::new(r"C:\Users")));
+            assert!(!is_os_root_link(Path::new(r"C:\link")));
+        }
+        assert!(!is_os_root_link(Path::new("/var/folders")));
+        assert!(!is_os_root_link(Path::new("/Users/me/proj/link")));
+        // The temp dir the tests actually use must survive the guard.
+        let dir = std::env::temp_dir().join(format!("guimux-toplevel-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        assert!(
+            reject_special_path(&dir, "path").is_ok(),
+            "temp dir rejected on this platform: {}",
+            dir.to_string_lossy()
+        );
+        assert!(fs_read(dir.join("nope.txt").to_string_lossy().to_string()).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
