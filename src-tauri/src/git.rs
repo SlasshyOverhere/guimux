@@ -73,7 +73,13 @@ fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
     let mut truncated = false;
     loop {
         match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(_) => {
+                // A read error is not EOF. Reporting it as one hands the caller
+                // a silently short stream flagged as complete.
+                truncated = true;
+                break;
+            }
             Ok(n) => {
                 let room = cap.saturating_sub(out.len());
                 if room > 0 {
@@ -86,6 +92,42 @@ fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
         }
     }
     (out, truncated)
+}
+
+/// Reads at most `cap` bytes, then stops so the child can be killed instead of
+/// blocking on a full pipe. Extracted from `git_capped` so the error-vs-EOF
+/// handling is testable without spawning git.
+fn read_to_cap(reader: &mut impl Read, cap: usize) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 32 * 1024];
+    while buf.len() < cap {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = cap - buf.len();
+                if n > room {
+                    buf.extend_from_slice(&chunk[..room]);
+                    truncated = true;
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            // Not EOF: without this the caller gets a short read that looks
+            // whole, and `git_status`/`git_diff` report it as complete.
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        }
+    }
+    // Reaching the cap is enough to conservatively mark the result
+    // truncated. Waiting for one extra byte here can block forever when
+    // the child is still writing past the cap.
+    if buf.len() >= cap {
+        truncated = true;
+    }
+    (buf, truncated)
 }
 
 fn recv_reader<T>(rx: &mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
@@ -309,33 +351,8 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     let _ = std::thread::spawn(move || {
         let _ = err_tx.send(read_capped(stderr, STDERR_CAP));
     });
-    let mut buf: Vec<u8> = Vec::new();
-    let mut truncated = false;
-    {
-        let mut out = stdout;
-        let mut chunk = [0u8; 32 * 1024];
-        while buf.len() < cap {
-            match out.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let room = cap - buf.len();
-                    if n > room {
-                        buf.extend_from_slice(&chunk[..room]);
-                        truncated = true;
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        // Reaching the cap is enough to conservatively mark the result
-        // truncated. Waiting for one extra byte here can block forever when
-        // the child is still writing past the cap.
-        if buf.len() >= cap {
-            truncated = true;
-        }
-    }
+    let mut out = stdout;
+    let (buf, truncated) = read_to_cap(&mut out, cap);
     if truncated {
         let _ = child
             .lock()
@@ -715,5 +732,66 @@ mod tests {
     }
     struct OneShotThenError(bool);
 
+    impl Read for OneShotThenError {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                Err(std::io::Error::other("simulated pipe failure"))
+            } else {
+                self.0 = true;
+                Ok(buf.len())
+            }
+        }
+    }
+
+    #[test]
+    fn read_failures_are_not_reported_as_clean_end_of_file() {
+        let (out, truncated) = read_capped(OneShotThenError(false), 64 * 1024);
+        assert!(!out.is_empty(), "the first successful read must still be kept");
+        assert!(truncated, "a mid-stream read error must mark the result truncated");
+
+        let (out, truncated) = read_to_cap(&mut OneShotThenError(false), 64 * 1024);
+        assert!(!out.is_empty());
+        assert!(
+            truncated,
+            "git_capped would hand back a short read that looks complete"
+        );
+    }
+
+    #[test]
+    fn a_clean_short_read_is_not_marked_truncated() {
+        struct Short {
+            data: Vec<u8>,
+            pos: usize,
+        }
+        impl Read for Short {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Ok(0);
+                }
+                let n = (self.data.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let (out, truncated) = read_to_cap(
+            &mut Short {
+                data: b"abc".to_vec(),
+                pos: 0,
+            },
+            1024,
+        );
+        assert_eq!(out, b"abc");
+        assert!(!truncated);
+        let (out, truncated) = read_capped(
+            Short {
+                data: b"abc".to_vec(),
+                pos: 0,
+            },
+            1024,
+        );
+        assert_eq!(out, b"abc");
+        assert!(!truncated);
+    }
 }
 
