@@ -1,57 +1,47 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import {
-  INITIAL_UPDATER_STATE,
   checkForUpdates,
+  dismissUpdate,
   downloadAndInstallUpdate,
-  getLastCheck,
+  getUpdaterState,
   notifyAvailable,
   relaunchApp,
-  subscribeCheckCompletion,
+  subscribeUpdaterState,
   type UpdaterState,
 } from "./updater";
 
 /**
- * Updater state + actions for Settings. Seeds from the startup auto-check
- * result and live-updates when a background check finishes while open.
+ * Live updater state + actions.
+ *
+ * State lives in the module store, not here, so the update card and this hook
+ * are just two subscribers to one source of truth: a download started from the
+ * card fills the bar in Settings, and a check that finished at boot shows up
+ * when Settings is finally opened.
  */
-export function useAutoUpdater() {
-  const [state, setState] = useState<UpdaterState>(() => {
-    const last = getLastCheck();
-    return last
-      ? { ...INITIAL_UPDATER_STATE, status: last.status, info: last.info, error: last.error }
-      : INITIAL_UPDATER_STATE;
-  });
-  const patch = useCallback((p: Partial<UpdaterState>) => setState((s) => ({ ...s, ...p })), []);
-
-  useEffect(() => {
-    // Finished before open: adopt it (only from idle — never clobber
-    // an in-progress user check). Finishes while open: live-update.
-    const last = getLastCheck();
-    if (last) {
-      setState((s) =>
-        s.status === "idle"
-          ? { ...s, status: last.status, info: last.info, error: last.error }
-          : s,
-      );
-    }
-    return subscribeCheckCompletion((e) => {
-      if (e.status === "error") setState((s) => ({ ...s, status: "error", error: e.error, progress: null }));
-      else setState((s) => ({ ...s, status: e.status, info: e.info, progress: null }));
-    });
-  }, []);
+export function useAutoUpdater(): UpdaterState & {
+  checkNow: () => Promise<void>;
+  downloadInstall: () => Promise<void>;
+  relaunch: () => Promise<void>;
+  dismiss: () => void;
+} {
+  const state = useSyncExternalStore(subscribeUpdaterState, getUpdaterState);
 
   const checkNow = useCallback(async () => {
-    const info = await checkForUpdates(patch);
-    if (info) void notifyAvailable(info.version);
-  }, [patch]);
+    const info = await checkForUpdates();
+    if (info) await notifyAvailable(info.version);
+  }, []);
 
   const downloadInstall = useCallback(async () => {
-    await downloadAndInstallUpdate(patch);
-  }, [patch]);
+    await downloadAndInstallUpdate();
+  }, []);
 
   const relaunch = useCallback(async () => {
     await relaunchApp();
   }, []);
 
-  return { ...state, checkNow, downloadInstall, relaunch };
+  const dismiss = useCallback(() => {
+    if (state.info) dismissUpdate(state.info.version);
+  }, [state.info]);
+
+  return { ...state, checkNow, downloadInstall, relaunch, dismiss };
 }
