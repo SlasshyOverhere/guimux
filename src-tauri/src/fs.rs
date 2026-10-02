@@ -898,6 +898,23 @@ fn add_watch_tree(
     }
 }
 
+/// Never drop the trailing-edge refresh on a full queue: a saturated coalescer
+/// means the thread is behind, not that the change was uninteresting. Bounded
+/// wait so one wedged consumer cannot stall every watch thread forever.
+fn notify_change(tx: &mpsc::SyncSender<String>, root: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match tx.try_send(root.to_string()) {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
+            Err(mpsc::TrySendError::Full(_)) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// `recursive` is the oversized-root fallback: one watch on the root, with
 /// notify covering the subtrees, so no per-directory bookkeeping is needed.
 fn spawn_watch_manager(
@@ -949,7 +966,7 @@ fn spawn_watch_manager(
                         &mut budget,
                     );
                 }
-                let _ = notify_tx.try_send(fire.clone());
+                notify_change(&notify_tx, &fire);
             }
             match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
                 Ok(Ok(event)) => {
@@ -979,7 +996,7 @@ fn spawn_watch_manager(
                             }
                         }
                     }
-                    let _ = notify_tx.try_send(fire.clone());
+                    notify_change(&notify_tx, &fire);
                 }
                 Ok(Err(_)) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
