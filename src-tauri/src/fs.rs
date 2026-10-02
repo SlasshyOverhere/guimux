@@ -1311,6 +1311,17 @@ mod tests {
     }
 
     #[test]
+    fn tree_reports_unreadable_roots_instead_of_returning_empty() {
+        let dir = std::env::temp_dir().join(format!("guimux-tree-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let node = fs_tree(dir.to_string_lossy().to_string(), 2).unwrap();
+        assert!(node.is_some());
+        assert!(fs_tree(dir.join("nope").to_string_lossy().to_string(), 1).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn tree_caps_children() {
         let dir = std::env::temp_dir().join(format!("guimux-tree-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

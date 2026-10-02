@@ -713,4 +713,7 @@ mod tests {
         let error = project_detect(path.to_string_lossy().to_string()).unwrap_err();
         assert!(error.starts_with("PROJECT_PATH_MISSING:"), "unexpected error: {error}");
     }
+    struct OneShotThenError(bool);
+
 }
+

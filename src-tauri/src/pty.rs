@@ -924,7 +924,9 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
     r.map_err(|e| format!("pty_resize failed: {e}"))
 }
 
-#[command]
+// (async): TerminateJobObject, and the taskkill /T /F fallback, block on the
+// process tree; closing a pane that hosts agents froze the window for seconds.
+#[command(async)]
 pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
     let master_to_close = {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
