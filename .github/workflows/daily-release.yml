@@ -28,6 +28,7 @@ jobs:
       last-tag: ${{ steps.plan.outputs.last-tag }}
       base-sha: ${{ steps.plan.outputs.base-sha }}
       gate: ${{ steps.gate.outputs.value }}
+      rebuild: ${{ steps.rebuild.outputs.rebuild }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -58,6 +59,30 @@ jobs:
                 p.commits.map((c) => '- ' + c.subject).join('\n') + '\n',
             );
           "
+
+      - name: Re-dispatch an unfinished release
+        id: rebuild
+        if: steps.plan.outputs.should-release != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LAST_TAG: ${{ steps.plan.outputs.last-tag }}
+        run: |
+          set -euo pipefail
+          rebuild=false
+          if [ -n "$LAST_TAG" ]; then
+            # A tag whose release never published (or is still a draft) would
+            # otherwise leave the job silent forever, since the tag already
+            # marks those commits as shipped.
+            draft="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LAST_TAG" --jq '.draft' \
+                2>/dev/null || echo true
+            )"
+            if [ "$draft" = "true" ]; then
+              echo "::notice::$LAST_TAG has no published release; rebuilding it."
+              rebuild=true
+            fi
+          fi
+          echo "rebuild=$rebuild" >> "$GITHUB_OUTPUT"
 
       - name: Gate on CI
         id: gate
@@ -114,15 +139,21 @@ jobs:
 
   release:
     needs: plan
-    if: needs.plan.outputs.should-release == 'true' && needs.plan.outputs.gate == 'true'
+    if: >-
+      needs.plan.outputs.should-release == 'true' &&
+      (needs.plan.outputs.gate == 'true' || needs.plan.outputs.rebuild == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The dispatch endpoint requires Actions: write; without it the token 403s
+      # after the tag is already pushed and the release silently never builds.
+      actions: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: true
-          ref: main
+          # Pin to the commit CI actually gated, never the moving tip of main.
+          ref: ${{ needs.plan.outputs.base-sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -130,36 +161,49 @@ jobs:
         with:
           node-version: 22
 
+      - name: Refuse to release if main moved on
+        id: guard
+        env:
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if [ "$(git rev-parse origin/main)" != "$BASE_SHA" ]; then
+            echo "::notice::main advanced past the gated commit $BASE_SHA; skipping this run. The next schedule gates the newer commit."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Bump version and build release notes
         id: prepare
+        if: steps.guard.outputs.skip != 'true'
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           LAST_TAG: ${{ needs.plan.outputs.last-tag }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
         run: |
           node scripts/daily-release.mjs bump "$VERSION"
-          node scripts/daily-release.mjs notes "$LAST_TAG" HEAD --out notes.md --version "$VERSION"
+          node scripts/daily-release.mjs notes "$LAST_TAG" "$BASE_SHA" --out notes.md --version "$VERSION"
           cat notes.md
 
       - name: Commit, tag and hand off
+        if: steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.plan.outputs.tag }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
           git commit -m "chore(release): $TAG"
-          # Another push may have landed while CI was running; rebase and retry once.
-          for attempt in 1 2 3; do
-            git pull --rebase --autostash origin main && break
-            [ "$attempt" -lt 3 ] || { echo "could not fast-forward main"; exit 1; }
-            sleep 5
-          done
+          # No rebase: rebasing would drag in commits CI never gated. If main
+          # moved, the push below fails fast and the next run handles it.
           git tag -a "$TAG" -m "guimux $TAG"
-          git push origin main
+          git push origin HEAD:main
           git push origin "$TAG"
-          # GITHUB_TOKEN pushes do not emit workflow events, so trigger the
-          # release build explicitly against the tag.
+          # GITHUB_TOKEN pushes emit no workflow events, so trigger the build.
           gh workflow run release.yml --ref "$TAG" -f release_notes="$(cat notes.md)"
           echo "Dispatched release.yml for $TAG"
