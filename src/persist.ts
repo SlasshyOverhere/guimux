@@ -47,6 +47,10 @@ function cleanSettings(s: unknown): Settings {
     editorFontSize: num(v.editorFontSize, DEFAULT_SETTINGS.editorFontSize, 10, 24),
     scrollback: num(v.scrollback, DEFAULT_SETTINGS.scrollback, 1000, 50_000),
     uiZoom: num(v.uiZoom, DEFAULT_SETTINGS.uiZoom, 0.5, 2),
+    density:
+      v.density === "compact"
+        ? v.density
+        : DEFAULT_SETTINGS.density,
     autoCheckForUpdates:
       typeof v.autoCheckForUpdates === "boolean"
         ? v.autoCheckForUpdates

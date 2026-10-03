@@ -23,7 +23,7 @@ export function SplitView({ node, cwd, maximizedId, depth = 0 }: { node: PaneNod
     // A lone pane still gets the black frame so it matches split tiles.
     const wrap = <PaneWrap key={node.id} pane={node} cwd={cwd} maximizedId={maxId} />;
     return depth === 0 && maxId == null ? (
-      <div className="h-full w-full p-2" style={{ background: "#000000" }}>{wrap}</div>
+      <div className="h-full w-full bg-surface-term p-2">{wrap}</div>
     ) : (
       wrap
     );
@@ -41,15 +41,12 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
   // Edges alone separate the cards; active reads brighter.
   return (
     <div
-      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px]"
+      className="gm-pane-in group/pane h-full w-full overflow-hidden rounded-[8px] bg-surface-term"
       data-active={active}
-      style={
-        hidden
-          ? { display: "none" }
-          : active
-            ? { background: "#000000", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.32)" }
-            : { background: "#000000", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.12)" }
-      }
+      style={{
+        display: hidden ? "none" : undefined,
+        boxShadow: `inset 0 0 0 1px var(--gm-term-ring${active ? "-active" : ""})`,
+      }}
     >
       <TerminalPane
         paneId={pane.id}
@@ -57,6 +54,12 @@ function PaneWrap({ pane, cwd, maximizedId }: { pane: Pane; cwd: string; maximiz
         cwd={pane.cwd ?? cwd}
         visible={!hidden}
         initCmd={pane.initCmd ?? null}
+        agent={pane.agent ?? null}
+        agentBin={pane.agentBin ?? null}
+        agentSince={pane.agentSince ?? null}
+        session={pane.session ?? null}
+        sessionKind={pane.sessionKind ?? null}
+        sessionFrom={pane.sessionFrom ?? null}
         onClose={() => closePane(pane.id)}
       />
     </div>
@@ -105,7 +108,7 @@ function SplitNode({ split, cwd, maximizedId, depth }: { split: Split; cwd: stri
     <div
       ref={containerRef}
       className={`flex h-full w-full ${maxed ? "" : root ? "gap-2 p-2" : "gap-2"} ${split.direction === "h" ? "flex-row" : "flex-col"}`}
-      style={{ background: maxed || !root ? "transparent" : "#000000" }}
+      style={{ background: maxed || !root ? "transparent" : "var(--gm-term)" }}
     >
       <div
         style={firstHas ? { flex: 1 } : secondHas ? { display: "none" } : { flexBasis: `calc(${split.ratio * 100}% - 4px)` }}
@@ -139,7 +142,7 @@ function SplitNode({ split, cwd, maximizedId, depth }: { split: Split; cwd: stri
       >
         {/* Faint bar inside a 9px hit target. */}
         <div
-          style={{ background: "rgba(255,255,255,0.09)" }}
+          style={{ background: "var(--gm-term-grip)" }}
           className={`rounded-full ${split.direction === "h" ? "h-[calc(100%-8px)] w-[3px]" : "h-[3px] w-[calc(100%-8px)]"}`}
         />
       </div>

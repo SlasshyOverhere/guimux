@@ -1,22 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useStore } from "../store";
-import { detectToProject } from "../project";
+import { openFolderProject } from "../bootstrap";
 import { errorDialog } from "../dialogs";
+import { fetchWorktree, pushWorktree } from "../gitOps";
+import { useBindings } from "../keymap";
+import { prettyCombo } from "../combo";
 import { useModalFocus } from "../modalFocus";
-import type { FsNode, Project, Worktree } from "../types";
+import type { FsNode, Project } from "../types";
 import {
   Bot,
   FolderOpen,
   GitBranch,
   Columns2,
-  Rows2,
   File as FileIcon,
   CornerDownLeft,
   ArrowUp,
   ArrowDown,
   Settings as SettingsIcon,
+  PanelLeft,
+  PanelBottom,
+  Keyboard,
+  Type,
+  Upload,
+  Download,
 } from "lucide-react";
 
 interface Item {
@@ -27,6 +34,20 @@ interface Item {
   icon?: React.ReactNode;
   action: () => void;
 }
+
+// One icon per binding group, so a keyboard command and its palette row are
+// recognisably the same thing.
+const GROUP_ICON: Record<string, React.ReactNode> = {
+  Worktrees: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
+  Panes: <Columns2 size={14} strokeWidth={2} className="text-ink-400" />,
+  Files: <FileIcon size={14} strokeWidth={2} className="text-ink-400" />,
+  View: <PanelLeft size={14} strokeWidth={2} className="text-ink-400" />,
+};
+
+// Result sections, in the order a person looks for them. Rows are sorted into
+// these buckets: commands are contributed by several sources, and appending
+// them in source order printed the same heading twice.
+const GROUP_ORDER = ["Commands", "Git", "Worktrees", "Panes", "Files", "View", "Projects"];
 
 function fuzzy(hay: string, needle: string): boolean {
   // subsequence match: keeps palette forgiving for paths and branches
@@ -40,7 +61,6 @@ function fuzzy(hay: string, needle: string): boolean {
 export function Palette() {
   const paletteOpen = useStore((s) => s.paletteOpen);
   const setPaletteOpen = useStore((s) => s.setPaletteOpen);
-  const addProject = useStore((s) => s.addProject);
   const setActiveProject = useStore((s) => s.setActiveProject);
   const repoRoot = useStore((s) => s.repoRoot);
   const worktrees = useStore((s) => s.worktrees);
@@ -48,12 +68,14 @@ export function Palette() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [files, setFiles] = useState<FsNode[]>([]);
+  const bindings = useBindings();
   const listRef = useRef<HTMLDivElement>(null);
   const dialogRef = useModalFocus<HTMLDivElement>(paletteOpen);
 
   const projects: Project[] = useStore((s) => s.projects);
   const activeProjectId = useStore((s) => s.activeProjectId);
   const proj = projects.find((p) => p.id === activeProjectId) ?? null;
+  const activeWt = worktrees.find((w) => w.id === useStore.getState().activeWorktreeId) ?? null;
 
   useEffect(() => {
     if (!paletteOpen) return;
@@ -101,16 +123,7 @@ export function Palette() {
 
   const openFolder = async () => {
     try {
-      const picked = await open({
-        directory: true,
-        multiple: false,
-        title: "Open folder or git repository",
-      });
-      if (!picked) return;
-      const raw = Array.isArray(picked) ? picked[0] : (picked as string);
-      const p = await detectToProject(raw);
-      addProject(p);
-      setActiveProject(p.id);
+      await openFolderProject();
     } catch (e) {
       void errorDialog(`${e}`);
     }
@@ -131,57 +144,89 @@ export function Palette() {
         action: () => void openFolder(),
       });
     }
-    if (proj?.isGit && repoRoot && match("new worktree branch isolate")) {
+    if (proj?.isGit && match("new worktree branch isolate")) {
       out.push({
         id: "cmd:new-worktree",
-        label: "New worktree",
-        hint: "git worktree add",
+        label: "New worktree…",
+        hint: "name and base branch",
         group: "Commands",
         icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
+        // The same request the tab strip's + sends: one create form, so the
+        // palette and the sidebar cannot disagree about what it asks for.
+        action: () => useStore.getState().requestNewWorktree(),
+      });
+    }
+    if (proj?.isGit && match("push publish upload branch upstream")) {
+      out.push({
+        id: "git:push",
+        label: `Push ${activeWt?.branch ?? "current branch"}`,
+        hint: "git push",
+        group: "Git",
+        icon: <Upload size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
-          void (async () => {
-            const created = await invoke<Worktree>("worktree_create", { repoRoot, name: null, base: null });
-            const st = useStore.getState();
-            if (st.repoRoot !== repoRoot) return;
-            st.setWorktrees([...st.worktrees.filter((w) => w.id !== created.id), created]);
-            st.setActiveWorktree(created.id);
-            try {
-              const fresh = await invoke<Worktree[]>("worktree_list", { repoRoot });
-              const cur = useStore.getState();
-              if (cur.repoRoot === repoRoot && fresh.some((w) => w.id === created.id)) {
-                cur.setWorktrees(fresh);
-                cur.setActiveWorktree(created.id);
-              }
-            } catch {
-              /* keep the optimistic row if the follow-up list fails */
-            }
-          })().catch((e) => errorDialog(`${e}`));
+          if (activeWt) void pushWorktree(activeWt.path);
         },
       });
     }
-    if (match("split terminal right columns")) {
+    if (proj?.isGit && match("fetch pull download remote prune")) {
       out.push({
-        id: "cmd:split-h",
-        label: "Split terminal right",
-        hint: "Ctrl+Shift+D",
-        group: "Commands",
-        icon: <Columns2 size={14} strokeWidth={2} className="text-ink-400" />,
+        id: "git:fetch",
+        label: "Fetch and prune",
+        hint: "git fetch",
+        group: "Git",
+        icon: <Download size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
-          const st = useStore.getState();
-          if (st.activePaneId) st.splitPane(st.activePaneId, "h");
+          if (activeWt) void fetchWorktree(activeWt.path);
         },
       });
     }
-    if (match("split terminal down rows")) {
+    if (proj?.isGit && match("commit stage all message")) {
       out.push({
-        id: "cmd:split-v",
-        label: "Split terminal down",
-        group: "Commands",
-        icon: <Rows2 size={14} strokeWidth={2} className="text-ink-400" />,
+        id: "git:commit",
+        label: "Commit staged changes",
+        hint: "type a message in the sidebar",
+        group: "Git",
+        icon: <GitBranch size={14} strokeWidth={2} className="text-ink-400" />,
+        action: () => {
+          // No message to ask for here: the sidebar's field is the one place a
+          // commit message is typed, so this reveals it instead of guessing.
+          if (!useStore.getState().leftVisible) useStore.getState().toggleLeft();
+          document.querySelector<HTMLInputElement>('[aria-label="Commit message"]')?.focus();
+        },
+      });
+    }
+    if (match("toggle density compact comfortable spacing rows")) {
+      const compact = useStore.getState().settings.density === "compact";
+      out.push({
+        id: "cmd:density",
+        label: compact ? "Use comfortable density" : "Use compact density",
+        hint: "row height and type size",
+        group: "View",
+        icon: <Type size={14} strokeWidth={2} className="text-ink-400" />,
         action: () => {
           const st = useStore.getState();
-          if (st.activePaneId) st.splitPane(st.activePaneId, "v");
+          st.setSettings({ density: compact ? "comfortable" : "compact" });
         },
+      });
+    }
+    if (match("file dock files tree editor bottom panel")) {
+      out.push({
+        id: "cmd:dock",
+        label: "Show / hide the file dock",
+        hint: "Ctrl+J",
+        group: "View",
+        icon: <PanelBottom size={14} strokeWidth={2} className="text-ink-400" />,
+        action: () => useStore.getState().toggleRight(),
+      });
+    }
+    if (match("keyboard shortcuts cheat sheet keys help")) {
+      out.push({
+        id: "cmd:cheatsheet",
+        label: "Keyboard shortcuts",
+        hint: "Ctrl+Shift+?",
+        group: "View",
+        icon: <Keyboard size={14} strokeWidth={2} className="text-ink-400" />,
+        action: () => useStore.getState().setCheatSheetOpen(true),
       });
     }
     if (match("launch agents cli claude codex opencode fan out")) {
@@ -194,14 +239,23 @@ export function Palette() {
         action: () => useStore.getState().setAgentOpen(true),
       });
     }
-    if (match("open settings preferences")) {
+
+    // Every registered shortcut is a row. The palette is therefore the
+    // discoverable face of the keymap: a chord added in keymap.ts shows up
+    // here with its accelerator, and a removed one disappears. The hand-written
+    // commands above are only the ones no binding owns.
+    for (const b of bindings) {
+      // The palette cannot invoke itself, and "worktree 3" is a worse label
+      // than the branch name listed further down.
+      if (b.id === "palette" || /^worktree\.\d$/.test(b.id)) continue;
+      if (!match(`${b.label} ${b.combo} ${b.group}`)) continue;
       out.push({
-        id: "cmd:settings",
-        label: "Open settings",
-        hint: "fonts, scrollback",
-        group: "Commands",
-        icon: <SettingsIcon size={14} strokeWidth={2} className="text-ink-400" />,
-        action: () => useStore.getState().setSettingsOpen(true),
+        id: `key:${b.id}`,
+        label: b.label,
+        hint: prettyCombo(b.combo),
+        group: b.group,
+        icon: GROUP_ICON[b.group] ?? <SettingsIcon size={14} strokeWidth={2} className="text-ink-400" />,
+        action: b.run,
       });
     }
 
@@ -249,9 +303,15 @@ export function Palette() {
         });
       }
     }
-    return out.slice(0, 40);
+    // Group order, stable inside a group so ranking survives.
+    const rank = (g: string) => {
+      const i = GROUP_ORDER.indexOf(g);
+      return i === -1 ? GROUP_ORDER.length : i;
+    };
+    out.sort((a, b) => rank(a.group) - rank(b.group));
+    return out.slice(0, 60);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, worktrees, files, repoRoot, setActiveWorktree, projects, proj?.isGit]);
+  }, [query, worktrees, files, repoRoot, setActiveWorktree, projects, proj?.isGit, bindings]);
 
   useEffect(() => {
     listRef.current
@@ -278,18 +338,17 @@ export function Palette() {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="w-[560px] max-w-[92vw] overflow-hidden rounded-xl shadow-pop"
-        style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
+        className="gm-dialog w-[560px] max-w-[92vw]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 px-4" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
+        <div className="gm-rule flex items-center gap-2 px-4">
           <input
             role="combobox"
             aria-expanded="true"
             aria-controls="gm-palette-list"
             aria-activedescendant={items[selected] ? `gm-palette-opt-${selected}` : undefined}
             aria-label="Search commands, projects, worktrees, and files"
-            className="w-full bg-transparent py-3.5 text-[13.5px] text-ink-100 outline-none placeholder:text-ink-400"
+            className="w-full bg-transparent py-3.5 text-strong text-ink-100 outline-none placeholder:text-ink-400"
             placeholder="Type a command, project, worktree, or file"
             value={query}
             onChange={(e) => {
@@ -319,7 +378,7 @@ export function Palette() {
           {items.map((item, i) => {
             const header =
               item.group !== lastGroup ? (
-                <div className="px-4 pb-0.5 pt-2 text-[11px] font-semibold uppercase text-ink-500" style={{ letterSpacing: "0.08em" }}>
+                <div className="gm-sect px-4 pb-0.5 pt-2">
                   {item.group}
                 </div>
               ) : null;
@@ -333,7 +392,7 @@ export function Palette() {
                   role="option"
                   aria-selected={i === selected}
                   data-selected={i === selected}
-                  className={`gm-row mx-1.5 flex cursor-pointer items-center gap-2.5 px-2.5 py-2 text-[12.5px] ${
+                  className={`gm-row mx-1.5 flex cursor-pointer items-center gap-2.5 px-2.5 py-2 text-body ${
                     i === selected ? "text-ink-100" : "text-ink-300"
                   }`}
                   onMouseEnter={() => setSelected(i)}
@@ -342,7 +401,7 @@ export function Palette() {
                   <span className="shrink-0">{item.icon}</span>
                   <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
                   {item.hint && (
-                    <span className="tnum max-w-[220px] truncate text-[11px] text-ink-400">{item.hint}</span>
+                    <span className="tnum max-w-[220px] truncate text-meta text-ink-400">{item.hint}</span>
                   )}
                   {i === selected && <CornerDownLeft size={12} className="shrink-0 text-ink-400" />}
                 </div>
@@ -351,15 +410,12 @@ export function Palette() {
           })}
           {items.length === 0 && (
             <div className="px-4 py-6 text-center">
-              <div className="text-[12.5px] font-medium text-ink-300">No matches</div>
-              <div className="mt-0.5 text-[11.5px] text-ink-400">Try a shorter fragment of the name or path.</div>
+              <div className="text-body font-medium text-ink-300">No matches</div>
+              <div className="mt-0.5 text-meta text-ink-400">Try a shorter fragment of the name or path.</div>
             </div>
           )}
         </div>
-        <div
-          className="tnum flex items-center gap-4 px-4 py-2 text-[11px] text-ink-400"
-          style={{ borderTop: "1px solid var(--gm-hairline-soft)" }}
-        >
+        <div className="gm-rule-top tnum flex items-center gap-4 px-4 py-2 text-meta text-ink-400">
           <span className="flex items-center gap-1.5"><span className="gm-kbd flex items-center gap-0.5"><ArrowUp size={10} /><ArrowDown size={10} /></span> navigate</span>
           <span className="flex items-center gap-1.5"><span className="gm-kbd flex items-center gap-0.5"><CornerDownLeft size={10} /></span> open</span>
           <span className="flex-1" />

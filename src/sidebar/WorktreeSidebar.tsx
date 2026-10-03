@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, MoreHorizontal, Search, X, Bell, Settings, FolderPlus, Plus } from "lucide-react";
-// Ledger sidebar: typographic rows with no status dots. Status reads as a word,
-// such as "3" or "clean". Actions sit behind the row's own menu button and the
-// right-click menu. Rows come from WorktreeRow, so the active project, other
-// projects, discovered previews, and sleeping rows all share one shape.
+import { ChevronRight, MoreHorizontal, Search, X, Settings, Plus, Upload, Download } from "lucide-react";
+// Ledger sidebar: one row shape for every worktree, active project or not.
+// Status reads as a colored dot plus a changed-file count; actions sit behind
+// the row's own menu button and the right-click menu. Rows come from
+// WorktreeRow, so live, discovered and sleeping rows never drift apart.
 import { useStore } from "../store";
 import { detectToProject } from "../project";
 import { createSingleFlight } from "../singleFlight";
@@ -16,8 +16,8 @@ import { RowMenu, type MenuItem } from "./RowMenu";
 import { WorktreeRow } from "./WorktreeRow";
 import { parseRemoveGuard, parseRemoveStale } from "./removeGuard";
 import { statusLetter } from "./statusLetter";
-import { useWorktreeStatuses } from "./useWorktreeStatuses";
 import { confirmDialog, errorDialog } from "../dialogs";
+import { commitWorktree, fetchWorktree, pushWorktree } from "../gitOps";
 import { useModalFocus } from "../modalFocus";
 import type { AheadBehind, Project, Worktree } from "../types";
 
@@ -34,6 +34,18 @@ type MenuState =
   | { kind: "row"; x: number; y: number; wt: Worktree; pid?: string }
   | { kind: "project"; x: number; y: number; pid: string };
 
+/** Project initial tile. Decorative: the project name sits right beside it. */
+function ProjectBadge({ name }: { name: string }) {
+  return (
+    <span
+      className="flex h-5 w-5 flex-none items-center justify-center rounded-md bg-[color:var(--gm-selected)] text-meta font-semibold text-ink-300"
+      aria-hidden
+    >
+      {(name.trim().charAt(0) || "?").toUpperCase()}
+    </span>
+  );
+}
+
 export function WorktreeSidebar() {
   // Slices, not the whole store: a bare useStore() re-rendered this panel on
   // every keystroke-driven markPaneDirty anywhere in the app.
@@ -43,6 +55,9 @@ export function WorktreeSidebar() {
   const worktrees = useStore((s) => s.worktrees);
   const worktreesByProject = useStore((s) => s.worktreesByProject);
   const layouts = useStore((s) => s.layouts);
+  const statuses = useStore((s) => s.statuses);
+  const statusLoaded = useStore((s) => s.statusesLoaded);
+  const aheadBehind = useStore((s) => s.aheadBehind);
   const activeWorktreeId = useStore((s) => s.activeWorktreeId);
   const setActiveWorktree = useStore((s) => s.setActiveWorktree);
   const openProjectWorktree = useStore((s) => s.openProjectWorktree);
@@ -112,10 +127,12 @@ export function WorktreeSidebar() {
   const createDialogRef = useModalFocus<HTMLDivElement>(creatingPid != null);
   const [branches, setBranches] = useState<string[]>([]);
   const [pending, setPending] = useState<string | null>(null);
-  const [tab, setTab] = useState<"worktrees" | "changes">("worktrees");
   const [settledOpen, setSettledOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // Git state is a section under the list, not a peer tab, so it opens by
+  // default: whether the branch is dirty is a fact, not a lookup.
+  const [changesOpen, setChangesOpen] = useState(true);
   // Projects default open/closed based on active state. Persisted so the list
   // stays calm. Active project defaults open; others default collapsed.
   const [projOpen, setProjOpen] = useState<Record<string, boolean>>(() =>
@@ -187,17 +204,14 @@ export function WorktreeSidebar() {
 
   const proj: Project | null = projects.find((p) => p.id === activeProjectId) ?? null;
   const isGit = proj?.isGit ?? false;
-  // Must run before any conditional return and after isGit exists: `empty` is
-  // not `clean`, so the panel needs to know whether status has landed.
-  const { statuses, loaded: statusLoaded } = useWorktreeStatuses(repoRoot, isGit);
 
   // Ahead/behind vs upstream (or main): read once per repo, not on the 8s
   // status tick — it only moves on commit/push/fetch/merge. Unknown rows
   // stay badge-less rather than claiming 0.
-  const [aheadBehind, setAheadBehind] = useState<Record<string, AheadBehind>>({});
   const aheadRequestRef = useRef(0);
   const [gitBusy, setGitBusy] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
+  const setAheadBehind = useStore((s) => s.setAheadBehind);
   const refreshAheadBehind = async () => {
     const request = ++aheadRequestRef.current;
     const st = useStore.getState();
@@ -220,7 +234,7 @@ export function WorktreeSidebar() {
         /* unreadable row: leave it badge-less */
       }
     }
-    if (current()) setAheadBehind((prev) => ({ ...prev, ...next }));
+    if (current()) setAheadBehind({ ...aheadBehind, ...next });
   };
 
   useEffect(() => {
@@ -242,26 +256,16 @@ export function WorktreeSidebar() {
 
   const pushPath = async (path: string) => {
     setGitBusy(`push:${path}`);
-    try {
-      await invoke("git_push", { path });
-      await refreshAheadBehind();
-    } catch (e) {
-      void errorDialog(`push failed: ${e}`);
-    } finally {
-      setGitBusy(null);
-    }
+    await pushWorktree(path);
+    await refreshAheadBehind();
+    setGitBusy(null);
   };
 
   const fetchPath = async (path: string) => {
     setGitBusy(`fetch:${path}`);
-    try {
-      await invoke("git_fetch", { path });
-      await refreshAheadBehind();
-    } catch (e) {
-      void errorDialog(`fetch failed: ${e}`);
-    } finally {
-      setGitBusy(null);
-    }
+    await fetchWorktree(path);
+    await refreshAheadBehind();
+    setGitBusy(null);
   };
 
   const commitActive = async () => {
@@ -269,15 +273,9 @@ export function WorktreeSidebar() {
     const msg = commitMsg.trim();
     if (!wt || !msg) return;
     setGitBusy(`commit:${wt.id}`);
-    try {
-      await invoke("git_commit", { path: wt.path, message: msg, stageAll: true });
-      setCommitMsg("");
-      await refreshAheadBehind();
-    } catch (e) {
-      void errorDialog(`commit failed: ${e}`);
-    } finally {
-      setGitBusy(null);
-    }
+    if (await commitWorktree(wt.path, msg)) setCommitMsg("");
+    await refreshAheadBehind();
+    setGitBusy(null);
   };
 
   // `immediate` skips the deferral below, because an explicit user action such
@@ -365,6 +363,13 @@ export function WorktreeSidebar() {
       setBranches([]);
     }
   };
+
+  // The tab strip's + and the palette both ask for the form this component
+  // owns, so the branch fetch and dialog live in exactly one place.
+  const newWorktreeRequest = useStore((s) => s.newWorktreeRequest);
+  useEffect(() => {
+    if (newWorktreeRequest > 0 && activeProjectId) void openCreate(activeProjectId);
+  }, [newWorktreeRequest]);
 
   const create = async (pid: string, values: { name: string; base: string }) => {
     const st0 = useStore.getState();
@@ -581,19 +586,17 @@ export function WorktreeSidebar() {
 
   const openProject = async () => {
     try {
-      const raw = await open({ directory: true, multiple: false });
+      const raw = await open({ directory: true, multiple: false, title: "Add project" });
       if (!raw) return;
       const path = Array.isArray(raw) ? raw[0] : raw;
-      const p = await detectToProject(path);
-      useStore.getState().addProject(p);
-    } catch {
-      /* dialog cancelled or failed */
+      useStore.getState().addProject(await detectToProject(path));
+    } catch (e) {
+      void errorDialog(String(e));
     }
   };
 
   const activeWt = worktrees.find((w) => w.id === activeWorktreeId);
   const activeStatuses = activeWt ? statuses[activeWt.id] ?? [] : [];
-  const totalDirty = Object.values(statuses).reduce((a, l) => a + l.length, 0);
   const nowS = Math.floor(Date.now() / 1000);
   const isStale = (wt: Worktree) =>
     !wt.id.startsWith("plain:") &&
@@ -816,10 +819,7 @@ export function WorktreeSidebar() {
   );
 
   return (
-    <div
-      className="relative flex h-full shrink-0 flex-col bg-ink-900"
-      style={{ width, borderRight: "1px solid var(--gm-hairline-soft)" }}
-    >
+    <div className="gm-divider-r relative flex h-full shrink-0 flex-col bg-surface-panel" style={{ width }}>
       <div
         className="group absolute bottom-0 right-[-2.5px] top-0 z-20 w-[5px] cursor-col-resize"
         onMouseDown={onResizeDown}
@@ -836,16 +836,17 @@ export function WorktreeSidebar() {
         />
       </div>
 
-      {/* header: the panel's only heading, plus its total */}
+      {/* header: the panel's only heading, plus its controls */}
       <div className="flex items-center justify-between px-4 pb-1 pt-3">
         <span className="gm-sect">Projects</span>
         <div className="flex items-center gap-0.5">
           <button
             className="gm-icon-btn gm-icon-btn--sm"
-            title="Notifications"
-            aria-label="Notifications"
+            title="Add project"
+            aria-label="Add project"
+            onClick={() => void openProject()}
           >
-            <Bell size={14} strokeWidth={2} />
+            <Plus size={14} strokeWidth={2} />
           </button>
           <button
             className="gm-icon-btn gm-icon-btn--sm"
@@ -855,34 +856,18 @@ export function WorktreeSidebar() {
           >
             <Settings size={14} strokeWidth={2} />
           </button>
-          <button
-            className="gm-icon-btn gm-icon-btn--sm"
-            title="Open folder"
-            aria-label="Open folder"
-            onClick={() => void openProject()}
-          >
-            <FolderPlus size={14} strokeWidth={2} />
-          </button>
-          <button
-            className="gm-icon-btn gm-icon-btn--sm"
-            title="Add project"
-            aria-label="Add project"
-            onClick={() => void openProject()}
-          >
-            <Plus size={14} strokeWidth={2} />
-          </button>
         </div>
       </div>
 
       {/* filter: underline, not a box */}
-      <div className="mx-4 flex items-center gap-1.5" style={{ borderBottom: "1px solid var(--gm-hairline-soft)" }}>
+      <div className="gm-rule mx-4 flex items-center gap-1.5">
         <Search size={13} strokeWidth={2} className="shrink-0 text-ink-500" />
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={isGit ? "Filter branches and paths" : "Filter"}
           aria-label="Filter worktrees"
-          className="w-full bg-transparent py-2 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
+          className="w-full bg-transparent py-2 text-body text-ink-100 outline-none placeholder:text-ink-500"
         />
         {query && (
           <button
@@ -896,29 +881,16 @@ export function WorktreeSidebar() {
         )}
       </div>
 
-      {/* tabs: active reads through weight + color only */}
-      <div className="flex items-center gap-4 px-4 pb-0.5 pt-2">
-        <button className="gm-tab" data-active={tab === "worktrees"} onClick={() => setTab("worktrees")}>
-          Worktrees
-        </button>
-        {isGit && (
-          <button className="gm-tab tnum" data-active={tab === "changes"} onClick={() => setTab("changes")}>
-            Changes{totalDirty > 0 ? ` · ${totalDirty}` : ""}
-          </button>
-        )}
-      </div>
-
-      {tab === "worktrees" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-1.5">
           {!proj && (
             <div className="px-3 py-8 text-center">
-              <div className="text-[12px] text-ink-300">No projects yet.</div>
+              <div className="text-body text-ink-300">No projects yet.</div>
               <div className="gm-meta mt-1">Open a folder or repository from the switcher above.</div>
             </div>
           )}
 
           {pending && (
-            <div className="flex items-center gap-2 rounded-md px-2.5 py-2 text-[12px] text-ink-400">
+            <div className="flex items-center gap-2 rounded-md px-2.5 py-2 text-body text-ink-400">
               <span
                 className="h-3 w-3 shrink-0 animate-spin rounded-full"
                 style={{ border: "2px solid var(--gm-hairline)", borderTopColor: "var(--gm-ink-mute)" }}
@@ -962,14 +934,8 @@ export function WorktreeSidebar() {
                     strokeWidth={2}
                     className={`shrink-0 text-ink-500 transition-transform ${open ? "rotate-90" : ""}`}
                   />
-                  <span
-                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
-                    style={{ background: "rgba(255,255,255,0.06)" }}
-                    aria-hidden
-                  >
-                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink-100">
+                  <ProjectBadge name={p.name} />
+                  <span className="min-w-0 flex-1 truncate text-body font-semibold text-ink-100">
                     {p.name}
                   </span>
                   <span className="tnum gm-meta flex-none">{visible.length}</span>
@@ -1018,20 +984,14 @@ export function WorktreeSidebar() {
             return (
               <div key={p.id} className="mt-1">
                 <div
-                  className="group/proj flex items-center gap-2 px-2.5 pb-1 pt-2 text-[12.5px] font-semibold text-ink-100"
+                  className="group/proj flex items-center gap-2 px-2.5 pb-1 pt-2 text-body font-semibold text-ink-100"
                   title={p.path}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ kind: "project", x: e.clientX, y: e.clientY, pid: p.id });
                   }}
                 >
-                  <span
-                    className="flex h-5 w-5 flex-none items-center justify-center rounded-md text-[11px] font-semibold text-ink-300"
-                    style={{ background: "rgba(255,255,255,0.06)" }}
-                    aria-hidden
-                  >
-                    {(p.name.trim().charAt(0) || "?").toUpperCase()}
-                  </span>
+                  <ProjectBadge name={p.name} />
                   <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   <span className="tnum gm-meta flex-none font-normal">· {rows.length}</span>
                   {newWorktreeBtn(p)}
@@ -1043,7 +1003,7 @@ export function WorktreeSidebar() {
           })}
 
           {q && allProjects.every((p) => projRows(p).filter(matches).length === 0) && (
-            <div className="px-2.5 py-4 text-center text-[12px] text-ink-400">No worktrees match.</div>
+            <div className="px-2.5 py-4 text-center text-body text-ink-400">No worktrees match.</div>
           )}
           {!q && isGit && allProjects.some((p) => p.id === activeProjectId) && shownLive.length === 0 && (
             <div className="gm-meta px-2.5 py-3 leading-5">
@@ -1080,106 +1040,132 @@ export function WorktreeSidebar() {
                 ))}
             </div>
           )}
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-          {isGit && activeWt && (
-            <div className="px-2.5 pb-1 pt-1 text-[12.5px] font-semibold text-ink-100">
-              {activeWt.branch}{" "}
-              <span className="font-normal text-ink-500">
-                {!statusLoaded
-                  ? "· reading status…"
-                  : activeStatuses.length === 0
-                    ? "is clean."
-                    : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
-                {(() => {
-                  const ab = aheadBehind[activeWt.id];
-                  if (!ab || (ab.ahead === 0 && ab.behind === 0)) return "";
-                  return ` · ${ab.ahead > 0 ? `↑${ab.ahead}` : ""}${ab.ahead > 0 && ab.behind > 0 ? " " : ""}${ab.behind > 0 ? `↓${ab.behind}` : ""}`;
-                })()}
+      </div>
+
+      {/* Git state stays put below the list: it used to hide behind a second
+          tab, which meant never knowing whether the branch was dirty. */}
+      {isGit && (
+        <div className="flex max-h-[55%] shrink-0 flex-col border-t border-[color:var(--gm-hairline-soft)]">
+          <button
+            className="gm-rule flex items-center gap-2 px-4 py-1.5 text-left"
+            onClick={() => setChangesOpen((o) => !o)}
+            aria-expanded={changesOpen}
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={2}
+              className={`shrink-0 text-ink-500 transition-transform ${changesOpen ? "rotate-90" : ""}`}
+            />
+            <span className="gm-sect">Changes</span>
+            {/* Badge counts what the section lists: the active worktree, not
+                the repo, so a dirty side branch never lies about this branch. */}
+            {activeStatuses.length > 0 && (
+              <span className="tnum text-meta font-semibold text-[color:var(--gm-amber)]">
+                {activeStatuses.length}
               </span>
+            )}
+          </button>
+          {changesOpen && (
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+              {!activeWt ? (
+                <div className="gm-meta px-2.5 py-2">No active worktree.</div>
+              ) : (
+                <>
+                  <div className="px-2.5 pb-1 pt-1 text-body font-semibold text-ink-100">
+                    {activeWt.branch}{" "}
+                    <span className="font-normal text-ink-500">
+                      {!statusLoaded
+                        ? "· reading status…"
+                        : activeStatuses.length === 0
+                          ? "is clean."
+                          : `has ${activeStatuses.length} changed ${activeStatuses.length === 1 ? "file" : "files"}.`}
+                      {(() => {
+                        const ab = aheadBehind[activeWt.id];
+                        if (!ab || (ab.ahead === 0 && ab.behind === 0)) return "";
+                        return ` · ${ab.ahead > 0 ? `↑${ab.ahead}` : ""}${ab.ahead > 0 && ab.behind > 0 ? " " : ""}${ab.behind > 0 ? `↓${ab.behind}` : ""}`;
+                      })()}
+                    </span>
+                  </div>
+                  {/* Two rows: a 240px sidebar cannot hold a message field and
+                      three labels side by side, and the message is the long one. */}
+                  <div className="px-2.5 pt-1.5">
+                    <input
+                      value={commitMsg}
+                      onChange={(e) => setCommitMsg(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void commitActive();
+                      }}
+                      placeholder="Commit message — stages all"
+                      aria-label="Commit message"
+                      className="gm-field mono px-1.5 py-1"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+                    <button
+                      title="Stage all and commit (Enter)"
+                      disabled={!commitMsg.trim() || gitBusy != null}
+                      className="gm-btn min-w-0 flex-1 justify-center py-1 text-body"
+                      onClick={() => void commitActive()}
+                    >
+                      {gitBusy?.startsWith("commit:") ? "Committing…" : "Commit all"}
+                    </button>
+                    <button
+                      title="Push current branch"
+                      aria-label="Push current branch"
+                      disabled={gitBusy != null}
+                      className="gm-icon-btn shrink-0"
+                      onClick={() => void pushPath(activeWt.path)}
+                    >
+                      <Upload size={14} strokeWidth={2} />
+                    </button>
+                    <button
+                      title="Fetch and prune"
+                      aria-label="Fetch and prune"
+                      disabled={gitBusy != null}
+                      className="gm-icon-btn shrink-0"
+                      onClick={() => void fetchPath(activeWt.path)}
+                    >
+                      <Download size={14} strokeWidth={2} />
+                    </button>
+                  </div>
+                  {activeStatuses.map((s) => {
+                    const g = statusLetter(s);
+                    return (
+                      <div
+                        key={s.path}
+                        role="button"
+                        tabIndex={0}
+                        className="gm-row flex cursor-pointer items-baseline gap-2 px-2.5 py-[5px]"
+                        onClick={() => openEditor(`${activeWt.path}/${s.path}`, true)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openEditor(`${activeWt.path}/${s.path}`, true);
+                          }
+                        }}
+                        title={`${s.path} (${g.label})`}
+                      >
+                        <span
+                          className="mono w-3 flex-none text-center text-meta font-bold"
+                          style={{ color: g.color }}
+                          aria-hidden
+                        >
+                          {g.letter}
+                        </span>
+                        <span className="mono min-w-0 flex-1 truncate text-body text-ink-200">{s.path}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
           )}
-          {isGit && activeWt && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1.5">
-              <input
-                value={commitMsg}
-                onChange={(e) => setCommitMsg(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void commitActive();
-                }}
-                placeholder="Commit message — stages all"
-                aria-label="Commit message"
-                className="mono min-w-0 flex-1 rounded border bg-ink-950 px-1.5 py-1 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
-                style={{ borderColor: "var(--gm-hairline)" }}
-              />
-              <button
-                title="Stage all and commit"
-                disabled={!commitMsg.trim() || gitBusy != null}
-                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-40"
-                style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
-                onClick={() => void commitActive()}
-              >
-                {gitBusy?.startsWith("commit:") ? "…" : "Commit"}
-              </button>
-              <button
-                title="Push current branch"
-                disabled={gitBusy != null}
-                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
-                onClick={() => void pushPath(activeWt.path)}
-              >
-                {gitBusy?.startsWith("push:") ? "…" : "Push"}
-              </button>
-              <button
-                title="Fetch and prune"
-                disabled={gitBusy != null}
-                className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-ink-300 hover:text-ink-100 disabled:opacity-40"
-                onClick={() => void fetchPath(activeWt.path)}
-              >
-                {gitBusy?.startsWith("fetch:") ? "…" : "Fetch"}
-              </button>
-            </div>
-          )}
-          {isGit && !activeWt && <div className="gm-meta px-2.5 py-2">No active worktree.</div>}
-          {isGit &&
-            activeStatuses.map((s) => {
-              const g = statusLetter(s);
-              const open = () => openEditor(`${activeWt!.path}/${s.path}`, true);
-              return (
-                <div
-                  key={s.path}
-                  role="button"
-                  tabIndex={0}
-                  className="gm-row flex cursor-pointer items-baseline gap-2 px-2.5 py-[5px]"
-                  onClick={open}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      open();
-                    }
-                  }}
-                  title={`${s.path} (${g.label})`}
-                >
-                  <span
-                    className="mono w-3 flex-none text-center text-[11px] font-bold"
-                    style={{ color: g.color }}
-                    aria-hidden
-                  >
-                    {g.letter}
-                  </span>
-                  <span className="mono min-w-0 flex-1 truncate text-[12px] text-ink-200">{s.path}</span>
-                </div>
-              );
-            })}
         </div>
       )}
 
       {/* new worktree: per-project hover plus opens a modal, not a footer line */}
       {creatingPid && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-          onClick={() => setCreatingPid(null)}
-        >
+        <div className="gm-scrim" onClick={() => setCreatingPid(null)}>
           <div
             ref={createDialogRef}
             className="w-[400px] max-w-full"

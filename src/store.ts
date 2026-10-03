@@ -1,12 +1,23 @@
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { paneEmptiness } from "./terminal/paneEmpty";
-import type { Project, Worktree } from "./types";
-import { DEFAULT_SETTINGS, type Settings } from "./types";
+import type { FileStatus, Project, Worktree } from "./types";
+import { DEFAULT_SETTINGS, type AheadBehind, type Settings } from "./types";
 import { pathStartsRoot } from "./path";
+import { PREF, boolPref, readPref, writePref } from "./uiPrefs";
 
 // ---- Pane tree model -------------------------------------------------------
 // Binary split tree. Each leaf = one terminal pane.
+
+/**
+ * What a pane's label actually is.
+ *
+ * `title` came from the terminal, `name`/`paired` from a conversation name on
+ * disk (by launch order or as the only candidate), and `prompt` is the user's
+ * own last prompt standing in until the agent names the session. A prompt is
+ * not a name, and the header has to be able to say which one it is showing.
+ */
+export type SessionKind = "title" | "name" | "paired" | "prompt";
 
 export interface Pane {
   kind: "pane";
@@ -14,6 +25,24 @@ export interface Pane {
   ptyId: number | null;
   cwd?: string | null; // last known shell cwd (OSC 7); splits inherit it
   initCmd?: string | null; // typed once into a freshly spawned shell (agent launch)
+  /** Display name of the agent launched into this pane, or null for a shell. */
+  agent?: string | null;
+  /** Executable the agent runs as (`claude`, `codex`, ...). The transcript
+   *  fallback is per-agent, so the pane must say which one it is. */
+  agentBin?: string | null;
+  /** When the agent was launched here, ms since epoch. Bounds the transcript
+   *  search to this pane and not the session before it. */
+  agentSince?: number | null;
+  /** Conversation name the agent reported through the terminal title. Cleared
+   *  on restore: the agent re-sends it on start, and a stale name is worse
+   *  than none. */
+  session?: string | null;
+  /** File `session` was read out of, shown in the pane tooltip because a name
+   *  scraped off disk deserves to say so. */
+  sessionFrom?: string | null;
+  /** What `session` actually is. A prompt is the user's own words standing in
+   *  for a name the agent has not chosen yet, and the header says so. */
+  sessionKind?: SessionKind | null;
   dirty?: boolean; // first user keystroke or agent assignment; clean = fresh shell, safe to reuse
 }
 
@@ -27,6 +56,11 @@ export interface Split {
 }
 
 export type PaneNode = Pane | Split;
+
+/** Tiles per worktree, and tiles one agent may claim. The launcher reads both
+ *  so its capacity meter cannot promise room that launchAgents will refuse. */
+export const MAX_TILES_PER_WORKTREE = 12;
+export const MAX_AGENT_TILES = 6;
 
 let counter = 0;
 export const nextId = () => `n${++counter}-${Date.now().toString(36)}`;
@@ -56,7 +90,23 @@ function syncIdCounter(layouts: Record<string, PaneNode>, extraId: string | null
 // dead pty id or re-fire a queued agent command.
 function cleanRestoredNode(node: PaneNode): PaneNode {
   if (node.kind === "pane") {
-    return { kind: "pane", id: node.id, ptyId: null, cwd: node.cwd ?? null, initCmd: null };
+    // `agent` survives a restart so the pane header still says who runs in it;
+    // `session` does not, because the agent re-announces it on start.
+    return {
+      kind: "pane",
+      id: node.id,
+      ptyId: null,
+      cwd: node.cwd ?? null,
+      initCmd: null,
+      agent: node.agent ?? null,
+      agentBin: node.agentBin ?? null,
+      // Deliberately dropped: after a restart every transcript is older than
+      // the new launch, and a stale floor would match nothing forever.
+      agentSince: null,
+      session: null,
+      sessionFrom: null,
+      sessionKind: null,
+    };
   }
   return {
     ...node,
@@ -67,12 +117,23 @@ function cleanRestoredNode(node: PaneNode): PaneNode {
   };
 }
 
-function readVis(key: string): boolean {
-  try {
-    return localStorage.getItem(key) !== "0";
-  } catch {
-    return true;
-  }
+/** Update one leaf of the active tree and mirror it into the layout cache.
+ *  Every pane-field write goes through here, so a new field cannot forget the
+ *  cache sync that `TerminalPane`'s switch-safe cleanup depends on. */
+function patchActivePane(
+  set: StoreApi<AppState>["setState"],
+  paneId: string,
+  update: (pane: Pane) => Pane,
+) {
+  set((s) => {
+    if (!s.layout || !s.activeWorktreeId) return {};
+    const patch = (node: PaneNode): PaneNode => {
+      if (node.kind === "pane") return node.id === paneId ? update(node) : node;
+      return { ...node, first: patch(node.first), second: patch(node.second) };
+    };
+    const layout = patch(s.layout);
+    return { layout, layouts: { ...s.layouts, [s.activeWorktreeId]: layout } };
+  });
 }
 
 function collectPanes(node: PaneNode, out: string[] = []): string[] {
@@ -154,7 +215,9 @@ function tileAgents(panes: Pane[]): PaneNode {
   return node;
 }
 
-function collectPaneObjs(node: PaneNode, out: Pane[] = []): Pane[] {
+/** Panes of a layout in tree order, which is the order a fan-out launches them. */
+export function collectPaneObjs(node: PaneNode | null, out: Pane[] = []): Pane[] {
+  if (!node) return out;
   if (node.kind === "pane") out.push(node);
   else {
     collectPaneObjs(node.first, out);
@@ -191,6 +254,14 @@ interface AppState {
   worktreesByProject: Record<string, Worktree[]>;
   activeWorktreeId: string | null;
   worktreeLoading: boolean;
+  /** Porcelain entries by worktree id, polled by App. Both the sidebar rows
+   *  and the worktree tab strip read this, so the poll runs exactly once. */
+  statuses: Record<string, FileStatus[]>;
+  /** False until a pass has landed: an empty list is not "clean". */
+  statusesLoaded: boolean;
+  /** Ahead/behind vs upstream (or main), read once per repo rather than per
+   *  status tick — it only moves on commit/push/fetch/merge. */
+  aheadBehind: Record<string, { ahead: number; behind: number }>;
 
   // layout
   layout: PaneNode | null; // per active worktree; simplified: one layout, reset on switch
@@ -209,9 +280,20 @@ interface AppState {
   editorTabs: string[];
   diffMode: boolean;
   editorDirtyCount: number;
+  /** Line a search hit asked the editor to scroll to; cleared once applied. */
+  editorReveal: number | null;
 
   // palette
   paletteOpen: boolean;
+
+  /** Keyboard shortcut reference, generated from the same binding list the
+   *  dispatcher uses, so the sheet can never document a stale chord. */
+  cheatSheetOpen: boolean;
+
+  /** Bumped by chrome that wants the sidebar's new-worktree form. The form
+   *  and its branch fetch live in the sidebar, so other surfaces ask instead
+   *  of duplicating them. */
+  newWorktreeRequest: number;
 
   // settings
   settings: Settings;
@@ -225,6 +307,8 @@ interface AppState {
   setActiveProject: (id: string) => void;
   setRepoRoot: (root: string) => void;
   setWorktrees: (wts: Worktree[]) => void;
+  setStatuses: (statuses: Record<string, FileStatus[]>, loaded: boolean) => void;
+  setAheadBehind: (aheadBehind: Record<string, AheadBehind>) => void;
   setProjectWorktrees: (projectId: string, wts: Worktree[]) => void;
   setActiveWorktree: (id: string) => void;
   // Jump to any project's worktree in one step (sidebar lists every project).
@@ -234,22 +318,26 @@ interface AppState {
   splitPane: (paneId: string, direction: "h" | "v") => void;
   closePane: (paneId: string) => void;
   toggleMaximizePane: (paneId: string) => void;
-  launchAgents: (items: { command: string; count: number }[]) => number;
+  launchAgents: (items: { command: string; count: number; label?: string }[]) => number;
   dropWorktreeLayout: (id: string) => number[];
   setActivePane: (paneId: string) => void;
   setPtyId: (paneId: string, ptyId: number) => void;
   setPaneCwd: (paneId: string, cwd: string | null) => void;
+  setPaneSession: (paneId: string, session: string | null, from?: string | null, kind?: SessionKind | null) => void;
   markPaneDirty: (paneId: string) => void;
   markPaneClean: (paneId: string) => void;
   clearInitCmd: (paneId: string) => void;
   setAgentOpen: (open: boolean) => void;
   toggleLeft: () => void;
   toggleRight: () => void;
-  openEditor: (path: string | null, diff?: boolean) => void;
+  openEditor: (path: string | null, diff?: boolean, revealLine?: number) => void;
+  consumeReveal: () => void;
   closeEditor: (path?: string | null) => void;
   setEditorTabs: (tabs: string[]) => void;
   setEditorDirtyCount: (count: number) => void;
   setPaletteOpen: (open: boolean) => void;
+  setCheatSheetOpen: (open: boolean) => void;
+  requestNewWorktree: () => void;
   setSettings: (patch: Partial<Settings>) => void;
   hydrateSettings: (s: Settings) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -266,6 +354,9 @@ export const useStore = create<AppState>((set, get) => ({
   worktreesByProject: {},
   activeWorktreeId: null,
   worktreeLoading: false,
+  statuses: {},
+  statusesLoaded: false,
+  aheadBehind: {},
 
   layout: null,
   layouts: {},
@@ -274,16 +365,19 @@ export const useStore = create<AppState>((set, get) => ({
 
 
   agentOpen: false,
-  leftVisible: readVis("guimux-left"),
-  rightVisible: readVis("guimux-right"),
+  leftVisible: readPref(PREF.leftVisible, true, boolPref),
+  rightVisible: readPref(PREF.rightVisible, true, boolPref),
 
   editorOpen: false,
   editorPath: null,
   editorTabs: [],
   diffMode: false,
   editorDirtyCount: 0,
+  editorReveal: null,
 
   paletteOpen: false,
+  cheatSheetOpen: false,
+  newWorktreeRequest: 0,
 
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
@@ -454,6 +548,8 @@ export const useStore = create<AppState>((set, get) => ({
       maximizedPaneId: null,
         });
   },
+  setStatuses: (statuses, loaded) => set({ statuses, statusesLoaded: loaded }),
+  setAheadBehind: (aheadBehind) => set({ aheadBehind }),
   // Background lists for projects not on screen: cached only, never touch
   // the live list or prune anything (the list belongs to another project).
   setProjectWorktrees: (projectId, wts) =>
@@ -605,14 +701,27 @@ export const useStore = create<AppState>((set, get) => ({
     if (!activeWorktreeId) return 0;
     const cur = layouts[activeWorktreeId] ?? layout;
     const existing = cur ? collectPaneObjs(cur) : [];
-    const room = Math.max(0, 12 - existing.length);
+    const room = Math.max(0, MAX_TILES_PER_WORKTREE - existing.length);
     if (room <= 0) return 0;
     const cmds: string[] = [];
+    // The label rides along with each command so the pane header can name the
+    // agent once initCmd has been typed away.
+    const labels: string[] = [];
+    const bins: string[] = [];
+    // One timestamp for the whole batch: every pane in this launch shares a
+    // floor, so the transcript search cannot land on a session from earlier.
+    const since = Date.now();
     for (const item of items) {
       const cmd = item.command.trim();
       if (!cmd) continue;
-      const n = Math.min(6, Math.max(1, Math.floor(item.count) || 1));
-      for (let i = 0; i < n; i++) cmds.push(cmd);
+      const n = Math.min(MAX_AGENT_TILES, Math.max(1, Math.floor(item.count) || 1));
+      const label = item.label?.trim() || cmd.split(/\s+/)[0];
+      const bin = cmd.split(/\s+/)[0].split(/[\\/]/).pop() || cmd.split(/\s+/)[0];
+      for (let i = 0; i < n; i++) {
+        cmds.push(cmd);
+        labels.push(label);
+        bins.push(bin);
+      }
     }
     if (cmds.length === 0) return 0;
     // Empty panes (prompt line only, e.g. fresh `PS D:\x>`) are reused in
@@ -636,7 +745,17 @@ export const useStore = create<AppState>((set, get) => ({
     let cmdIdx = 0;
     const assign = (node: PaneNode): PaneNode => {
       if (node.kind === "pane") {
-        return reuseIds.has(node.id) ? { ...node, initCmd: cmds[cmdIdx++], dirty: true } : node;
+        if (!reuseIds.has(node.id)) return node;
+        const i = cmdIdx++;
+        return {
+          ...node,
+          initCmd: cmds[i],
+          agent: labels[i] ?? null,
+          agentBin: bins[i] ?? null,
+          agentSince: since,
+          session: null,
+          dirty: true,
+        };
       }
       return { ...node, first: assign(node.first), second: assign(node.second) };
     };
@@ -653,7 +772,17 @@ export const useStore = create<AppState>((set, get) => ({
       });
       return reuseCount;
     }
-    const panes: Pane[] = freshCmds.map((cmd) => ({ kind: "pane", id: nextId(), ptyId: null, initCmd: cmd, dirty: true }));
+    const panes: Pane[] = freshCmds.map((cmd, i) => ({
+      kind: "pane",
+      id: nextId(),
+      ptyId: null,
+      initCmd: cmd,
+      agent: labels[reuseCount + i] ?? null,
+      agentBin: bins[reuseCount + i] ?? null,
+      agentSince: since,
+      session: null,
+      dirty: true,
+    }));
     if (!patched) {
       const fresh = tileAgents(panes);
       set({
@@ -681,95 +810,39 @@ export const useStore = create<AppState>((set, get) => ({
     // typing never re-renders the layout.
     const cur = get().layout;
     if (!cur || collectPaneObjs(cur).some((p) => p.id === paneId && p.dirty)) return;
-    set((s) => {
-      if (!s.layout) return {};
-      const patch = (node: PaneNode): PaneNode => {
-        if (node.kind === "pane") {
-          return node.id === paneId ? { ...node, dirty: true } : node;
-        }
-        return { ...node, first: patch(node.first), second: patch(node.second) };
-      };
-      const layout = patch(s.layout);
-      return {
-        layout,
-        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
-      };
-    });
+    patchActivePane(set, paneId, (p) => ({ ...p, dirty: true }));
   },
-  markPaneClean: (paneId) =>
-    set((s) => {
-      if (!s.layout) return {};
-      const patch = (node: PaneNode): PaneNode => {
-        if (node.kind === "pane") {
-          // Fresh shell after restart: reusable. Keeps a queued initCmd so a
-          // held agent launch still fires instead of being dropped.
-          return node.id === paneId ? { ...node, dirty: false } : node;
-        }
-        return { ...node, first: patch(node.first), second: patch(node.second) };
-      };
-      const layout = patch(s.layout);
-      return {
-        layout,
-        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
-      };
-    }),
+  // Fresh shell after restart: reusable. Keeps a queued initCmd so a held
+  // agent launch still fires instead of being dropped.
+  markPaneClean: (paneId) => patchActivePane(set, paneId, (p) => ({ ...p, dirty: false })),
   clearInitCmd: (paneId) =>
-    set((s) => {
-      if (!s.layout) return {};
-      const patch = (node: PaneNode): PaneNode => {
-        if (node.kind === "pane") {
-          return node.id === paneId ? { ...node, initCmd: null } : node;
-        }
-        return { ...node, first: patch(node.first), second: patch(node.second) };
-      };
-      const layout = patch(s.layout);
-      return {
-        layout,
-        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
-      };
-    }),
+    patchActivePane(set, paneId, (p) => (p.initCmd === null ? p : { ...p, initCmd: null })),
   setActivePane: (paneId) => set({ activePaneId: paneId }),
   setPtyId: (paneId, ptyId) =>
-    set((s) => {
-      if (!s.layout) return {};
-      const patch = (node: PaneNode): PaneNode => {
-        if (node.kind === "pane") {
-          return node.id === paneId ? { ...node, ptyId } : node;
-        }
-        return { ...node, first: patch(node.first), second: patch(node.second) };
-      };
-      const layout = patch(s.layout);
-      return {
-        layout,
-        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
-      };
-    }),
+    patchActivePane(set, paneId, (p) => (p.ptyId === ptyId ? p : { ...p, ptyId })),
+  // Called on every OSC 7 prompt: skip the rebuild when the cwd is unchanged.
   setPaneCwd: (paneId, cwd) =>
-    set((s) => {
-      if (!s.layout) return {};
-      // The shell reports its cwd on every prompt (OSC 7); without this guard
-      // each prompt rebuilt the pane tree and re-ran App's persist effect.
-      const existing = collectPaneObjs(s.layout).find((p) => p.id === paneId);
-      if (!existing || existing.cwd === cwd) return {};
-      const patch = (node: PaneNode): PaneNode => {
-        if (node.kind === "pane") {
-          return node.id === paneId ? { ...node, cwd } : node;
-        }
-        return { ...node, first: patch(node.first), second: patch(node.second) };
-      };
-      const layout = patch(s.layout);
-      return {
-        layout,
-        layouts: { ...s.layouts, [s.activeWorktreeId!]: layout },
-      };
-    }),
-  openEditor: (path, diff = false) =>
+    patchActivePane(set, paneId, (p) => (p.cwd === cwd ? p : { ...p, cwd })),
+  // Same no-op guard as cwd: a title arrives on every prompt, and re-rendering
+  // the tree on an unchanged value would repaint the whole header constantly.
+  setPaneSession: (paneId, session, from = null, kind = null) =>
+    patchActivePane(set, paneId, (p) =>
+      p.session === session && p.sessionFrom === from && p.sessionKind === kind
+        ? p
+        : { ...p, session, sessionFrom: from, sessionKind: kind },
+    ),
+  openEditor: (path, diff = false, revealLine) =>
     set((s) => ({
       editorOpen: true,
       editorPath: path,
       editorTabs: path ? [...s.editorTabs.filter((t) => t !== path), path].slice(-10) : s.editorTabs,
       diffMode: diff,
+      editorReveal: revealLine ?? null,
+      // Opening a file with the dock collapsed used to look like nothing
+      // happened, so the request now reveals the surface that answers it.
+      rightVisible: path ? true : s.rightVisible,
     })),
+  consumeReveal: () => set({ editorReveal: null }),
   // No arg closes the active tab; a path closes that tab, activating the
   // most recent survivor. Last tab out closes the editor.
   closeEditor: (path) =>
@@ -787,33 +860,29 @@ export const useStore = create<AppState>((set, get) => ({
   setEditorTabs: (tabs) =>
     set((s) => {
       const kept = tabs.filter((t, i) => tabs.indexOf(t) === i).slice(-10);
-      if (kept.length === 0) return { editorOpen: false, editorPath: null, editorTabs: kept };
+      if (kept.length === 0) return { editorOpen: false, editorPath: null, editorTabs: kept, editorReveal: null };
       const active = s.editorPath && kept.includes(s.editorPath) ? s.editorPath : kept[kept.length - 1];
       return { editorPath: active, editorTabs: kept };
     }),
   setEditorDirtyCount: (count) => set({ editorDirtyCount: Math.max(0, Math.floor(count)) }),
   setPaletteOpen: (open) => set({ paletteOpen: open }),
+  setCheatSheetOpen: (open) => set({ cheatSheetOpen: open }),
+  requestNewWorktree: () => set((s) => ({ newWorktreeRequest: s.newWorktreeRequest + 1 })),
   setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   hydrateSettings: (s) => set({ settings: { ...DEFAULT_SETTINGS, ...s } }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setAgentOpen: (open) => set({ agentOpen: open }),
   toggleLeft: () =>
     set((s) => {
-      try {
-        localStorage.setItem("guimux-left", s.leftVisible ? "0" : "1");
-      } catch {
-        /* private mode */
-      }
-      return { leftVisible: !s.leftVisible };
+      const next = !s.leftVisible;
+      writePref(PREF.leftVisible, next);
+      return { leftVisible: next };
     }),
   toggleRight: () =>
     set((s) => {
-      try {
-        localStorage.setItem("guimux-right", s.rightVisible ? "0" : "1");
-      } catch {
-        /* private mode */
-      }
-      return { rightVisible: !s.rightVisible };
+      const next = !s.rightVisible;
+      writePref(PREF.rightVisible, next);
+      return { rightVisible: next };
     }),
 }));
 

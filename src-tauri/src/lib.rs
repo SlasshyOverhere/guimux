@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+pub mod agent_session;
 pub mod conpty_dll;
 pub mod fs;
 pub mod git;
@@ -55,6 +56,7 @@ pub fn run() {
             fs::fs_reveal,
             fs::fs_watch,
             fs::grep_search,
+            agent_session::agent_session_titles,
             pty::pty_spawn,
             pty::pty_attach,
             pty::pty_detach,

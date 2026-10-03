@@ -2,7 +2,7 @@ import type { KeyboardEvent, MouseEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
 import type { AheadBehind, FileStatus, Worktree } from "../types";
 
-// One row shape for every worktree in the panel: selected rail, branch line,
+// One row shape for every worktree in the panel: selected card, branch line,
 // status cluster, and a hover actions button. A context menu alone leaves the
 // actions unreachable without a mouse.
 
@@ -87,20 +87,20 @@ export function WorktreeRow({
           title={!known ? "Status not read yet" : dirty > 0 ? `${dirty} changed ${dirty === 1 ? "file" : "files"}` : "Clean"}
         />
         <span
-          className={`min-w-0 flex-1 truncate text-[13px] font-medium ${
+          className={`min-w-0 flex-1 truncate text-strong font-medium ${
             selected ? "text-ink-100" : "text-ink-200"
           }`}
         >
           {wt.branch}
         </span>
         {dirty > 0 && (
-          <span className="tnum flex-none text-[11px] font-medium" style={{ color: "var(--gm-amber)" }}>
+          <span className="tnum flex-none text-meta font-medium" style={{ color: "var(--gm-amber)" }}>
             {dirty}
           </span>
         )}
         {showAb && (
           <span
-            className="tnum flex-none text-[11px] text-ink-500"
+            className="tnum flex-none text-meta text-ink-500"
             title={abBehind > 0 ? `${abAhead} ahead, ${abBehind} behind` : `${abAhead} ahead`}
           >
             {abAhead > 0 ? `↑${abAhead}` : ""}{abAhead > 0 && abBehind > 0 ? " " : ""}{abBehind > 0 ? `↓${abBehind}` : ""}
@@ -122,7 +122,7 @@ export function WorktreeRow({
         </button>
       </div>
       {!compact && (
-        <div className="mt-1 truncate pl-4 text-[11.5px] text-ink-500" title={slash(wt.path)}>
+        <div className="mt-1 truncate pl-4 text-meta text-ink-500" title={slash(wt.path)}>
           {shortPath(wt.path, wt.is_main)}
         </div>
       )}
