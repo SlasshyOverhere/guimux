@@ -523,10 +523,16 @@ pub struct AheadBehind {
 /// commits. Those are real zeroes, not failures. Everything else (not a
 /// repository, dubious ownership, a timeout) is a real failure and must reach
 /// the banner: a silent 0/0 makes a broken repo look exactly like a clean one.
+/// The errors that mean "this comparison has nothing to measure", as opposed
+/// to "git refused", which `git_ahead_behind` has to surface instead of
+/// rounding to zero. A detached HEAD belongs here: it has no upstream by
+/// definition, and treating that as a failure blanked the sidebar badge for
+/// every detached worktree.
 fn is_unmeasurable(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     lower.contains("no upstream configured")
         || lower.contains("no such branch")
+        || lower.contains("does not point to a branch")
         || lower.contains("not a valid ref")
         || lower.contains("unknown revision")
         || lower.contains("ambiguous argument")
@@ -1081,6 +1087,46 @@ mod tests {
         Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().unwrap();
         let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
         assert_eq!((ab.ahead, ab.behind), (0, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_falls_back_to_main_from_a_detached_head() {
+        // Regression: narrowing the upstream probe to a whitelist of
+        // "nothing to measure" errors also narrowed it past git's own
+        // detached-HEAD message, so a detached worktree errored out and the
+        // sidebar row lost its badge. A detached HEAD has no upstream by
+        // definition, so it belongs on the fallback path, not the failure one.
+        let dir = std::env::temp_dir().join(format!("guimux-detached-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(dir.join("a.txt"), b"one").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "init"]);
+        // One commit on main that main itself does not have, so the fallback
+        // produces a non-zero count and the assertion below has teeth.
+        let head = git(&dir, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(dir.join("b.txt"), b"two").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "second"]);
+        // Detach onto the first commit: main now has one commit this HEAD lacks.
+        run(&["checkout", "-q", "--detach", head.trim()]);
+
+        assert_eq!(
+            counterpart(&dir).map(|c| c.unwrap_or_default()),
+            Ok("main".to_string()),
+            "a detached HEAD must resolve its counterpart to main"
+        );
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 1));
         let _ = fs::remove_dir_all(&dir);
     }
 
