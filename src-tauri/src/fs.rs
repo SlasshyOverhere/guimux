@@ -230,7 +230,12 @@ pub fn fs_tree(path: String, depth: u32) -> Result<Option<Node>, String> {
         return Err(format!("not a directory: {path}"));
     }
     let mut budget = MAX_NODES;
-    Ok(build_tree(&p, 0, depth.clamp(1, 6), &mut budget))
+    // None means the root itself could not be listed (vanished or unreadable
+    // between the is_dir check and read_dir). Surfacing that as an error beats
+    // Ok(None), which reads as "this folder is empty" in the explorer.
+    build_tree(&p, 0, depth.clamp(1, 6), &mut budget)
+        .map(Some)
+        .ok_or_else(|| format!("cannot read directory: {path}"))
 }
 
 /// Directory identity for a rename. Windows paths are case-insensitive and
@@ -428,7 +433,9 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(40 * (attempt + 1)));
+                }
             }
         }
     }
@@ -495,7 +502,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     for c in bytes.chunks(4) {
         let mut n: u32 = 0;
         let mut pad = 0;
-        for (i, &b) in c.iter().enumerate() {
+        for &b in c {
             if b == b'=' {
                 pad += 1;
                 n <<= 6;
@@ -505,7 +512,6 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
                 }
                 n = (n << 6) | base64_val(b).ok_or("invalid base64 character")?;
             }
-            let _ = i;
         }
         if pad > 2 {
             return Err("invalid base64 padding".into());
@@ -535,7 +541,9 @@ fn valid_paste_name(name: &str) -> bool {
     matches!(ext.to_ascii_lowercase().as_str(), ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp")
 }
 
-#[command]
+// (async): base64-decoding a ~13MB paste plus the disk write blocked the UI
+// thread for the whole operation.
+#[command(async)]
 pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if base64.len() > MAX_PASTE_BYTES / 3 * 4 + 4 {
@@ -893,6 +901,23 @@ fn add_watch_tree(
     }
 }
 
+/// Never drop the trailing-edge refresh on a full queue: a saturated coalescer
+/// means the thread is behind, not that the change was uninteresting. Bounded
+/// wait so one wedged consumer cannot stall every watch thread forever.
+fn notify_change(tx: &mpsc::SyncSender<String>, root: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match tx.try_send(root.to_string()) {
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return,
+            Err(mpsc::TrySendError::Full(_)) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// `recursive` is the oversized-root fallback: one watch on the root, with
 /// notify covering the subtrees, so no per-directory bookkeeping is needed.
 fn spawn_watch_manager(
@@ -944,7 +969,7 @@ fn spawn_watch_manager(
                         &mut budget,
                     );
                 }
-                let _ = notify_tx.try_send(fire.clone());
+                notify_change(&notify_tx, &fire);
             }
             match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
                 Ok(Ok(event)) => {
@@ -974,7 +999,7 @@ fn spawn_watch_manager(
                             }
                         }
                     }
-                    let _ = notify_tx.try_send(fire.clone());
+                    notify_change(&notify_tx, &fire);
                 }
                 Ok(Err(_)) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1307,6 +1332,17 @@ mod tests {
         fs::write(&file, "existing").unwrap();
         assert!(!fs_create_empty(path).unwrap());
         assert_eq!(fs::read_to_string(&file).unwrap(), "existing");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tree_reports_unreadable_roots_instead_of_returning_empty() {
+        let dir = std::env::temp_dir().join(format!("guimux-tree-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let node = fs_tree(dir.to_string_lossy().to_string(), 2).unwrap();
+        assert!(node.is_some());
+        assert!(fs_tree(dir.join("nope").to_string_lossy().to_string(), 1).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -20,6 +20,10 @@ const DIFF_CAP: usize = 1_000_000; // 1MB per file
 const STATUS_CAP: usize = 8 * 1024 * 1024;
 const STDERR_CAP: usize = 64 * 1024;
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `git push` and `git fetch` move objects over the network, so they legitimately
+/// run past GIT_TIMEOUT; killing one there failed mid-transfer with
+/// "timed out after 30s" and looked like a network fault.
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// All git spawns go through here: on Windows a child console process flashes
@@ -73,7 +77,13 @@ fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
     let mut truncated = false;
     loop {
         match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(_) => {
+                // A read error is not EOF. Reporting it as one hands the caller
+                // a silently short stream flagged as complete.
+                truncated = true;
+                break;
+            }
             Ok(n) => {
                 let room = cap.saturating_sub(out.len());
                 if room > 0 {
@@ -86,6 +96,42 @@ fn read_capped(mut reader: impl Read, cap: usize) -> (Vec<u8>, bool) {
         }
     }
     (out, truncated)
+}
+
+/// Reads at most `cap` bytes, then stops so the child can be killed instead of
+/// blocking on a full pipe. Extracted from `git_capped` so the error-vs-EOF
+/// handling is testable without spawning git.
+fn read_to_cap(reader: &mut impl Read, cap: usize) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 32 * 1024];
+    while buf.len() < cap {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = cap - buf.len();
+                if n > room {
+                    buf.extend_from_slice(&chunk[..room]);
+                    truncated = true;
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            // Not EOF: without this the caller gets a short read that looks
+            // whole, and `git_status`/`git_diff` report it as complete.
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        }
+    }
+    // Reaching the cap is enough to conservatively mark the result
+    // truncated. Waiting for one extra byte here can block forever when
+    // the child is still writing past the cap.
+    if buf.len() >= cap {
+        truncated = true;
+    }
+    (buf, truncated)
 }
 
 fn recv_reader<T>(rx: &mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
@@ -148,20 +194,16 @@ pub fn git_output(
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     // Every dynamic ref/path arg must be preceded by `"--"` at the call
     // site; static flag lists here are safe by construction.
-    let (status, stdout, stderr, truncated) = git_output(repo, args, GIT_TIMEOUT)?;
-    if status.success() {
-        if truncated {
-            return Err("git output exceeded safety limit".into());
-        }
-        Ok(String::from_utf8_lossy(&stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&stderr);
-        Err(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        ))
-    }
+    git_probe(repo, args, GIT_TIMEOUT).map_err(|(_, rendered)| rendered)
+}
+
+/// The only way to run a git command that moves objects over the network.
+/// Its deadline is baked in rather than passed in: while the timeout was an
+/// argument, routing a push or fetch back onto GIT_TIMEOUT was a one-token
+/// edit that no runtime test could see. There is now nothing to get wrong
+/// except calling the wrong one of these two functions.
+fn network_git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    git_probe(repo, args, NETWORK_TIMEOUT).map_err(|(_, rendered)| rendered)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,33 +351,8 @@ fn git_capped(repo: &Path, args: &[&str], cap: usize) -> Result<(String, bool), 
     let _ = std::thread::spawn(move || {
         let _ = err_tx.send(read_capped(stderr, STDERR_CAP));
     });
-    let mut buf: Vec<u8> = Vec::new();
-    let mut truncated = false;
-    {
-        let mut out = stdout;
-        let mut chunk = [0u8; 32 * 1024];
-        while buf.len() < cap {
-            match out.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let room = cap - buf.len();
-                    if n > room {
-                        buf.extend_from_slice(&chunk[..room]);
-                        truncated = true;
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        // Reaching the cap is enough to conservatively mark the result
-        // truncated. Waiting for one extra byte here can block forever when
-        // the child is still writing past the cap.
-        if buf.len() >= cap {
-            truncated = true;
-        }
-    }
+    let mut out = stdout;
+    let (buf, truncated) = read_to_cap(&mut out, cap);
     if truncated {
         let _ = child
             .lock()
@@ -502,40 +519,105 @@ pub struct AheadBehind {
     pub behind: u32,
 }
 
-fn counterpart(repo: &Path) -> Option<String> {
-    // Upstream first: the branch's own tracking ref when it has one.
-    if let Ok(out) = git(repo, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]) {
-        let u = out.trim().to_string();
-        if !u.is_empty() {
-            return Some(u);
+/// git exits 128 for a missing upstream, a missing ref, and a repo with no
+/// commits. Those are real zeroes, not failures. Everything else (not a
+/// repository, dubious ownership, a timeout) is a real failure and must reach
+/// the banner: a silent 0/0 makes a broken repo look exactly like a clean one.
+/// The errors that mean "this comparison has nothing to measure", as opposed
+/// to "git refused", which `git_ahead_behind` has to surface instead of
+/// rounding to zero. A detached HEAD belongs here: it has no upstream by
+/// definition, and treating that as a failure blanked the sidebar badge for
+/// every detached worktree.
+fn is_unmeasurable(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("no upstream configured")
+        || lower.contains("no such branch")
+        || lower.contains("does not point to a branch")
+        || lower.contains("not a valid ref")
+        || lower.contains("unknown revision")
+        || lower.contains("ambiguous argument")
+}
+
+/// Runs git and shapes the result. The single owner of that job: `git` is a
+/// thin wrapper that drops the stderr, and the ahead/behind path keeps it to
+/// tell "nothing to measure" from "git refused". `git_output`'s own errors
+/// pass through untouched so the rendered text never doubles up a prefix.
+fn git_probe(
+    repo: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, (String, String)> {
+    let (status, stdout, stderr, truncated) =
+        git_output(repo, args, timeout).map_err(|e| (String::new(), e))?;
+    let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+    if status.success() {
+        if truncated {
+            return Err((detail, "git output exceeded safety limit".into()));
         }
+        Ok(String::from_utf8_lossy(&stdout).to_string())
+    } else {
+        Err((
+            detail.clone(),
+            format!("git {} failed: {}", args.join(" "), detail),
+        ))
+    }
+}
+
+/// The branch ahead/behind is measured against. `Ok(None)` means there is
+/// genuinely nothing to measure (no upstream, no main/master, no commits yet);
+/// `Err` means git itself failed and the user has to see why.
+fn counterpart(repo: &Path) -> Result<Option<String>, String> {
+    // Upstream first: the branch's own tracking ref when it has one.
+    match git_probe(
+        repo,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        GIT_TIMEOUT,
+    ) {
+        Ok(out) => {
+            let u = out.trim().to_string();
+            if !u.is_empty() && reject_git_ref(&u, "upstream").is_ok() {
+                return Ok(Some(u));
+            }
+        }
+        Err((detail, _)) if is_unmeasurable(&detail) => {}
+        Err((_, rendered)) => return Err(rendered),
     }
     // No upstream (typical for guimux/ branches): fall back to main/master
     // so the badge still reads as commits unique to this worktree.
     for cand in ["main", "master"] {
-        if git(repo, &["show-ref", "--verify", &format!("refs/heads/{cand}")]).is_ok() {
-            return Some(cand.to_string());
+        match git_probe(
+            repo,
+            &["show-ref", "--verify", &format!("refs/heads/{cand}")],
+            GIT_TIMEOUT,
+        ) {
+            Ok(_) => return Ok(Some(cand.to_string())),
+            // A ref that simply is not there is the normal miss, not a failure.
+            Err((detail, _)) if is_unmeasurable(&detail) => continue,
+            Err((_, rendered)) => return Err(rendered),
         }
     }
-    None
+    Ok(None)
 }
 
 #[command(async)]
 pub fn git_ahead_behind(path: String) -> Result<AheadBehind, String> {
     let repo = PathBuf::from(&path);
-    let Some(base) = counterpart(&repo) else {
+    let Some(base) = counterpart(&repo)? else {
         return Ok(AheadBehind { ahead: 0, behind: 0 });
     };
     let spec = format!("HEAD...{base}");
-    match git(&repo, &["rev-list", "--left-right", "--count", &spec]) {
+    match git_probe(&repo, &["rev-list", "--left-right", "--count", &spec], GIT_TIMEOUT) {
         Ok(out) => {
             let mut it = out.split_whitespace();
-            let ahead = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            let behind = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            Ok(AheadBehind { ahead, behind })
+            // An unparseable count is a git we do not understand, not a zero.
+            match (it.next().and_then(|s| s.parse().ok()), it.next().and_then(|s| s.parse().ok())) {
+                (Some(ahead), Some(behind)) => Ok(AheadBehind { ahead, behind }),
+                _ => Err("git rev-list returned an unreadable count".into()),
+            }
         }
         // Empty repo (no HEAD yet): nothing to be ahead of.
-        Err(_) => Ok(AheadBehind { ahead: 0, behind: 0 }),
+        Err((detail, _)) if is_unmeasurable(&detail) => Ok(AheadBehind { ahead: 0, behind: 0 }),
+        Err((_, rendered)) => Err(rendered),
     }
 }
 
@@ -559,13 +641,13 @@ pub fn git_commit(path: String, message: String, stage_all: Option<bool>) -> Res
 #[command(async)]
 pub fn git_push(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git(&repo, &["push"])
+    network_git(&repo, &["push"])
 }
 
 #[command(async)]
 pub fn git_fetch(path: String) -> Result<String, String> {
     let repo = PathBuf::from(&path);
-    git(&repo, &["fetch", "--prune"])
+    network_git(&repo, &["fetch", "--prune"])
 }
 
 #[cfg(test)]
@@ -713,4 +795,405 @@ mod tests {
         let error = project_detect(path.to_string_lossy().to_string()).unwrap_err();
         assert!(error.starts_with("PROJECT_PATH_MISSING:"), "unexpected error: {error}");
     }
+
+    /// Every user-visible git error flows through `git`/`git_probe`, so its
+    /// message shape is the app's actual contract with the banner. These pin
+    /// it: once-labelled prefix, git's own stderr kept, nothing swallowed.
+    #[test]
+    fn spawn_failures_render_gits_prefix_exactly_once() {
+        // An invalid cwd makes spawn() fail deterministically, which is the
+        // only path where git_output's own "[git] " label is produced.
+        let missing = std::env::temp_dir().join("guimux-spawn-fail-probe");
+        let _ = fs::remove_dir_all(&missing);
+        let error = git(&missing, &["log", "--oneline"]).unwrap_err();
+        assert!(
+            !error.contains("[git] [git]"),
+            "git's prefix was doubled: {error}"
+        );
+        assert!(
+            error.starts_with("[git] "),
+            "git's own prefix was dropped: {error}"
+        );
+        assert!(
+            error.contains("failed to spawn"),
+            "the failure reason was swallowed: {error}"
+        );
+    }
+
+    #[test]
+    fn a_non_zero_exit_surfaces_gits_own_message() {
+        let notrepo = std::env::temp_dir().join(format!("guimux-notrepo-msg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&notrepo);
+        fs::create_dir_all(&notrepo).unwrap();
+
+        let error = git(&notrepo, &["branch", "-a"]).unwrap_err();
+        assert!(
+            error.starts_with("git branch -a failed: "),
+            "unexpected shape: {error}"
+        );
+        assert!(
+            error.contains("not a git repository"),
+            "git's stderr was dropped: {error}"
+        );
+
+        // The commands the sidebar calls must keep the same shape rather than
+        // inventing their own wording.
+        for (expected, error) in [
+            (
+                "git push failed: ",
+                git_push(notrepo.to_string_lossy().to_string()).unwrap_err(),
+            ),
+            (
+                "git fetch --prune failed: ",
+                git_fetch(notrepo.to_string_lossy().to_string()).unwrap_err(),
+            ),
+        ] {
+            assert!(error.starts_with(expected), "unexpected shape: {error}");
+            assert!(
+                error.contains("not a git repository"),
+                "git's stderr was dropped: {error}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&notrepo);
+    }
+
+    #[test]
+    fn our_own_validation_messages_still_win_over_git() {
+        let notrepo = std::env::temp_dir().join(format!("guimux-validate-msg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&notrepo);
+        fs::create_dir_all(&notrepo).unwrap();
+        let error = git_commit(notrepo.to_string_lossy().to_string(), "   ".into(), None).unwrap_err();
+        assert_eq!(error, "commit message is empty");
+        let _ = fs::remove_dir_all(&notrepo);
+    }
+
+    /// A remote that accepts the connection and never sends a ref
+    /// advertisement: the connection is alive but has stopped responding, which
+    /// is what a slow or wedged upstream looks like to git. Raw `git push` and
+    /// `git fetch` against one never return (measured past 75s), so the app-side
+    /// deadline is the only thing bounding them.
+    fn silent_remote() -> String {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("git://{}/repo.git", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for conn in listener.incoming() {
+                match conn {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        url
+    }
+
+    /// A repo with one commit whose origin is a silent remote, so both push and
+    /// fetch reach for the network instead of failing before they dial out.
+    fn repo_tracking_silent_remote(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("guimux-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(dir.join("f.txt"), b"data").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "init"]);
+        let url = silent_remote();
+        run(&["remote", "add", "origin", &url]);
+        run(&["config", "branch.main.remote", "origin"]);
+        run(&["config", "branch.main.merge", "refs/heads/main"]);
+        dir
+    }
+
+    /// The deadline is enforced and per call; the constant assertion is what
+    /// keeps push and fetch off the poll cap. Both tests use a 2s deadline
+    /// rather than NETWORK_TIMEOUT so they finish in seconds.
+    fn assert_killed_at(repo: &Path, args: &[&str], what: &str) {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        let error = git_probe(repo, args, Duration::from_secs(2))
+            .map_err(|(_, rendered)| rendered)
+            .unwrap_err();
+        let elapsed = t0.elapsed();
+        assert_eq!(
+            error,
+            format!("git {} timed out after 2s", args.join(" ")),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "the kill did not happen promptly: {elapsed:?}"
+        );
+        assert!(
+            NETWORK_TIMEOUT > GIT_TIMEOUT * 10,
+            "network timeout {NETWORK_TIMEOUT:?} is not meaningfully longer than {GIT_TIMEOUT:?} ({what})"
+        );
+    }
+
+    /// The runtime tests call `git_probe` directly, so they pin the kill and
+    /// the constant but not which entry point each command uses — the one
+    /// edit they cannot see. Checking that against the source is deliberate:
+    /// the runtime alternative has to outlast the 30s poll cap.
+    #[test]
+    fn push_and_fetch_both_reach_the_network_through_network_git() {
+        let src = include_str!("git.rs");
+        for cmd in ["pub fn git_push", "pub fn git_fetch"] {
+            let rest = &src[src.find(cmd).expect("command not found")..];
+            let body = &rest[..rest.find("
+}").expect("unterminated body")];
+            assert!(
+                body.contains("network_git("),
+                "{cmd} does not go through network_git:{body}"
+            );
+            assert!(
+                !body.contains("GIT_TIMEOUT"),
+                "{cmd} names the poll cap directly:{body}"
+            );
+        }
+        // And the deadline-taking entry point stays gone: it is what let a
+        // network command be capped at 30s without anyone noticing. The name
+        // is assembled so this test does not trip over its own text.
+        let banned = ["git_with", "timeout"].concat();
+        assert!(
+            !src.contains(&banned),
+            "a deadline-taking git entry point is back; push and fetch can be capped again"
+        );
+    }
+
+
+    #[test]
+    fn a_push_to_a_silent_remote_is_killed_at_its_own_deadline() {
+        let dir = repo_tracking_silent_remote("pushprobe");
+        assert_killed_at(&dir, &["push"], "push");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fetch_from_a_silent_remote_is_killed_at_its_own_deadline() {
+        let dir = repo_tracking_silent_remote("fetchprobe");
+        assert_killed_at(&dir, &["fetch", "--prune"], "fetch");
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn flag_shaped_refs_are_refused_everywhere() {
+        assert!(reject_git_ref("main", "ref").is_ok());
+        assert!(reject_git_ref("-f", "ref").is_err());
+        assert!(reject_git_ref("--upload-pack=evil", "ref").is_err());
+        assert!(reject_git_ref("ma\0in", "ref").is_err());
+    }
+
+    #[test]
+    fn ahead_behind_uses_the_configured_upstream_and_not_main_or_master() {
+        // A real local remote, a real push, no mocks: `counterpart` takes the
+        // rev-parse @{u} success branch, which is the common case for any repo
+        // with a remote and was previously untested.
+        let dir = std::env::temp_dir().join(format!("guimux-upstream-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let remote = dir.join("remote.git");
+        let repo = dir.join("work");
+        fs::create_dir_all(&repo).unwrap();
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&remote)
+            .output()
+            .unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        }
+        fs::write(repo.join("a.txt"), "hello").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo).output().unwrap();
+        Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&remote)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let push = Command::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            push.status.success(),
+            "push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+
+        assert_eq!(
+            counterpart(&repo).unwrap(),
+            Some("origin/main".to_string()),
+            "the configured upstream must win over the main/master fallback"
+        );
+
+        // One commit past the upstream. Against `main` this would read 0/0, so
+        // ahead == 1 is what proves the upstream was actually the base.
+        fs::write(repo.join("b.txt"), "local").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).output().unwrap();
+        Command::new("git").args(["commit", "-m", "local"]).current_dir(&repo).output().unwrap();
+        let ab = git_ahead_behind(repo.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (1, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_reports_git_failures_instead_of_a_clean_zero() {
+        // A directory that is not a repo used to come back Ok(0, 0), which the
+        // sidebar rendered as a legitimate "0 ahead" badge. A broken worktree
+        // must be distinguishable from a clean one.
+        let dir = std::env::temp_dir().join(format!("guimux-not-a-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let error = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap_err();
+        assert!(
+            error.contains("not a git repository"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_still_reports_zero_for_a_genuinely_unmeasurable_repo() {
+        // The cases that really are zero must stay zero, or the fix above just
+        // trades a silent lie for a red banner on every fresh repo.
+        let dir = std::env::temp_dir().join(format!("guimux-empty-repo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git").args(&args).current_dir(&dir).output().unwrap();
+        }
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 0));
+
+        // And a committed repo with no upstream and no main/master behind it.
+        fs::write(dir.join("a.txt"), "hello").unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&dir).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().unwrap();
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ahead_behind_falls_back_to_main_from_a_detached_head() {
+        // Regression: narrowing the upstream probe to a whitelist of
+        // "nothing to measure" errors also narrowed it past git's own
+        // detached-HEAD message, so a detached worktree errored out and the
+        // sidebar row lost its badge. A detached HEAD has no upstream by
+        // definition, so it belongs on the fallback path, not the failure one.
+        let dir = std::env::temp_dir().join(format!("guimux-detached-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main", "."]);
+        std::fs::write(dir.join("a.txt"), b"one").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "init"]);
+        // One commit on main that main itself does not have, so the fallback
+        // produces a non-zero count and the assertion below has teeth.
+        let head = git(&dir, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(dir.join("b.txt"), b"two").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "second"]);
+        // Detach onto the first commit: main now has one commit this HEAD lacks.
+        run(&["checkout", "-q", "--detach", head.trim()]);
+
+        assert_eq!(
+            counterpart(&dir).map(|c| c.unwrap_or_default()),
+            Ok("main".to_string()),
+            "a detached HEAD must resolve its counterpart to main"
+        );
+        let ab = git_ahead_behind(dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!((ab.ahead, ab.behind), (0, 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `Read` that yields one full buffer and then fails, to prove a
+    /// mid-stream error is not mistaken for a clean end of file.
+    struct OneShotThenError(bool);
+
+    impl Read for OneShotThenError {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                Err(std::io::Error::other("simulated pipe failure"))
+            } else {
+                self.0 = true;
+                Ok(buf.len())
+            }
+        }
+    }
+
+    #[test]
+    fn read_failures_are_not_reported_as_clean_end_of_file() {
+        let (out, truncated) = read_capped(OneShotThenError(false), 64 * 1024);
+        assert!(!out.is_empty(), "the first successful read must still be kept");
+        assert!(truncated, "a mid-stream read error must mark the result truncated");
+
+        let (out, truncated) = read_to_cap(&mut OneShotThenError(false), 64 * 1024);
+        assert!(!out.is_empty());
+        assert!(
+            truncated,
+            "git_capped would hand back a short read that looks complete"
+        );
+    }
+
+    #[test]
+    fn a_clean_short_read_is_not_marked_truncated() {
+        struct Short {
+            data: Vec<u8>,
+            pos: usize,
+        }
+        impl Read for Short {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    return Ok(0);
+                }
+                let n = (self.data.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let (out, truncated) = read_to_cap(
+            &mut Short {
+                data: b"abc".to_vec(),
+                pos: 0,
+            },
+            1024,
+        );
+        assert_eq!(out, b"abc");
+        assert!(!truncated);
+        let (out, truncated) = read_capped(
+            Short {
+                data: b"abc".to_vec(),
+                pos: 0,
+            },
+            1024,
+        );
+        assert_eq!(out, b"abc");
+        assert!(!truncated);
+    }
 }
+
