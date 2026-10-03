@@ -6,11 +6,13 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Columns2, GripVertical, Maximize2, Minimize2, Rows2, X } from "lucide-react";
-import { allPaneIds, useStore } from "../store";
+import { Columns2, Maximize2, Minimize2, Rows2, X } from "lucide-react";
+import { allPaneIds, collectPaneObjs, useStore, type Pane, type PaneNode, type SessionKind } from "../store";
+import { shortPath } from "../path";
 import { dragFile, quoteForShell, recentOsDrop } from "../dragFile";
 import type { PtyAttach, PtyOutput, PtySession } from "../types";
 import { registerLiveTerm, unregisterLiveTerm } from "./paneEmpty";
+import { extractLiveCwd, parseOsc, sessionNameFrom } from "./osc";
 import { createOutputBatcher, decodeBase64, type OutputBatcher } from "./outputCodec";
 
 // Set localStorage `guimux-stress=1` + reload for the dev stress loop (see stress.ts).
@@ -65,60 +67,63 @@ function persistScrollback(paneId: string, state: string) {
   }
 }
 
-// Toolbar chip position per pane id: the chip floats over the grid and can
-// cover TUI content, so the user can drag it anywhere in the pane. Written
-// on drag end only; survives switches and restarts via the persisted pane id.
-const LS_TOOLS_POS = "guimux-pane-tools-pos";
-const toolsPosCache = new Map<string, { x: number; y: number }>();
+// Pane tools used to be a floating chip you had to hover for, draggable so it
+// would not cover TUI output, and persisted per pane. It is now a permanent
+// header row: 28px a pane is cheaper than controls nobody can find, and a
+// header cannot be dragged over the program it sits above.
 
-function readToolsPos(paneId: string): { x: number; y: number } | null {
-  const hit = toolsPosCache.get(paneId);
-  if (hit) return hit;
-  try {
-    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
-      string,
-      { x: number; y: number }
-    >;
-    const p = all[paneId];
-    if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
-      const pos = { x: Math.max(0, Math.min(2000, p.x)), y: Math.max(0, Math.min(2000, p.y)) };
-      toolsPosCache.set(paneId, pos);
-      return pos;
-    }
-  } catch {
-    /* corrupt: fall back to the corner */
-  }
-  return null;
+// Stable colour + initial per agent name, so the same agent always wears the
+// same badge across panes and restarts. Derived, not stored: it is decoration
+// that must never be able to disagree with the name beside it.
+const AGENT_TINTS = ["#e2c08d", "#81b88b", "#7fa8d8", "#c58bd0", "#d08b7f", "#8bd0c0"];
+
+// Executables whose session name the backend knows how to find. Kept in step
+// with the match arms in `agent_session.rs`: an agent missing here is never
+// polled, so the UI cannot ask for a name the backend would only guess at.
+const READABLE_AGENT_BINS = new Set(["claude", "codex"]);
+
+type ResolvedTitle = { id: string; title: string; source: string; matched: boolean; via: "name" | "prompt" };
+
+/// Panes competing for the same transcripts: same directory, same agent, and a
+/// launch floor to search from. Two panes in one directory are only told apart
+/// by being resolved together, never one at a time.
+function agentGroup(layout: PaneNode | null, cwd: string, bin: string | null | undefined): Pane[] {
+  if (!bin || !READABLE_AGENT_BINS.has(bin)) return [];
+  return collectPaneObjs(layout).filter(
+    (p) => p.agent && p.agentBin === bin && (p.cwd ?? cwd) === cwd && typeof p.agentSince === "number",
+  );
 }
 
-function writeToolsPos(paneId: string, pos: { x: number; y: number }) {
-  toolsPosCache.set(paneId, pos);
-  try {
-    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
-      string,
-      { x: number; y: number }
-    >;
-    all[paneId] = pos;
-    const keys = Object.keys(all);
-    while (keys.length > 100) delete all[keys.shift()!];
-    localStorage.setItem(LS_TOOLS_POS, JSON.stringify(all));
-  } catch {
-    /* quota */
-  }
+/// The group as a string, so the store selector stays referentially stable and
+/// the poll only restarts when the group itself changes: pane ids in tree order
+/// (which is launch order), then how many of them still lack a name.
+function agentGroupKey(
+  layout: PaneNode | null,
+  cwd: string,
+  bin: string | null | undefined,
+  paneId: string,
+): string {
+  const group = agentGroup(layout, cwd, bin);
+  if (!group.some((p) => p.id === paneId)) return "";
+  // A prompt is a placeholder: the pane still wants its real name, so it keeps
+  // the group polling until one turns up.
+  const pending = group.filter((p) => !p.session || p.sessionKind === "prompt").length;
+  return `${group.map((p) => p.id).join(",")}|${pending}`;
 }
 
-function clearToolsPos(paneId: string) {
-  toolsPosCache.delete(paneId);
-  try {
-    const all = JSON.parse(localStorage.getItem(LS_TOOLS_POS) ?? "{}") as Record<
-      string,
-      { x: number; y: number }
-    >;
-    delete all[paneId];
-    localStorage.setItem(LS_TOOLS_POS, JSON.stringify(all));
-  } catch {
-    /* quota */
-  }
+/** How a pane's label should admit itself in the header tooltip. */
+const PROVENANCE: Record<SessionKind, string> = {
+  title: "name from the terminal title",
+  name: "name read from",
+  paired: "name matched by launch order, read from",
+  prompt: "last prompt, no name yet, read from",
+};
+
+function agentBadge(agent: string): { tint: string; initial: string } {
+  let h = 0;
+  for (let i = 0; i < agent.length; i++) h = (h * 31 + agent.charCodeAt(i)) >>> 0;
+  const initial = (agent.trim()[0] ?? "?").toUpperCase();
+  return { tint: AGENT_TINTS[h % AGENT_TINTS.length], initial };
 }
 
 interface Props {
@@ -127,6 +132,19 @@ interface Props {
   cwd: string;
   visible: boolean;
   initCmd?: string | null;
+  /** Display name of the agent launched into this pane, or null for a shell. */
+  agent?: string | null;
+  /** Executable the agent runs as. The transcript fallback is per-agent. */
+  agentBin?: string | null;
+  /** When this pane launched its agent, ms since epoch. */
+  agentSince?: number | null;
+  /** Conversation name the agent last reported, or its last prompt until it
+   *  reports one. */
+  session?: string | null;
+  /** What `session` is, so the header can say whether it is a real name. */
+  sessionKind?: SessionKind | null;
+  /** Where the name came from: "title" or a transcript path. */
+  sessionFrom?: string | null;
   onClose: () => void;
 }
 
@@ -234,43 +252,13 @@ function writeKeepPlace(term: Terminal, data: string | Uint8Array) {
   });
 }
 
-// Live-cwd tracking: the shell reports its cwd on every prompt via OSC 7
-// (file:// URI) + OSC 9;9 (native path, ConPTY/WT style), emitted by the
-// powershell bootstrap in pty.rs. Snoop the raw output bytes, keep the last
-// match, store it on the pane so splits inherit the source pane's directory.
-// ST is BEL or ESC\. Buffer tail is retained so a sequence split across two
-// output chunks still parses.
-function extractLiveCwd(buf: string): string | null {
-  let native: string | null = null;
-  let uriPath: string | null = null;
-  let m: RegExpExecArray | null;
-  const re99 = /\x1b\]9;9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-  while ((m = re99.exec(buf)) !== null) {
-    const p = m[1].trim();
-    if (p) native = p;
-  }
-  const re7 = /\x1b\]7;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-  while ((m = re7.exec(buf)) !== null) {
-    const uri = m[1].trim();
-    const i = uri.indexOf("file://");
-    if (i < 0) continue;
-    const rest = uri.slice(i + "file://".length);
-    const slash = rest.indexOf("/");
-    if (slash < 0) continue;
-    let path = rest.slice(slash);
-    try {
-      path = decodeURIComponent(path);
-    } catch {
-      /* raw on bad escapes */
-    }
-    path = path.replace(/\//g, "\\");
-    if (/^\\[A-Za-z]:\\/.test(path)) path = path.slice(1);
-    if (/^[A-Za-z]:\\/.test(path) || path.startsWith("\\\\")) uriPath = path;
-  }
-  return native ?? uriPath;
-}
+// Live-cwd tracking and session-name watching: the shell reports its cwd on
+// every prompt via OSC 7 (file:// URI) + OSC 9;9 (native path, ConPTY/WT
+// style), emitted by the powershell bootstrap in pty.rs. Snoop the raw output
+// bytes, keep the last match, store it on the pane so splits inherit the
+// source pane's directory. The parsers live in ./osc with their own tests.
 
-export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: Props) {
+export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, agent, agentBin, agentSince, session, sessionKind, sessionFrom, onClose }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -303,6 +291,70 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // Live cwd, reported by the shell via OSC 7 / 9;9. Stored on the pane so
   // a split from D:/test/workspace/testing/ opens there, not worktree root.
   const liveCwdRef = useRef<string | null>(null);
+  // Mirror for the header: the ref alone cannot re-render, and a pane that
+  // does not say where it is is how you type a command in the wrong place.
+  const [liveCwd, setLiveCwd] = useState<string | null>(null);
+  // Last session name written. The title arrives on every prompt, so the store
+  // is only touched when the name actually changed.
+  const lastSessionRef = useRef<string | null>(session ?? null);
+  const badge = agent ? agentBadge(agent) : null;
+
+  // Transcript fallback for agents that never set a terminal title. Claude puts
+  // an `ai-title` record in its transcript; Codex writes no name into the
+  // rollout at all and keeps one in a side index, which the same command joins.
+  //
+  // Panes sharing a directory compete for the same transcripts, so the whole
+  // group is resolved in one call by one of them (the first in tree order,
+  // which is the order a fan-out launched them) and the rest only render what
+  // the store already holds. The loop stops when every pane in the group has a
+  // name. OpenCode stores sessions in SQLite and is simply never asked for.
+  const groupKey = useStore((s) => agentGroupKey(s.layout, cwd, agentBin, paneId));
+  const leads = groupKey.split("|")[0] === paneId;
+  const pending = Number(groupKey.split("|")[1] ?? 0);
+  useEffect(() => {
+    // No floor, no question: a pane restored from disk cannot be told apart
+    // from the sessions already on disk.
+    if (!leads || pending === 0 || !agentBin || typeof agentSince !== "number") return;
+    // Narrowed into a const: the closures below do not keep the narrowing.
+    const bin = agentBin;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || document.hidden) return;
+      const group = agentGroup(useStore.getState().layout, cwd, bin);
+      if (group.length === 0) return;
+      const dir = liveCwdRef.current ?? cwd;
+      try {
+        const found = await invoke<ResolvedTitle[]>("agent_session_titles", {
+          cwd: dir,
+          bin,
+          panes: group.map((p) => ({ id: p.id, sinceMs: p.agentSince })),
+        });
+        if (cancelled) return;
+        for (const hit of found ?? []) {
+          // Same guard as the title path: a transcript could hold anything.
+          const named = sessionNameFrom(hit.title, liveCwdRef.current ?? dir);
+          if (!named) continue;
+          // Three ways to get here and the user can tell them apart: the agent's
+          // own name, that name matched by launch order rather than being the
+          // only candidate, or the last prompt standing in for a name.
+          const kind: SessionKind =
+            hit.via === "prompt" ? "prompt" : hit.matched ? "paired" : "name";
+          useStore.getState().setPaneSession(hit.id, named, hit.source, kind);
+        }
+      } catch {
+        /* no session on disk yet, or the agent is not installed on this machine */
+      }
+    };
+    // An agent names its session after the first exchange, so an immediate
+    // check would be wasted.
+    const first = setTimeout(() => void tick(), 8000);
+    const every = setInterval(() => void tick(), 10_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(first);
+      clearInterval(every);
+    };
+  }, [agentBin, agentSince, cwd, groupKey, leads, pending]);
   const snoopDecoderRef = useRef(new TextDecoder());
   const lastDimsRef = useRef<{ cols: number; rows: number } | null>(null);
   // Resize storms (drag, zoom, observer echo) reflow ConPTY on every tick:
@@ -315,10 +367,6 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
   // own repaint and shoves the UI down, leaving blank rows above it.
   const resizeTimerRef = useRef<number | null>(null);
   const pendingDimsRef = useRef<{ cols: number; rows: number } | null>(null);
-  // Post-resize output trace: ConPTY's repaint AFTER a resize is the
-  // remaining suspect (fit-time buffer was verified clean). For 2s after a
-  // debounced resize fires, log buffer state per output chunk.
-  const traceOutputUntilRef = useRef(0);
   // GUIMUX_RESIZE_DEBUG=1 (localStorage) traces the whole resize pipeline:
   // host px -> fit() grid -> debounce -> pty_resize, plus buffer state
   // (viewport/baseY) so a "blank rows at top" bug can be located to the
@@ -350,35 +398,10 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
       const d = pendingDimsRef.current;
       pendingDimsRef.current = null;
       const sid = sessionRef.current;
-      traceOutputUntilRef.current = Date.now() + 2000;
       dbg(`pty_resize -> ${d ? `${d.cols}x${d.rows}` : "?"} (debounced, sid=${sid})`);
       if (d && sid != null)
         invoke("pty_resize", { id: sid, cols: d.cols, rows: d.rows })
-          .then(() => {
-            dbg(`pty_resize ${d.cols}x${d.rows} ok`);
-            // Render-layer audit: buffer state was verified clean by the
-            // fit trace; if the prompt still renders displaced, the canvas
-            // or viewport must be offset inside the host. Measure exactly
-            // where the rendered screen sits vs the pane box.
-            setTimeout(() => {
-              const t = termRef.current;
-              if (!t) return;
-              try {
-                const host = hostRef.current;
-                const screen = host?.querySelector(".xterm-screen") as HTMLElement | null;
-                const viewport = host?.querySelector(".xterm-viewport") as HTMLElement | null;
-                const canvas = screen?.querySelector("canvas") as HTMLCanvasElement | null;
-                const hr = host?.getBoundingClientRect();
-                const sr = screen?.getBoundingClientRect();
-                const vr = viewport?.getBoundingClientRect();
-                dbg(
-                  `render-audit: hostTop=${hr?.top.toFixed(1)} screenTop=${sr?.top.toFixed(1)} gapPx=${hr && sr ? (sr.top - hr.top).toFixed(1) : "?"} viewportScrollTop=${viewport?.scrollTop ?? "?"} viewportH=${vr?.height.toFixed(1)} screenH=${sr?.height.toFixed(1)} canvas=${canvas ? `${canvas.width}x${canvas.height} cssH=${canvas.getBoundingClientRect().height.toFixed(1)}` : "none"} rows=${t.rows} cols=${t.cols} vp=${t.buffer.active.viewportY} base=${t.buffer.active.baseY} len=${t.buffer.active.length} cursorY=${t.buffer.active.cursorY}`,
-                );
-              } catch (e) {
-                dbg(`render-audit failed: ${e}`);
-              }
-            }, 150);
-          })
+          .then(() => dbg(`pty_resize ${d.cols}x${d.rows} ok`))
           .catch((e) => dbg(`pty_resize FAILED: ${e}`));
     }, 120);
   };
@@ -400,7 +423,17 @@ export function TerminalPane({ paneId, ptyId, cwd, visible, initCmd, onClose }: 
     snoopTailRef.current = buf.slice(-512);
     if (found && found !== liveCwdRef.current) {
       liveCwdRef.current = found;
+      setLiveCwd(found);
       useStore.getState().setPaneCwd(paneId, found);
+    }
+    // Only an agent pane has a session to name. A plain shell overwrites the
+    // title with the cwd on every prompt, and sessionNameFrom rejects those.
+    if (agent) {
+      const named = sessionNameFrom(parseOsc(buf).title, liveCwdRef.current);
+      if (named !== lastSessionRef.current) {
+        lastSessionRef.current = named;
+        useStore.getState().setPaneSession(paneId, named, null, "title");
+      }
     }
   };
 
@@ -620,14 +653,6 @@ try {
   // ConPTY wants CR for newlines; a lone LF pastes as a bare linefeed.
   const normalizePaste = (text: string) => text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
 
-  const pasteDebug = (info: string) => {
-    try {
-      if (localStorage.getItem("GUIMUX_PASTE_DEBUG") === "1") console.log(`[gm-paste pane=${paneId}] ${info}`);
-    } catch {
-      /* storage unavailable */
-    }
-  };
-
   // Fresh cwd for the mount-effect closures below, which capture the first
   // render: the pane keeps its identity while the worktree cwd can change.
   const cwdRef = useRef(cwd);
@@ -636,7 +661,7 @@ try {
   // Image paste: save the blob under `<cwd>/.guimux-pastes/` and paste the
   // quoted path, so a screenshot Ctrl+V lands a file the shell (or an agent
   // reading the path) can use.
-  const pasteImageBlob = async (blob: Blob, chord: string) => {
+  const pasteImageBlob = async (blob: Blob) => {
     const ext =
       blob.type === "image/jpeg" ? "jpg"
       : blob.type === "image/gif" ? "gif"
@@ -656,10 +681,8 @@ try {
       const base64 = dataUrl.split(",", 2)[1] ?? "";
       if (!base64) throw new Error("empty image data");
       const saved = await invoke<string>("fs_write_bytes", { path, base64 });
-      pasteDebug(`chord=${chord} imageSaved=${blob.size}B ext=${ext} fallbackUsed=false`);
       pasteShellPath(saved);
-    } catch (e) {
-      pasteDebug(`chord=${chord} imageSaveFailed fallbackUsed=false`);
+    } catch {
       showPasteHint("Couldn't save pasted image");
     }
   };
@@ -696,7 +719,7 @@ try {
     return true;
   };
 
-  const pasteClipboard = (chord = "key") => {
+  const pasteClipboard = () => {
     const term = termRef.current;
     term?.focus();
     if (navigator.clipboard?.readText) {
@@ -706,7 +729,6 @@ try {
           if (text) {
             // Single sender: term.paste honors bracketed-paste mode and flows
             // through onData -> pty_write. Raw pty_write would not.
-            pasteDebug(`chord=${chord} textLen=${text.length} imagePresent=false fallbackUsed=false`);
             try {
               term?.paste(normalizePaste(text));
             } catch {
@@ -736,25 +758,20 @@ try {
           }
           if (imageItem && imageType) {
             try {
-              const blob = await imageItem.getType(imageType);
-              await pasteImageBlob(blob, chord);
+              await pasteImageBlob(await imageItem.getType(imageType));
             } catch {
-              pasteDebug(`chord=${chord} textLen=0 imagePresent=true fallbackUsed=false`);
               showPasteHint("Couldn't read pasted image");
             }
             return;
           }
-          pasteDebug(`chord=${chord} textLen=0 imagePresent=false fallbackUsed=false`);
           showPasteHint("Clipboard is empty");
         })
         .catch(() => {
           // Permission denial only: let the shell paste itself. Empty/image
           // never reaches here, so this is not a blind fallback.
-          pasteDebug(`chord=${chord} textLen=? imagePresent=? fallbackUsed=true`);
           sendRaw("\x16");
         });
     } else {
-      pasteDebug(`chord=${chord} textLen=? imagePresent=? fallbackUsed=true`);
       sendRaw("\x16");
     }
   };
@@ -902,7 +919,7 @@ try {
     const outputBatcher = createOutputBatcher((bytes) => {
       if (!aliveRef.current) return;
       snoopLiveCwd(bytes);
-      if (resizeDebug && Date.now() < traceOutputUntilRef.current) {
+      if (resizeDebug) {
         const text = new TextDecoder().decode(bytes).replace(/\x1b/g, "\\e");
         console.log(
           `[gm-resize pane=${paneId}] post-resize output ${bytes.length}B: ${JSON.stringify(text.slice(0, 300))} | ${bufferState(term)}`,
@@ -938,7 +955,6 @@ try {
       if (text) {
         e.preventDefault();
         e.stopPropagation();
-        pasteDebug(`chord=native-paste textLen=${text.length} imagePresent=false fallbackUsed=false`);
         useStore.getState().markPaneDirty(paneId);
         try {
           term.paste(normalizePaste(text));
@@ -952,9 +968,8 @@ try {
       if (imageFile) {
         e.preventDefault();
         e.stopPropagation();
-        pasteDebug(`chord=native-paste textLen=0 imagePresent=true fallbackUsed=false`);
         useStore.getState().markPaneDirty(paneId);
-        void pasteImageBlob(imageFile, "native-paste");
+        void pasteImageBlob(imageFile);
         return;
       }
       e.preventDefault();
@@ -977,7 +992,7 @@ try {
         }
         if (e.key.toLowerCase() === "v") {
           chordPasteAt.current = Date.now();
-          pasteClipboard(e.shiftKey ? "ctrl-shift-v" : e.metaKey && !e.ctrlKey ? "cmd-v" : "ctrl-v");
+          pasteClipboard();
           return false;
         }
       }
@@ -985,7 +1000,7 @@ try {
       // the capture listener above eats that event, so send it ourselves.
       if (e.type === "keydown" && e.key === "Insert" && e.shiftKey && !e.ctrlKey && !e.metaKey) {
         chordPasteAt.current = Date.now();
-        pasteClipboard("shift-insert");
+        pasteClipboard();
         return false;
       }
       // Ctrl+Backspace: xterm emits a bare ^H (0x08), which ConPTY delivers
@@ -1002,12 +1017,6 @@ try {
           alt = false;
         }
         if (!alt) {
-          try {
-            if (localStorage.getItem("GUIMUX_KEY_DEBUG") === "1")
-              console.log(`[gm-key pane=${paneId}] ctrl-backspace -> ^W`);
-          } catch {
-            /* storage unavailable */
-          }
           sendRaw("\x17");
           return false;
         }
@@ -1017,18 +1026,6 @@ try {
     // Registered before the spawn/attach round-trips below: xterm fires into
     // nothing until a listener exists, so the first keystrokes were dropped.
     term.onData((data) => {
-      // Word-kill probe: with GUIMUX_KEY_DEBUG=1, log the raw codes reaching
-      // pty_write for Backspace/Delete chords. Ctrl+Backspace in the normal
-      // buffer is translated to ^W above and never reaches here; in a TUI it
-      // arrives as ^H, Ctrl+Delete as ESC[3;5~.
-      try {
-        if (localStorage.getItem("GUIMUX_KEY_DEBUG") === "1" && /[\x7f\x08]|\x1b\[3/.test(data)) {
-          const codes = Array.from(data).map((c) => c.charCodeAt(0));
-          console.log(`[gm-key pane=${paneId}] onData codes=${JSON.stringify(codes)}`);
-        }
-      } catch {
-        /* storage unavailable */
-      }
       useStore.getState().markPaneDirty(paneId);
       if (exitedRef.current) return;
       const sid = sessionRef.current;
@@ -1250,50 +1247,6 @@ try {
   // quoted path through its own live terminal input (same path typed keys
   // use). The acceptDrag/handleDrop handlers below stay as the fallback
   // for OS file drops if the webview ever dispatches real drop events.
-  // Toolbar chip drag: press the grip and drop the chip anywhere in the pane.
-  // Pointer events only (no dataTransfer); clamped inside the pane, position
-  // remembered per pane. Double-click the grip to snap back to the corner.
-  const toolsRef = useRef<HTMLDivElement>(null);
-  const [toolsPos, setToolsPos] = useState<{ x: number; y: number } | null>(() =>
-    readToolsPos(paneId),
-  );
-  const moveToolsDrag = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const barEl = toolsRef.current;
-    if (!barEl) return;
-    const barRect = barEl.getBoundingClientRect();
-    const dx = e.clientX - barRect.left;
-    const dy = e.clientY - barRect.top;
-    document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
-    let last: { x: number; y: number } | null = null;
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      window.removeEventListener("mousemove", move, true);
-      window.removeEventListener("mouseup", up, true);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      if (last) writeToolsPos(paneId, last);
-    };
-    const move = (ev: MouseEvent) => {
-      const r = paneRef.current?.getBoundingClientRect();
-      if (!r || r.width <= 0) return;
-      const bw = barEl.offsetWidth;
-      const bh = barEl.offsetHeight;
-      last = {
-        x: Math.min(Math.max(4, ev.clientX - r.left - dx), Math.max(4, r.width - bw - 4)),
-        y: Math.min(Math.max(4, ev.clientY - r.top - dy), Math.max(4, r.height - bh - 4)),
-      };
-      setToolsPos(last);
-    };
-    const up = () => finish();
-    window.addEventListener("mousemove", move, true);
-    window.addEventListener("mouseup", up, true);
-  };
   const dragDepth = useRef(0);
   const [dropHot, setDropHot] = useState(false);
   useEffect(() => {
@@ -1367,7 +1320,7 @@ try {
   return (
     <div
       ref={paneRef}
-      className="relative h-full w-full"
+      className="relative flex h-full w-full flex-col"
       data-drop-hot={dropHot}
       data-pane-drop
       data-pty-id={sessionRef.current ?? undefined}
@@ -1381,50 +1334,77 @@ try {
       onContextMenu={(e) => {
         e.preventDefault();
         if (termRef.current?.hasSelection()) copySelection();
-        else pasteClipboard("context-menu");
+        else pasteClipboard();
       }}
       onDragEnter={handleDragEnter}
       onDragOver={acceptDrag}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div
-        ref={toolsRef}
-        className="absolute right-2 top-2 z-10 flex items-center opacity-0 transition-opacity duration-150 group-hover/pane:opacity-100 focus-within:opacity-100"
-        style={toolsPos ? { left: toolsPos.x, top: toolsPos.y, right: "auto" } : undefined}
-      >
-        {!webgl && (
+      {/* Permanent header: pane identity on the left, pane actions on the
+          right. No hover, no drag, nothing floating over the program's
+          output. */}
+      <div className="gm-rule flex h-7 shrink-0 items-center gap-2 bg-surface-panel px-2">
+        {agent && badge ? (
+          <>
+            {/* Identity: who runs here, and what they are working on. The cwd
+                moves to the tooltip once a session name exists, because the
+                name is what you actually want to read at a glance. */}
+            <span
+              className="flex shrink-0 items-center gap-1.5 rounded-[4px] px-1 py-px text-meta font-semibold"
+              style={{ background: `${badge.tint}1f`, color: badge.tint }}
+              title={`${agent} — ${liveCwd ?? cwd}`}
+            >
+              <span
+                className="flex h-3.5 w-3.5 items-center justify-center rounded-[3px] text-label font-bold"
+                style={{ background: badge.tint, color: "var(--gm-canvas)" }}
+                aria-hidden
+              >
+                {badge.initial}
+              </span>
+              {agent}
+            </span>
+            <span
+              className="min-w-0 flex-1 truncate text-meta text-ink-300"
+              title={
+                session
+                  ? `${session}\n\n${liveCwd ?? cwd}${
+                      sessionKind
+                        ? `\n${PROVENANCE[sessionKind]}${sessionFrom ? `\n${sessionFrom}` : ""}`
+                        : ""
+                    }`
+                  : liveCwd ?? cwd
+              }
+            >
+              {session || shortPath(liveCwd ?? cwd, false)}
+            </span>
+          </>
+        ) : (
           <span
-            title="Software rendering fallback (WebGL unavailable)"
-            className="mr-1 rounded-md px-1.5 py-1 text-[10px] text-ink-500"
-            style={{ background: "var(--gm-overlay)", border: "1px solid var(--gm-hairline)" }}
+            className="mono min-w-0 flex-1 truncate text-meta text-ink-500"
+            title={liveCwd ?? cwd}
           >
-            sw
+            {shortPath(liveCwd ?? cwd, false)}
           </span>
         )}
         <div className="gm-pane-tools" role="toolbar" aria-label="Pane controls">
+          {!webgl && (
+            <span
+              title="Software rendering fallback (WebGL unavailable)"
+              className="rounded border border-[color:var(--gm-hairline)] px-1 text-label text-ink-500"
+            >
+              sw
+            </span>
+          )}
           <button
-            title="Drag to move toolbar, double-click to reset"
-            aria-label="Drag to move toolbar"
-            className="cursor-grab active:cursor-grabbing"
-            onMouseDown={moveToolsDrag}
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              setToolsPos(null);
-              clearToolsPos(paneId);
-            }}
-          >
-            <GripVertical size={13} strokeWidth={2} />
-          </button>
-          <button
-            title="Split right (Ctrl+Shift+D)"
+            title="Split right (Ctrl+Shift+→)"
             aria-label="Split pane right"
             onClick={() => splitPane(paneId, "h")}
           >
             <Columns2 size={13} strokeWidth={2} />
           </button>
           <button
-            title="Split down"
+            title="Split down (Ctrl+Shift+↓)"
             aria-label="Split pane down"
             onClick={() => splitPane(paneId, "v")}
           >
@@ -1432,7 +1412,7 @@ try {
           </button>
           {paneCount > 1 && (
             <button
-              title={maximized ? "Restore panes" : "Maximize pane"}
+              title={maximized ? "Restore panes (Ctrl+Shift+M)" : "Maximize pane (Ctrl+Shift+M)"}
               aria-label={maximized ? "Restore panes" : "Maximize pane"}
               aria-pressed={maximized}
               onClick={() => toggleMaximizePane(paneId)}
@@ -1441,7 +1421,7 @@ try {
             </button>
           )}
           <button
-            title="Close pane"
+            title="Close pane (Ctrl+Shift+W)"
             aria-label="Close pane"
             onClick={() => {
               const sid = sessionRef.current;
@@ -1456,7 +1436,7 @@ try {
       {pasteHint && (
         <div className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-center">
           <div
-            className="gm-menu px-3 py-1.5 text-[12px] text-ink-200"
+            className="gm-menu px-3 py-1.5 text-body text-ink-200"
             role="status"
           >
             {pasteHint}
@@ -1466,18 +1446,14 @@ try {
       {exited && (
         <div className="absolute inset-x-0 bottom-0 z-10 flex justify-center pb-3">
           <div
-            className="gm-menu flex items-center gap-2 px-3 py-1.5 text-[12px]"
+            className="gm-menu flex items-center gap-2 px-3 py-1.5 text-body"
           >
             <span className="text-ink-400">Shell exited</span>
-            <button
-              className="rounded-md px-2.5 py-1 font-semibold"
-              style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
-              onClick={restart}
-            >
+            <button className="gm-btn px-2.5 py-1 text-strong" onClick={restart}>
               Restart
             </button>
             <button
-              className="rounded-md px-2 py-1 text-ink-400 hover:bg-[var(--gm-hover)] hover:text-ink-200"
+              className="gm-btn-ghost px-2 py-1 text-body"
               onClick={() => {
                 const sid = sessionRef.current;
                 if (sid != null) invoke("pty_kill", { id: sid });
@@ -1489,7 +1465,7 @@ try {
           </div>
         </div>
       )}
-      <div ref={hostRef} className="h-full w-full" />
+      <div ref={hostRef} className="min-h-0 flex-1" />
     </div>
   );
 }

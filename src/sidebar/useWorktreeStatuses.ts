@@ -1,15 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createSingleFlight } from "../singleFlight";
 import { useStore } from "../store";
 import type { FileStatus } from "../types";
-
-export interface WorktreeStatuses {
-  /** Porcelain entries by worktree path. Empty until the repo has been read. */
-  statuses: Record<string, FileStatus[]>;
-  /** False until a pass has landed for this repo: empty is not "clean". */
-  loaded: boolean;
-}
 
 // One pass at a time. A pass costs ~300ms per worktree, which outruns the 8s
 // tick on a repo with enough of them, so overlapping passes would double the
@@ -27,60 +20,53 @@ const same = (a: FileStatus[] | undefined, b: FileStatus[] | undefined) => {
   );
 };
 
-/** Status for the repo's worktrees, refreshed in the background. */
-export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean): WorktreeStatuses {
-  // Keyed by repo root, not project: the same repo added twice shares one set
-  // of numbers, and a project switch can never show the previous repo's count.
-  const [state, setState] = useState<{ forRoot: string | null; byWorktree: Record<string, FileStatus[]> }>(
-    { forRoot: null, byWorktree: {} },
-  );
-
+/**
+ * Polls porcelain status for the active repo's worktrees into the store.
+ * Called once from App: the sidebar rows and the worktree tab strip both read
+ * it, and a second poll would double every git spawn.
+ */
+export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean) {
   useEffect(() => {
     if (!repoRoot || !isGit) {
-      setState({ forRoot: null, byWorktree: {} });
+      useStore.getState().setStatuses({}, false);
       return;
     }
-    setState({ forRoot: null, byWorktree: {} });
     let cancelled = false;
+    useStore.getState().setStatuses({}, false);
 
     const run = async () => {
       // Read the list at pass time, so a create or remove between ticks is
       // picked up without re-arming the interval and without a stale closure.
       const st = useStore.getState();
       const active = st.activeWorktreeId;
-      const ids = st.worktrees.filter((wt) => !wt.id.startsWith("plain:")).map((wt) => wt.id);
-      const paths = new Map(st.worktrees.map((wt) => [wt.id, wt.path]));
-      const ordered = [...ids.filter((id) => id === active), ...ids.filter((id) => id !== active)];
+      const rows = st.worktrees.filter((wt) => !wt.id.startsWith("plain:"));
+      const ordered = [
+        ...rows.filter((w) => w.id === active),
+        ...rows.filter((w) => w.id !== active),
+      ];
       const next: Record<string, FileStatus[]> = {};
-      let published = false;
-      for (const [i, id] of ordered.entries()) {
+      for (const [i, wt] of ordered.entries()) {
         if (i > 0) await new Promise((r) => setTimeout(r, 300));
         if (cancelled) return;
         try {
-          next[id] = await invoke<FileStatus[]>("git_status", { path: paths.get(id)! });
+          next[wt.id] = await invoke<FileStatus[]>("git_status", { path: wt.path });
         } catch {
-          // Unreadable, because the dir is gone or the repo is locked, so leave
-          // it out. An empty list here would read as "clean".
+          // Unreadable (dir gone, repo locked), so leave it out. An empty list
+          // here would read as "clean".
           continue;
         }
         if (cancelled) return;
-        // Publish each row as it lands, so badges appear early, but skip the
-        // update when nothing changed, so a steady poll costs no renders.
+        if (useStore.getState().repoRoot !== repoRoot) return;
+        // Publish each row as it lands so badges appear early, but skip the
+        // write when nothing changed so a steady poll costs no renders.
         const snap = { ...next };
-        const current = useStore.getState().repoRoot === repoRoot;
-        if (!current) return;
-        published = true;
-        setState((prev) =>
-          prev.forRoot === repoRoot && Object.keys(snap).every((k) => same(prev.byWorktree[k], snap[k]))
-            ? prev
-            : { forRoot: repoRoot, byWorktree: snap },
-        );
+        const cur = useStore.getState().statuses;
+        if (Object.keys(snap).some((k) => !same(cur[k], snap[k]))) {
+          useStore.getState().setStatuses(snap, true);
+        }
       }
       // No worktrees to read: the repo is clean, so stop saying "checking".
-      // A pass where every read failed stays unknown on purpose.
-      if (!cancelled && !published && ordered.length === 0) {
-        setState((prev) => (prev.forRoot === repoRoot ? prev : { forRoot: repoRoot, byWorktree: {} }));
-      }
+      if (!cancelled && ordered.length === 0) useStore.getState().setStatuses({}, true);
     };
 
     // First pass deferred 3s: startup belongs to the shells; badges catch up.
@@ -94,7 +80,4 @@ export function useWorktreeStatuses(repoRoot: string | null, isGit: boolean): Wo
       clearInterval(tick);
     };
   }, [repoRoot, isGit]);
-
-  const loaded = state.forRoot === repoRoot && repoRoot !== null;
-  return { statuses: loaded ? state.byWorktree : {}, loaded };
-}
+}

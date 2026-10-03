@@ -3,146 +3,413 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Forced Inter: loaded via @fontsource/inter in main.tsx (self-hosted, offline).
-   User requirement overrides the default-font caution: Inter carries all UI. */
-
 /* Graphite workbench. Grays carry the chrome; color is reserved for state
-   (git status, destructive, success). Never hardcode a hex in components
-   when a --gm-* variable covers the role. */
+   (git status, destructive, success).
+
+   This block is the single source of truth for color: the palette in
+   tailwind.config.js resolves every `ink-*` / `clay-*` step to one of these
+   variables, so a utility class and a token can never drift. Add a role here,
+   never a hex in a component. */
 :root {
+  /* Surfaces. Four real elevations: canvas < panel < raised < dialog. The
+     topbar, sidebars and dialogs share `panel`; menus and popovers sit one
+     step above at `raised` so they read as detached from the chrome. */
   --gm-canvas: #0a0a0a;
   --gm-panel: #171717;
-  --gm-raised: #262626;
-  --gm-overlay: #171717;
-  --gm-hairline: rgba(255, 255, 255, 0.07);
-  --gm-hairline-soft: rgba(255, 255, 255, 0.055);
+  --gm-raised: #1f1f1f;
+  --gm-dialog: #1c1c1c;
+
+  /* Ink, brightest to faintest. */
   --gm-ink: #fafafa;
   --gm-ink-dim: #e5e5e5;
+  --gm-ink-soft: #d4d4d4;
   --gm-ink-mute: #a1a1a1;
   --gm-ink-faint: #737373;
-  --gm-accent: #e5e5e5;
-  --gm-accent-hover: #fafafa;
-  --gm-accent-ink: #171717;
-  --gm-accent-wash: rgba(229, 229, 229, 0.12);
-  --gm-green: #81b88b;
-  --gm-red: #c74e39;
-  --gm-red-strong: #c42b1c;
-  --gm-amber: #e2c08d;
+
+  /* Hairlines. */
+  --gm-hairline: rgba(255, 255, 255, 0.07);
+  --gm-hairline-soft: rgba(255, 255, 255, 0.055);
 
   /* Interaction surfaces. One scale, every control: hover < selected <
-     pressed. Never hardcode a white/* opacity in components for these. */
+     pressed. Never hardcode a white/* opacity in a component for these. */
+  --gm-subtle: rgba(255, 255, 255, 0.04);
   --gm-hover: rgba(255, 255, 255, 0.05);
   --gm-selected: rgba(255, 255, 255, 0.07);
   --gm-pressed: rgba(255, 255, 255, 0.09);
 
-  /* Radius system. Rows 6 / controls + menus 8 / dialogs + cards 12.
-     Nothing else; this is a developer tool, not a phone app. */
+  /* Accent is a neutral highlight, not a brand hue. */
+  --gm-accent: #e5e5e5;
+  --gm-accent-hover: #fafafa;
+  --gm-accent-ink: #171717;
+
+  /* State. */
+  --gm-green: #81b88b;
+  --gm-amber: #e2c08d;
+  --gm-red: #c74e39;
+  --gm-red-strong: #c42b1c;
+
+  /* Terminal tiles. True black, not the app canvas: the WebGL canvas
+     composites against its host every frame and any alpha flickers. */
+  --gm-term: #000000;
+  --gm-term-ring: rgba(255, 255, 255, 0.12);
+  --gm-term-ring-active: rgba(255, 255, 255, 0.32);
+  --gm-term-grip: rgba(255, 255, 255, 0.09);
+
+  /* Radius: rows 6 / controls + menus 8 / dialogs + cards 12. Nothing else;
+     this is a developer tool, not a phone app. */
   --gm-r-row: 6px;
   --gm-r-ctl: 8px;
   --gm-r-pop: 10px;
   --gm-r-card: 12px;
+
+  /* Type scale. Named steps, never ad-hoc px, so `compact` can tighten every
+     label in the app by re-declaring these five. */
+  --gm-fs-label: 10.5px; /* section headings, all-caps */
+  --gm-fs-meta: 11.5px; /* paths, counts, hints */
+  --gm-fs-body: 12.5px; /* rows, inputs, menu items */
+  --gm-fs-strong: 13.5px; /* emphasis, primary labels */
+  --gm-fs-title: 16px; /* dialog and workbench titles */
+
+  /* Density knobs. Comfortable by default; `compact` below. */
+  --gm-row-y: 7px; /* vertical padding of a list row */
+  --gm-ctl-h: 30px; /* height of a chrome control */
+  --gm-tab-h: 38px; /* height of the worktree tab strip */
 }
 
-/* Shared chrome primitives. Components use these instead of one-off
-   rounded/hover combos so hover, size, and radius stay uniform. */
-.gm-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 30px;
-  min-width: 30px;
-  padding: 0 7px;
-  border-radius: var(--gm-r-ctl);
-  color: var(--gm-ink-mute);
-  flex-shrink: 0;
-}
-.gm-icon-btn:hover {
-  background: var(--gm-hover);
-  color: var(--gm-ink);
-}
-.gm-icon-btn[data-active="true"] {
-  background: var(--gm-selected);
-  color: var(--gm-ink);
-}
-.gm-icon-btn--sm {
-  height: 28px;
-  min-width: 28px;
-  padding: 0 6px;
+/* Compact: same layout, fewer pixels. Set on <html> from settings.density. */
+:root[data-density="compact"] {
+  --gm-fs-meta: 11px;
+  --gm-fs-body: 12px;
+  --gm-fs-strong: 13px;
+  --gm-row-y: 3px;
+  --gm-ctl-h: 26px;
+  --gm-tab-h: 32px;
 }
 
-/* Sidebar tabs: active reads through type weight + color only. No pills,
-   no underline bars, no extra hairlines. */
-.gm-tab {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--gm-ink-faint);
-  padding: 2px 0;
-}
-.gm-tab:hover {
-  color: var(--gm-ink-dim);
-}
-.gm-tab[data-active="true"] {
-  font-weight: 600;
-  color: var(--gm-ink);
-}
+/* Shared chrome primitives, in Tailwind's component layer so a utility class
+   on the same element still wins (size, padding, color overrides). */
+@layer components {
+  /* ---- Buttons --------------------------------------------------------- */
 
-/* Secondary metadata: paths, counts, hints. Always faint, never bold. */
-.gm-meta {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--gm-ink-faint);
-}
+  /* Short chrome control: one icon, or an icon with a word. */
+  .gm-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: var(--gm-ctl-h);
+    min-width: var(--gm-ctl-h);
+    padding: 0 7px;
+    border-radius: var(--gm-r-ctl);
+    color: var(--gm-ink-mute);
+    flex-shrink: 0;
+  }
+  .gm-icon-btn:hover {
+    background: var(--gm-hover);
+    color: var(--gm-ink);
+  }
+  .gm-icon-btn[data-active="true"] {
+    background: var(--gm-selected);
+    color: var(--gm-ink);
+  }
+  .gm-icon-btn--sm {
+    height: calc(var(--gm-ctl-h) - 2px);
+    min-width: calc(var(--gm-ctl-h) - 2px);
+    padding: 0 6px;
+  }
+  .gm-icon-btn--danger:hover {
+    color: var(--gm-red);
+  }
 
-/* Dropdown / context menus: one surface, one radius, one row treatment. */
-.gm-menu {
-  background: var(--gm-overlay);
-  border: 1px solid var(--gm-hairline);
-  border-radius: var(--gm-r-pop);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
-  padding: 4px 0;
-  overflow: hidden;
-}
-.gm-menu-item {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--gm-ink-dim);
-  text-align: left;
-}
-.gm-menu-item:hover {
-  background: var(--gm-hover);
-  color: var(--gm-ink);
-}
+  /* The one filled action in a surface. Padding and size stay utilities so
+     each call site keeps its own geometry. */
+  .gm-btn {
+    border-radius: var(--gm-r-ctl);
+    background: var(--gm-accent);
+    color: var(--gm-accent-ink);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .gm-btn:hover {
+    background: var(--gm-accent-hover);
+  }
+  .gm-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .gm-btn:disabled:hover {
+    background: var(--gm-accent);
+  }
 
-/* Terminal pane tools: one pill carrying borderless buttons, not three
-   individually boxed buttons. */
-.gm-pane-tools {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  background: var(--gm-overlay);
-  border: 1px solid var(--gm-hairline);
-  border-radius: var(--gm-r-ctl);
-  padding: 2px;
-}
-.gm-pane-tools > button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 26px;
-  min-width: 26px;
-  padding: 0 6px;
-  border-radius: 6px;
-  color: var(--gm-ink-mute);
-}
-.gm-pane-tools > button:hover {
-  background: var(--gm-hover);
-  color: var(--gm-ink);
+  /* Text-only action, same hit area language as gm-icon-btn. */
+  .gm-btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: var(--gm-ctl-h);
+    padding: 0 10px;
+    border-radius: var(--gm-r-ctl);
+    color: var(--gm-ink-mute);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .gm-btn-ghost:hover {
+    background: var(--gm-hover);
+    color: var(--gm-ink);
+  }
+  .gm-btn-ghost:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  /* ---- Surfaces ------------------------------------------------------- */
+
+  /* Modal card: the top of the elevation stack. */
+  .gm-dialog {
+    background: var(--gm-dialog);
+    border: 1px solid var(--gm-hairline);
+    border-radius: var(--gm-r-card);
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.4),
+      0 16px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+  }
+  .gm-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.6);
+  }
+  /* A block that sits inside a surface without raising it: the quiet fill
+     behind a card row, an agent, or a set of feature notes. */
+  .gm-inset {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--gm-hairline-soft);
+    border-radius: var(--gm-r-ctl);
+  }
+  .gm-rule {
+    border-bottom: 1px solid var(--gm-hairline-soft);
+  }
+  .gm-rule-top {
+    border-top: 1px solid var(--gm-hairline-soft);
+  }
+  /* Panel edges: the seam between two chrome columns. */
+  .gm-divider-l {
+    border-left: 1px solid var(--gm-hairline-soft);
+  }
+  .gm-divider-r {
+    border-right: 1px solid var(--gm-hairline-soft);
+  }
+
+  /* Boxed text input. Borderless variants stay plain utilities. */
+  .gm-field {
+    width: 100%;
+    min-width: 0;
+    padding: 6px 10px;
+    border-radius: var(--gm-r-ctl);
+    border: 1px solid var(--gm-hairline);
+    background: var(--gm-canvas);
+    color: var(--gm-ink);
+    font-size: 12px;
+    outline: none;
+  }
+  .gm-field::placeholder {
+    color: var(--gm-ink-faint);
+  }
+  .gm-field:focus {
+    border-color: var(--gm-ink-mute);
+  }
+
+  /* Dropdown / context menus: one surface above the chrome, one radius, one
+     row treatment. */
+  .gm-menu {
+    background: var(--gm-raised);
+    border: 1px solid var(--gm-hairline);
+    border-radius: var(--gm-r-pop);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    padding: 4px 0;
+    overflow: hidden;
+  }
+  .gm-menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--gm-ink-dim);
+    text-align: left;
+  }
+  .gm-menu-item:hover {
+    background: var(--gm-hover);
+    color: var(--gm-ink);
+  }
+
+  /* ---- Rows and headings ---------------------------------------------- */
+
+  /* Selectable rows (sidebar, tree, menus, palette). One hover, one selected.
+     Components use .gm-row + data-selected, never one-off ad-hoc
+     background utilities. */
+  .gm-row {
+    border-radius: var(--gm-r-row);
+  }
+  .gm-row:hover {
+    background: var(--gm-hover);
+  }
+  .gm-row[data-selected="true"] {
+    background: var(--gm-selected);
+  }
+  .gm-row[data-selected="true"]:hover {
+    background: var(--gm-pressed);
+  }
+
+  /* Sidebar worktree rows: card rows with a transparent border, so the
+     selected state can carry a hairline without shifting layout on select.
+     Declared after .gm-row so its selected fill wins the tie. */
+  .gm-wt-row {
+    border: 1px solid transparent;
+  }
+  .gm-wt-row[data-selected="true"] {
+    background: var(--gm-panel);
+    border-color: var(--gm-hairline);
+  }
+  .gm-wt-row[data-selected="true"]:hover {
+    background: var(--gm-panel);
+  }
+
+  /* Sidebar tabs: active reads through type weight + color only. No pills,
+     no underline bars, no extra hairlines. */
+  .gm-tab {
+    font-size: var(--gm-fs-body);
+    font-weight: 500;
+    color: var(--gm-ink-faint);
+  }
+  .gm-tab:hover {
+    color: var(--gm-ink-dim);
+  }
+  .gm-tab[data-active="true"] {
+    font-weight: 600;
+    color: var(--gm-ink);
+  }
+
+  /* Terminal pane tools: one pill carrying borderless buttons, not three
+     individually boxed buttons. */
+  /* Pane actions, in the pane header. Flat: the header row is already a
+     surface, so a boxed chip inside it read as a second floating object. */
+  .gm-pane-tools {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+  .gm-pane-tools > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    min-width: 22px;
+    padding: 0 4px;
+    border-radius: var(--gm-r-row);
+    color: var(--gm-ink-mute);
+  }
+  .gm-pane-tools > button:hover {
+    background: var(--gm-hover);
+    color: var(--gm-ink);
+  }
+
+  /* The one section heading in a list panel. */
+  .gm-sect {
+    font-size: var(--gm-fs-label);
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gm-ink-faint);
+  }
+
+  /* Secondary metadata: paths, counts, hints. Always faint, never bold. */
+  .gm-meta {
+    font-size: var(--gm-fs-meta);
+    font-weight: 400;
+    color: var(--gm-ink-faint);
+  }
+
+  /* A list row. The one vertical rhythm in the app; `compact` moves it. */
+  .gm-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: var(--gm-row-y) 10px;
+    border-radius: var(--gm-r-row);
+    text-align: left;
+    font-size: var(--gm-fs-body);
+    color: var(--gm-ink-dim);
+  }
+  .gm-item:hover {
+    background: var(--gm-hover);
+    color: var(--gm-ink);
+  }
+  .gm-item[aria-current="true"],
+  .gm-item[data-selected="true"] {
+    background: var(--gm-selected);
+    color: var(--gm-ink);
+  }
+
+  /* Segmented toggle (raw / markdown). */
+  .gm-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    border-radius: var(--gm-r-ctl);
+    border: 1px solid var(--gm-hairline);
+    overflow: hidden;
+  }
+  .gm-seg > button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    padding: 0 7px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--gm-ink-faint);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+  }
+  .gm-seg > button:hover {
+    color: var(--gm-ink-dim);
+  }
+  .gm-seg > button[data-active="true"] {
+    background: var(--gm-selected);
+    color: var(--gm-ink);
+  }
+
+  /* kbd chip */
+  .gm-kbd {
+    font-family: "Inter", sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--gm-ink-mute);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--gm-hairline);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 0 5px;
+    line-height: 1.6;
+    white-space: nowrap;
+  }
+
+  /* Window close button: Windows-standard red on hover. */
+  .gm-close-btn:hover {
+    background: var(--gm-red-strong);
+    color: #ffffff;
+  }
 }
 
 html,
@@ -255,50 +522,6 @@ textarea,
   user-select: text;
 }
 
-/* Selectable rows (sidebar, tree, menus, palette). One hover, one
-   selected. Components use .gm-row + data-selected, never one-off
-   ad-hoc background utilities. */
-.gm-row {
-  border-radius: var(--gm-r-row);
-}
-.gm-row:hover {
-  background: var(--gm-hover);
-}
-.gm-row[data-selected="true"] {
-  background: var(--gm-selected);
-}
-.gm-row[data-selected="true"]:hover {
-  background: var(--gm-pressed);
-}
-
-/* Selected list row in the sidebar carries a rail: a fill alone reads as one
-   more hover, and the rail survives the row's own hover. */
-.gm-rail[data-selected="true"] {
-  box-shadow: inset 2px 0 0 var(--gm-ink-mute);
-}
-
-/* Sidebar worktree rows: card rows with a transparent border, so the selected
-   state can carry a hairline without shifting layout on select. */
-.gm-wt-row {
-  border: 1px solid transparent;
-}
-.gm-wt-row[data-selected="true"] {
-  background: var(--gm-panel);
-  border-color: var(--gm-hairline);
-}
-.gm-wt-row[data-selected="true"]:hover {
-  background: var(--gm-panel);
-}
-
-/* Panel section label: the one heading style in a list panel. */
-.gm-sect {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--gm-ink-faint);
-}
-
 /* xterm tuning: fixed cell grid, so no kerning/ligatures/legibility
    shaping that shuffles monospace advances (the "weird font" look).
    Body sets Inter stylistic sets + antialiased smoothing: reset all of it
@@ -336,24 +559,9 @@ textarea,
 
 /* visible keyboard focus, neutral ring on every control */
 :focus-visible {
-  outline: 2px solid #737373;
+  outline: 2px solid var(--gm-ink-faint);
   outline-offset: 1px;
   border-radius: 4px;
-}
-
-/* kbd chip */
-.gm-kbd {
-  font-family: "Inter", sans-serif;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--gm-ink-mute);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--gm-hairline);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  padding: 0 5px;
-  line-height: 1.6;
-  white-space: nowrap;
 }
 
 /* Markdown preview pane */
@@ -463,40 +671,4 @@ textarea,
   font-style: italic;
   color: var(--gm-ink-faint);
   font-size: 12px;
-}
-
-/* Segmented toggle (raw / markdown) */
-.gm-seg {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  border-radius: var(--gm-r-ctl);
-  border: 1px solid var(--gm-hairline);
-  overflow: hidden;
-}
-.gm-seg > button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 24px;
-  padding: 0 7px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--gm-ink-faint);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-}
-.gm-seg > button:hover {
-  color: var(--gm-ink-dim);
-}
-.gm-seg > button[data-active="true"] {
-  background: var(--gm-selected);
-  color: var(--gm-ink);
-}
-
-/* window close button: Windows-standard red on hover */
-.gm-close-btn:hover {
-  background: var(--gm-red-strong);
-  color: #ffffff;
 }

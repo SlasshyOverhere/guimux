@@ -125,10 +125,10 @@ export function DiscoveredBlock({
           })}
           {extra > 0 && <div className="gm-meta px-2 py-1">+ {extra} more locations</div>}
           <div className="mt-1 flex items-center gap-2 px-2 py-1">
-            <button className="gm-tab text-[12px] font-semibold text-ink-100" onClick={onShowInList}>
+            <button className="gm-tab text-body font-semibold text-ink-100" onClick={onShowInList}>
               Show in worktree list
             </button>
-            <button className="gm-tab text-[12px]" onClick={onKeepHidden}>
+            <button className="gm-tab text-body" onClick={onKeepHidden}>
               Keep hidden
             </button>
           </div>

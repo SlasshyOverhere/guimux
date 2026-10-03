@@ -9,10 +9,14 @@
 export const PREF = {
   sidebarWidth: "guimux-sidebar-w",
   explorerWidth: "guimux-explorer-w",
+  dockHeight: "guimux-dock-h",
+  leftVisible: "guimux-left",
+  rightVisible: "guimux-right",
   expandedProjects: "guimux-sidebar-expanded",
   pinnedWorktrees: "guimux-pinned-worktrees",
   revivedWorktrees: "guimux-revived-worktrees",
   discoveredBaseline: "guimux-discovered-baseline",
+  settingsSection: "guimux-settings-section",
 } as const;
 
 export function readPref<T>(key: string, fallback: T, check: (v: unknown) => T | null): T {
@@ -39,6 +43,10 @@ export const numIn =
   (min: number, max: number) =>
   (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : null;
+
+/** A single on/off flag. Accepts 0/1 too, the pre-JSON form. */
+export const boolPref = (v: unknown): boolean | null =>
+  typeof v === "boolean" ? v : v === 0 || v === 1 ? v === 1 : null;
 
 /** `{ key: true }` maps (pins, revived rows, collapsed projects). */
 export const flagMap = (v: unknown): Record<string, true> | null => {

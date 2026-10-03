@@ -68,11 +68,15 @@ export interface AgentDef {
   flags: string; // default flags appended on launch, e.g. --dangerously-skip-permissions
 }
 
+export type Density = "comfortable" | "compact";
+
 export interface Settings {
   terminalFontSize: number;
   editorFontSize: number;
   scrollback: number;
   uiZoom: number;
+  /** Row padding + control height. `compact` retunes the whole app. */
+  density: Density;
   autoCheckForUpdates: boolean;
   agents: AgentDef[];
 }
@@ -82,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   editorFontSize: 13,
   scrollback: 10_000,
   uiZoom: 1,
+  density: "comfortable",
   autoCheckForUpdates: true,
   agents: [
     { id: "claude", name: "Claude", command: "claude", flags: "" },

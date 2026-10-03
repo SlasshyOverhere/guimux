@@ -17,7 +17,10 @@ export function useModalFocus<T extends HTMLElement>(open: boolean) {
     if (!dialog) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusable = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
-    const first = dialog.querySelector<HTMLElement>("[autofocus]") ?? focusable()[0];
+    // `autofocus` on a non-form element is dropped by React, so a dialog that
+    // wants the card itself (rather than its first button) opts in with
+    // data-autofocus.
+    const first = dialog.querySelector<HTMLElement>("[autofocus], [data-autofocus]") ?? focusable()[0];
     first?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;

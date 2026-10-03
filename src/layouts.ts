@@ -11,7 +11,29 @@ export function sanitizeLayoutNode(node: unknown, depth = 0, seen = { n: 0 }): P
     if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;
     seen.n += 1;
     const cwd = typeof v.cwd === "string" && v.cwd.length > 0 && v.cwd.length <= 500 ? v.cwd : null;
-    return { kind: "pane", id: v.id, ptyId: null, cwd, initCmd: null };
+    // `agent` is durable identity ("Claude runs in this pane"); `session`,
+    // `sessionFrom`, `sessionKind` and the pty are live output the agent or
+    // the shell re-sends, so a stale copy is dropped on restore.
+    const agent =
+      typeof v.agent === "string" && v.agent.length > 0 && v.agent.length <= 60
+        ? v.agent
+        : null;
+    const agentBin =
+      typeof v.agentBin === "string" && v.agentBin.length > 0 && v.agentBin.length <= 60
+        ? v.agentBin
+        : null;
+    return {
+      kind: "pane",
+      id: v.id,
+      ptyId: null,
+      cwd,
+      initCmd: null,
+      agent,
+      agentBin,
+      session: null,
+      sessionFrom: null,
+      sessionKind: null,
+    };
   }
   if (v.kind === "split") {
     if (typeof v.id !== "string" || !v.id || v.id.length > 80) return null;

@@ -49,7 +49,7 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
       id={optionId(i)}
       role="option"
       aria-selected={selected}
-      className="gm-menu-item mono gap-2 text-[12px]"
+      className="gm-menu-item mono gap-2 text-body"
       title={label || "Current HEAD"}
       // Keep focus in the field: a blur here would close the list first.
       onMouseDown={(e) => e.preventDefault()}
@@ -62,12 +62,12 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
   );
 
   return (
-    <div
-      className="rounded-[var(--gm-r-card)] p-3"
-      style={{ background: "var(--gm-panel)", border: "1px solid var(--gm-hairline-soft)" }}
-    >
+    // overflow-visible: the base-branch list opens upward out of the card, and
+    // the dialog's default `overflow: hidden` would cut off the top of a full
+    // list (the card is short; the list is 192px tall).
+    <div className="gm-dialog overflow-visible p-3">
       <div className="flex items-center justify-between">
-        <span className="truncate text-[12.5px] font-semibold text-ink-100">
+        <span className="truncate text-body font-semibold text-ink-100">
           {projectName ? `New worktree in ${projectName}` : "New worktree"}
         </span>
         <button
@@ -80,14 +80,13 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
         </button>
       </div>
 
-      <label htmlFor="gm-wt-name" className="gm-meta mt-2 block text-[11px]">
+      <label htmlFor="gm-wt-name" className="gm-meta mt-2 block text-meta">
         Branch name
       </label>
       <input
         id="gm-wt-name"
         autoFocus
-        className="mono mt-1 w-full rounded-md bg-ink-950 px-2.5 py-1.5 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
-        style={{ border: "1px solid var(--gm-hairline)" }}
+        className="gm-field mono mt-1"
         placeholder="feature/my-change (optional)"
         value={name}
         onChange={(e) => setName(e.target.value)}
@@ -97,7 +96,7 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
         }}
       />
 
-      <label htmlFor="gm-wt-base" className="gm-meta mt-2.5 block text-[11px]">
+      <label htmlFor="gm-wt-base" className="gm-meta mt-2.5 block text-meta">
         Start from
       </label>
       <div className="relative mt-1">
@@ -108,8 +107,7 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
         />
         <input
           id="gm-wt-base"
-          className="mono w-full rounded-md bg-ink-950 py-1.5 pl-8 pr-7 text-[12px] text-ink-100 outline-none placeholder:text-ink-500"
-          style={{ border: "1px solid var(--gm-hairline)" }}
+          className="gm-field mono pl-8 pr-7"
           placeholder="Current HEAD"
           value={base}
           autoComplete="off"
@@ -163,7 +161,7 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
             {option(CTRL_HEAD, "", !base.trim())}
             {options.map((b, i) => option(i + 1, b, base === b))}
             {q && options.length === 0 && (
-              <div className="px-3 py-2 text-[11.5px] text-ink-400">
+              <div className="px-3 py-2 text-meta text-ink-400">
                 No match. Enter uses it as-is.
               </div>
             )}
@@ -172,17 +170,10 @@ export function CreateWorktreeForm({ branches, projectName, onSubmit, onCancel }
       </div>
 
       <div className="mt-3 flex items-center gap-2">
-        <button
-          className="flex-1 rounded-md px-3 py-1.5 text-[12px] font-semibold"
-          style={{ background: "var(--gm-accent)", color: "var(--gm-accent-ink)" }}
-          onClick={submit}
-        >
+        <button className="gm-btn flex-1 px-3 py-1.5 text-body" onClick={submit}>
           Create worktree
         </button>
-        <button
-          className="rounded-md px-2 py-1.5 text-[12px] font-medium text-ink-400 hover:text-ink-200"
-          onClick={onCancel}
-        >
+        <button className="gm-btn-ghost px-2 py-1.5 text-body" onClick={onCancel}>
           Cancel
         </button>
       </div>
