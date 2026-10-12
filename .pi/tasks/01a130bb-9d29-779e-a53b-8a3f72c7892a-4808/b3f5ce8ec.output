@@ -1,0 +1,22 @@
+
+> guimux@0.1.4 web
+> node scripts/web-dev.mjs
+
+[cargo]     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.59s
+[backend] [gm-web] backend on http://127.0.0.1:8472
+node:internal/child_process:457
+    throw new ErrnoException(err, 'spawn');
+          ^
+
+Error: spawn EINVAL
+    at ChildProcess.spawn (node:internal/child_process:457:11)
+    at spawn (node:child_process:813:9)
+    at run (file:///C:/Users/suman/.t3/worktrees/guimux/t3-a479dbbc/scripts/web-dev.mjs:29:17)
+    at file:///C:/Users/suman/.t3/worktrees/guimux/t3-a479dbbc/scripts/web-dev.mjs:75:14
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  errno: -4071,
+  code: 'EINVAL',
+  syscall: 'spawn'
+}
+
+Node.js v26.7.0

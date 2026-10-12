@@ -1,0 +1,27 @@
+{
+  "id": "bd054eebd",
+  "name": "npm run web stack",
+  "command": "npm run web",
+  "description": "npm run web, no timeout",
+  "status": "running",
+  "outputPath": ".pi\\tasks\\01a130bb-9d29-779e-a53b-8a3f72c7892a-4808\\bd054eebd.output",
+  "cwd": "C:\\Users\\suman\\.t3\\worktrees\\guimux\\t3-a479dbbc",
+  "startTime": 1791820788866,
+  "pid": 5468,
+  "bytesWritten": 0,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": false,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "shellPolicy": {
+    "policy": "cmd",
+    "executable": "C:\\Windows\\system32\\cmd.exe",
+    "argvPrefix": [
+      "/d",
+      "/s",
+      "/c"
+    ],
+    "dialect": "cmd"
+  }
+}

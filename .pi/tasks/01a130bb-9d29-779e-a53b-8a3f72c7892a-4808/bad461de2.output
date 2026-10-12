@@ -1,0 +1,11 @@
+   Compiling guimux v0.1.4 (C:\Users\suman\.t3\worktrees\guimux\t3-a479dbbc\src-tauri)
+warning: constant `ALLOWED_ORIGIN` is never used
+  --> src\bin\guimux-web.rs:21:7
+   |
+21 | const ALLOWED_ORIGIN: &str = "http://localhost:8471";
+   |       ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `guimux` (bin "guimux-web") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.48s

@@ -1,0 +1,32 @@
+{
+  "id": "b77a081f4",
+  "name": "rebuild web bridge",
+  "command": "cd src-tauri && cargo build --bin guimux-web 2>&1 | findstr /V \"^   Compiling\"",
+  "description": "rebuild guimux-web bin",
+  "status": "failed",
+  "outputPath": ".pi\\tasks\\01a130bb-9d29-779e-a53b-8a3f72c7892a-4808\\b77a081f4.output",
+  "cwd": "C:\\Users\\suman\\.t3\\worktrees\\guimux\\t3-a479dbbc",
+  "startTime": 1791819555380,
+  "endTime": 1791819595735,
+  "exitCode": 1,
+  "signal": null,
+  "pid": 1916,
+  "bytesWritten": 0,
+  "isAgent": false,
+  "surviveReload": false,
+  "error": "Exited with code 1",
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 900,
+  "shellPolicy": {
+    "policy": "cmd",
+    "executable": "C:\\Windows\\system32\\cmd.exe",
+    "argvPrefix": [
+      "/d",
+      "/s",
+      "/c"
+    ],
+    "dialect": "cmd"
+  }
+}

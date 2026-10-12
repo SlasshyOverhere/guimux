@@ -1,0 +1,31 @@
+{
+  "id": "bb3f76612",
+  "name": "npm ci install",
+  "command": "npm ci",
+  "description": "install deps for typecheck",
+  "status": "completed",
+  "outputPath": ".pi\\tasks\\01a130bb-9d29-779e-a53b-8a3f72c7892a-4808\\bb3f76612.output",
+  "cwd": "C:\\Users\\suman\\.t3\\worktrees\\guimux\\t3-a479dbbc",
+  "startTime": 1791819085083,
+  "endTime": 1791819097421,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 26328,
+  "bytesWritten": 223,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 600,
+  "shellPolicy": {
+    "policy": "cmd",
+    "executable": "C:\\Windows\\system32\\cmd.exe",
+    "argvPrefix": [
+      "/d",
+      "/s",
+      "/c"
+    ],
+    "dialect": "cmd"
+  }
+}

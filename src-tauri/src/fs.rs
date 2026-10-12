@@ -1,3 +1,4 @@
+use notify::Watcher as _NotifyWatcher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -5,7 +6,6 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
-use notify::Watcher as _NotifyWatcher;
 use tauri::{command, AppHandle, Emitter, Runtime};
 #[cfg(windows)]
 use winapi::um::sysinfoapi::GetSystemDirectoryW;
@@ -22,12 +22,18 @@ const MAX_WATCH_DIRS: usize = 10_000; // directories watched per root
 const MAX_WATCH_ENTRIES: usize = 200_000; // directory entries examined per root
 const WATCH_EVENT_CAP: usize = 1_024;
 const WATCH_COALESCE_CAP: usize = 1_024;
-const IGNORED: &[&str] = &[".git", "node_modules", "target", "dist", ".next", "__pycache__"];
+const IGNORED: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".next",
+    "__pycache__",
+];
 /// Windows reserved names (also `NUL.txt`): open/read would block the IPC thread.
 const RESERVED: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-    "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
-    "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 static WRITE_CTR: AtomicU64 = AtomicU64::new(0);
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -83,10 +89,14 @@ fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
             // Only the OS's own root indirections are traversed. Links anywhere
             // else are refused — that is the redirection case.
             if is_link_like(&metadata) && !is_os_root_link(current) {
-                return Err(format!("invalid {what}: symlink or junction paths are not allowed"));
+                return Err(format!(
+                    "invalid {what}: symlink or junction paths are not allowed"
+                ));
             }
         }
-        let Some(parent) = current.parent() else { break };
+        let Some(parent) = current.parent() else {
+            break;
+        };
         if parent == current {
             break;
         }
@@ -99,7 +109,11 @@ fn reject_link_components(path: &Path, what: &str) -> Result<(), String> {
 /// `\\.\` device prefixes, and UNC paths.
 fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
     let s = p.to_string_lossy();
-    if s.starts_with("\\\\.\\") || s.starts_with("\\\\?\\") || s.starts_with("\\\\") || s.starts_with("//") {
+    if s.starts_with("\\\\.\\")
+        || s.starts_with("\\\\?\\")
+        || s.starts_with("\\\\")
+        || s.starts_with("//")
+    {
         return Err(format!("invalid {what}: device/UNC paths are not allowed"));
     }
     for c in p.components() {
@@ -115,7 +129,9 @@ fn reject_special_path(p: &Path, what: &str) -> Result<(), String> {
             }
             #[cfg(windows)]
             if name.contains(':') {
-                return Err(format!("invalid {what}: alternate data streams are not allowed"));
+                return Err(format!(
+                    "invalid {what}: alternate data streams are not allowed"
+                ));
             }
             if let Some(dot) = name.find('.') {
                 name.truncate(dot);
@@ -324,9 +340,17 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
         c
     };
     #[cfg(target_os = "macos")]
-    let mut cmd = { let mut c = std::process::Command::new("/usr/bin/open"); c.arg(&p); c };
+    let mut cmd = {
+        let mut c = std::process::Command::new("/usr/bin/open");
+        c.arg(&p);
+        c
+    };
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let mut cmd = { let mut c = std::process::Command::new(system_xdg_open()?); c.arg(&p); c };
+    let mut cmd = {
+        let mut c = std::process::Command::new(system_xdg_open()?);
+        c.arg(&p);
+        c
+    };
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -349,7 +373,9 @@ pub fn fs_read(path: String) -> Result<String, String> {
         Err(e) => return Err(e.to_string()),
     }
     let mut buf = Vec::new();
-    f.take(MAX_FILE + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    f.take(MAX_FILE + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
     if buf.len() as u64 > MAX_FILE {
         return Err("file too large (> 1MB)".to_string());
     }
@@ -367,10 +393,7 @@ fn file_matches(path: &Path, expected: &str) -> bool {
         return false;
     };
     let mut current = Vec::with_capacity(expected.len());
-    file.take(MAX_FILE + 1)
-        .read_to_end(&mut current)
-        .is_ok()
-        && current == expected.as_bytes()
+    file.take(MAX_FILE + 1).read_to_end(&mut current).is_ok() && current == expected.as_bytes()
 }
 
 fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), String> {
@@ -385,7 +408,10 @@ fn write_text(path: &str, content: &str, expected: Option<&str>) -> Result<(), S
     // writing `C:\startup\x` created the whole chain) — parent must exist.
     let parent = p.parent().ok_or("invalid path")?;
     if !parent.is_dir() {
-        return Err(format!("parent directory does not exist: {}", parent.to_string_lossy()));
+        return Err(format!(
+            "parent directory does not exist: {}",
+            parent.to_string_lossy()
+        ));
     }
     let target_meta = match fs::symlink_metadata(&p) {
         Ok(meta) => {
@@ -459,7 +485,10 @@ pub fn fs_create_empty(path: String) -> Result<bool, String> {
     reject_special_path(&p, "path")?;
     let parent = p.parent().ok_or("invalid path")?;
     if !parent.is_dir() {
-        return Err(format!("parent directory does not exist: {}", parent.to_string_lossy()));
+        return Err(format!(
+            "parent directory does not exist: {}",
+            parent.to_string_lossy()
+        ));
     }
     match OpenOptions::new().write(true).create_new(true).open(&p) {
         Ok(_) => Ok(true),
@@ -535,10 +564,14 @@ fn valid_paste_name(name: &str) -> bool {
         return false;
     };
     let (id, ext) = stem.split_at(dot);
-    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
         return false;
     }
-    matches!(ext.to_ascii_lowercase().as_str(), ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp")
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp"
+    )
 }
 
 // (async): base64-decoding a ~13MB paste plus the disk write blocked the UI
@@ -550,10 +583,17 @@ pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
         return Err("pasted image too large".into());
     }
     let p = PathBuf::from(&path);
-    if p.parent().and_then(|d| d.file_name()).map(|n| n != ".guimux-pastes").unwrap_or(true) {
+    if p.parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n != ".guimux-pastes")
+        .unwrap_or(true)
+    {
         return Err("fs_write_bytes only writes into .guimux-pastes".into());
     }
-    let name = p.file_name().and_then(|s| s.to_str()).ok_or("invalid file name")?;
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or("invalid file name")?;
     if !valid_paste_name(name) {
         return Err("invalid paste file name".into());
     }
@@ -584,7 +624,11 @@ pub fn fs_write_bytes(path: String, base64: String) -> Result<String, String> {
         if i > 1 {
             target = parent.join(format!("{stem}-{}.{ext}", i - 1));
         }
-        match OpenOptions::new().write(true).create_new(true).open(&target) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(&bytes) {
                     drop(file);
@@ -626,7 +670,14 @@ pub fn grep_search(
     case_sensitive: Option<bool>,
     limit: Option<u32>,
 ) -> Result<Vec<GrepHit>, String> {
-    grep_search_with_limits(path, query, case_sensitive, limit, MAX_GREP_DIRS, MAX_GREP_ENTRIES)
+    grep_search_with_limits(
+        path,
+        query,
+        case_sensitive,
+        limit,
+        MAX_GREP_DIRS,
+        MAX_GREP_ENTRIES,
+    )
 }
 
 fn grep_search_with_limits(
@@ -647,7 +698,11 @@ fn grep_search_with_limits(
         return Err("query must be 1-200 chars".into());
     }
     let case_sensitive = case_sensitive.unwrap_or(false);
-    let needle = if case_sensitive { q.to_string() } else { q.to_lowercase() };
+    let needle = if case_sensitive {
+        q.to_string()
+    } else {
+        q.to_lowercase()
+    };
     let cap = limit.unwrap_or(100).clamp(1, MAX_GREP_HITS as u32) as usize;
     let mut hits = vec![];
     let mut scanned = 0usize;
@@ -659,7 +714,9 @@ fn grep_search_with_limits(
     // budget, whichever comes first — a node_modules-heavy root otherwise
     // blocks the IPC thread for seconds.
     'walk: while let Some(dir) = stack.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&dir) else { continue };
+        let Ok(metadata) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
         if is_link_like(&metadata) || !metadata.is_dir() {
             continue;
         }
@@ -691,7 +748,9 @@ fn grep_search_with_limits(
             {
                 continue;
             }
-            let Ok(ftype) = entry.file_type() else { continue };
+            let Ok(ftype) = entry.file_type() else {
+                continue;
+            };
             if ftype.is_dir() {
                 stack.push(fpath);
                 continue;
@@ -737,7 +796,8 @@ fn grep_search_with_limits(
                 }
             } else {
                 let low = text.to_lowercase();
-                for ((i, line), (_, lline)) in text.lines().enumerate().zip(low.lines().enumerate()) {
+                for ((i, line), (_, lline)) in text.lines().enumerate().zip(low.lines().enumerate())
+                {
                     if hits.len() >= cap {
                         break;
                     }
@@ -828,8 +888,12 @@ fn collect_watch_dirs(root: &Path) -> Result<Option<Vec<PathBuf>>, String> {
             return Ok(None);
         }
         dirs.push(dir.clone());
-        let entries = fs::read_dir(&dir)
-            .map_err(|e| format!("cannot inspect watch directory {}: {e}", dir.to_string_lossy()))?;
+        let entries = fs::read_dir(&dir).map_err(|e| {
+            format!(
+                "cannot inspect watch directory {}: {e}",
+                dir.to_string_lossy()
+            )
+        })?;
         for entry in entries {
             if entries_seen >= MAX_WATCH_ENTRIES {
                 return Ok(None);
@@ -841,7 +905,9 @@ fn collect_watch_dirs(root: &Path) -> Result<Option<Vec<PathBuf>>, String> {
                 continue;
             }
             let path = entry.path();
-            let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
             if !is_link_like(&metadata) && metadata.is_dir() {
                 stack.push(path);
             }
@@ -863,7 +929,9 @@ fn add_watch_tree(
     let mut stack = vec![start.to_path_buf()];
     let mut entries_seen = 0usize;
     while let Some(dir) = stack.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&dir) else { continue };
+        let Ok(metadata) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
         if is_link_like(&metadata) || !metadata.is_dir() {
             continue;
         }
@@ -881,7 +949,9 @@ fn add_watch_tree(
                 continue;
             }
         }
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries {
             if entries_seen >= MAX_WATCH_ENTRIES {
                 break;
@@ -893,7 +963,9 @@ fn add_watch_tree(
                 continue;
             }
             let path = entry.path();
-            let Ok(metadata) = fs::symlink_metadata(&path) else { continue };
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
             if !is_link_like(&metadata) && metadata.is_dir() {
                 stack.push(path);
             }
@@ -953,58 +1025,56 @@ fn spawn_watch_manager<R: Runtime>(
         watched.insert(dir);
     }
     let mut budget = MAX_WATCH_DIRS.saturating_sub(watched.len());
-    std::thread::spawn(move || {
-        loop {
-            match stop_rx.try_recv() {
-                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
-                Err(mpsc::TryRecvError::Empty) => {}
+    std::thread::spawn(move || loop {
+        match stop_rx.try_recv() {
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if overflow.swap(false, Ordering::SeqCst) {
+            if !recursive {
+                add_watch_tree(
+                    &mut watcher,
+                    &mut watched,
+                    &watch_root,
+                    &watch_root,
+                    &mut budget,
+                );
             }
-            if overflow.swap(false, Ordering::SeqCst) {
+            notify_change(&notify_tx, &fire);
+        }
+        match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
+            Ok(Ok(event)) => {
                 if !recursive {
-                    add_watch_tree(
-                        &mut watcher,
-                        &mut watched,
-                        &watch_root,
-                        &watch_root,
-                        &mut budget,
-                    );
-                }
-                notify_change(&notify_tx, &fire);
-            }
-            match event_rx.recv_timeout(std::time::Duration::from_millis(150)) {
-                Ok(Ok(event)) => {
-                    if !recursive {
-                        for path in event.paths {
-                            if !path.starts_with(&watch_root) {
-                                continue;
-                            }
-                            if path.is_dir() {
-                                add_watch_tree(
-                                    &mut watcher,
-                                    &mut watched,
-                                    &watch_root,
-                                    &path,
-                                    &mut budget,
-                                );
-                            } else {
-                                let gone: Vec<PathBuf> = watched
-                                    .iter()
-                                    .filter(|known| *known == &path || known.starts_with(&path))
-                                    .cloned()
-                                    .collect();
-                                for known in &gone {
-                                    let _ = watcher.unwatch(known);
-                                    watched.remove(known);
-                                }
+                    for path in event.paths {
+                        if !path.starts_with(&watch_root) {
+                            continue;
+                        }
+                        if path.is_dir() {
+                            add_watch_tree(
+                                &mut watcher,
+                                &mut watched,
+                                &watch_root,
+                                &path,
+                                &mut budget,
+                            );
+                        } else {
+                            let gone: Vec<PathBuf> = watched
+                                .iter()
+                                .filter(|known| *known == &path || known.starts_with(&path))
+                                .cloned()
+                                .collect();
+                            for known in &gone {
+                                let _ = watcher.unwatch(known);
+                                watched.remove(known);
                             }
                         }
                     }
-                    notify_change(&notify_tx, &fire);
                 }
-                Ok(Err(_)) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                notify_change(&notify_tx, &fire);
             }
+            Ok(Err(_)) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     });
     Ok(stop_tx)
@@ -1072,7 +1142,10 @@ mod tests {
     fn reveal_uses_system_explorer() {
         let path = system_explorer().unwrap();
         assert!(path.is_absolute());
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("explorer.exe"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("explorer.exe")
+        );
     }
 
     #[test]
@@ -1163,9 +1236,14 @@ mod tests {
         assert!(status.success());
 
         assert!(fs_read(fifo.to_string_lossy().to_string()).is_err());
-        assert!(grep_search(dir.to_string_lossy().to_string(), "needle".into(), None, None)
-            .unwrap()
-            .is_empty());
+        assert!(grep_search(
+            dir.to_string_lossy().to_string(),
+            "needle".into(),
+            None,
+            None
+        )
+        .unwrap()
+        .is_empty());
         let _ = fs::remove_file(&fifo);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1227,7 +1305,10 @@ mod tests {
         fs::write(&file, "before").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
         fs_write(file.to_string_lossy().to_string(), "after".into()).unwrap();
-        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1264,13 +1345,29 @@ mod tests {
         symlink(&outside, &link).unwrap();
 
         assert!(fs_read(link.join("secret.txt").to_string_lossy().to_string()).is_err());
-        assert!(fs_write(link.join("new.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        assert!(fs_write(
+            link.join("new.txt").to_string_lossy().to_string(),
+            "x".into()
+        )
+        .is_err());
         assert!(fs_tree(link.to_string_lossy().to_string(), 1).is_err());
-        assert!(grep_search(root.to_string_lossy().to_string(), "needle".into(), None, None)
+        assert!(grep_search(
+            root.to_string_lossy().to_string(),
+            "needle".into(),
+            None,
+            None
+        )
+        .unwrap()
+        .is_empty());
+        let tree = fs_tree(root.to_string_lossy().to_string(), 2)
             .unwrap()
-            .is_empty());
-        let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
-        let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
+            .unwrap();
+        let linked = tree
+            .children
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "link")
+            .unwrap();
         assert!(linked.children.is_none());
         assert!(!collect_watch_dirs(&root)
             .unwrap()
@@ -1299,16 +1396,36 @@ mod tests {
             .arg(&outside)
             .output()
             .unwrap();
-        assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         assert!(fs_read(link.join("secret.txt").to_string_lossy().to_string()).is_err());
-        assert!(fs_write(link.join("new.txt").to_string_lossy().to_string(), "x".into()).is_err());
+        assert!(fs_write(
+            link.join("new.txt").to_string_lossy().to_string(),
+            "x".into()
+        )
+        .is_err());
         assert!(fs_tree(link.to_string_lossy().to_string(), 1).is_err());
-        assert!(grep_search(root.to_string_lossy().to_string(), "needle".into(), None, None)
+        assert!(grep_search(
+            root.to_string_lossy().to_string(),
+            "needle".into(),
+            None,
+            None
+        )
+        .unwrap()
+        .is_empty());
+        let tree = fs_tree(root.to_string_lossy().to_string(), 2)
             .unwrap()
-            .is_empty());
-        let tree = fs_tree(root.to_string_lossy().to_string(), 2).unwrap().unwrap();
-        let linked = tree.children.unwrap().into_iter().find(|n| n.name == "link").unwrap();
+            .unwrap();
+        let linked = tree
+            .children
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "link")
+            .unwrap();
         assert!(linked.children.is_none());
         assert!(!collect_watch_dirs(&root)
             .unwrap()
@@ -1378,7 +1495,9 @@ mod tests {
         assert_eq!(hits[0].lineno, 1);
         assert!(hits[0].path.ends_with("a.txt"));
         assert!(grep_search(root.clone(), "   ".into(), None, None).is_err());
-        assert!(grep_search(root, "HELLO".into(), Some(true), None).unwrap().is_empty());
+        assert!(grep_search(root, "HELLO".into(), Some(true), None)
+            .unwrap()
+            .is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1391,12 +1510,16 @@ mod tests {
         fs::write(nested.join("hit.txt"), "needle").unwrap();
         let root = dir.to_string_lossy().to_string();
 
-        assert!(grep_search_with_limits(root.clone(), "needle".into(), None, None, 2, 100)
-            .unwrap()
-            .is_empty());
-        assert!(grep_search_with_limits(root, "needle".into(), None, None, 100, 1)
-            .unwrap()
-            .is_empty());
+        assert!(
+            grep_search_with_limits(root.clone(), "needle".into(), None, None, 2, 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            grep_search_with_limits(root, "needle".into(), None, None, 100, 1)
+                .unwrap()
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1426,15 +1549,24 @@ mod tests {
         let drop = dir.join(".guimux-pastes");
         // 1x1 png body, arbitrary bytes: the command is encoding-agnostic.
         let target = drop.join("paste-t1-abc.png");
-        let saved = fs_write_bytes(target.to_string_lossy().to_string(), "aGVsbG8=".into()).unwrap();
+        let saved =
+            fs_write_bytes(target.to_string_lossy().to_string(), "aGVsbG8=".into()).unwrap();
         assert_eq!(std::fs::read(&saved).unwrap(), b"hello");
         // Clash suffixes instead of truncating.
         let saved2 = fs_write_bytes(target.to_string_lossy().to_string(), "aGk=".into()).unwrap();
         assert_ne!(saved, saved2);
         assert_eq!(std::fs::read(&saved2).unwrap(), b"hi");
         // Outside the drop dir, and bad names, are refused.
-        assert!(fs_write_bytes(dir.join("x.png").to_string_lossy().to_string(), "aGk=".into()).is_err());
-        assert!(fs_write_bytes(drop.join("evil.txt").to_string_lossy().to_string(), "aGk=".into()).is_err());
+        assert!(fs_write_bytes(
+            dir.join("x.png").to_string_lossy().to_string(),
+            "aGk=".into()
+        )
+        .is_err());
+        assert!(fs_write_bytes(
+            drop.join("evil.txt").to_string_lossy().to_string(),
+            "aGk=".into()
+        )
+        .is_err());
         assert!(fs_write_bytes(target.to_string_lossy().to_string(), "!!!".into()).is_err());
         let _ = fs::remove_dir_all(&dir);
     }

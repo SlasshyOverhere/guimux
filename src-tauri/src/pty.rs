@@ -24,8 +24,8 @@ use winapi::um::sysinfoapi::GetSystemDirectoryW;
 use winapi::um::winbase::CREATE_NO_WINDOW;
 #[cfg(windows)]
 use winapi::um::winnt::{
-    JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
 #[cfg(not(windows))]
@@ -134,7 +134,10 @@ impl PtyManager {
             drop(entry.master);
         }
         SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        SHELL_KINDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         EXITED.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -259,8 +262,16 @@ fn base64_encode(bytes: &[u8]) -> String {
             | (*c.get(2).unwrap_or(&0) as u32);
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if c.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -306,11 +317,15 @@ fn powershell_bootstrap(cwd: &str) -> String {
 /// WindowsApps): ConPTY CreateProcessW rejects them with code 5.
 fn is_real_exe(p: &std::path::Path) -> bool {
     if p.components().any(|c| {
-        c.as_os_str().to_string_lossy().eq_ignore_ascii_case("WindowsApps")
+        c.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("WindowsApps")
     }) {
         return false;
     }
-    std::fs::metadata(p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 fn find_in_path(exe: &str) -> Option<PathBuf> {
@@ -333,7 +348,10 @@ fn resolve_pwsh() -> Option<String> {
     for key in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
         if let Ok(root) = std::env::var(key) {
             for major in ["7", "8", "6"] {
-                let c = PathBuf::from(&root).join("PowerShell").join(major).join("pwsh.exe");
+                let c = PathBuf::from(&root)
+                    .join("PowerShell")
+                    .join(major)
+                    .join("pwsh.exe");
                 if is_real_exe(&c) {
                     pwsh = Some(c);
                     break;
@@ -519,17 +537,26 @@ fn cached_bootstrap(cwd: &str) -> String {
         }
     }
     let s = base64_encode(&utf16le(&powershell_bootstrap(cwd)));
-    BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.to_string(), s.clone());
+    BOOTSTRAP_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cwd.to_string(), s.clone());
     s
 }
 
 fn pty_debug() -> bool {
-    std::env::var("GUIMUX_PTY_DEBUG").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+    std::env::var("GUIMUX_PTY_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
-pub 
-fn epoch_current(id: u64, epoch: u64) -> bool {
-    EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).get(&id).copied() == Some(epoch)
+pub fn epoch_current(id: u64, epoch: u64) -> bool {
+    EPOCHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .copied()
+        == Some(epoch)
 }
 
 fn next_epoch(id: u64) -> u64 {
@@ -599,7 +626,10 @@ fn detach_output(id: u64) {
 /// against a real pipe without standing up a Tauri app: it is the only thing
 /// that ends the writer thread for a shell that exited on its own.
 fn reap_session(sessions: &Mutex<HashMap<u64, PtyEntry>>, id: u64) {
-    sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
 }
 
 fn spawn_exit_watcher<R: Runtime>(
@@ -776,7 +806,10 @@ fn spawn_pair_inner<R: Runtime>(
         match pair.slave.spawn_command(cmd) {
             Ok(c) => {
                 if pty_debug() {
-                    eprintln!("[gm-pty] id={id} process-started shell={shell} +{}ms", t_start.elapsed().as_millis());
+                    eprintln!(
+                        "[gm-pty] id={id} process-started shell={shell} +{}ms",
+                        t_start.elapsed().as_millis()
+                    );
                 }
                 child = Some(c);
                 shell_kind = shell_kind_for(shell);
@@ -916,8 +949,14 @@ pub fn pty_detach(id: u64) {
 /// worktree). `pty_restart` still recovers such ids (cwd is retained).
 #[command]
 pub fn pty_alive(id: u64) -> bool {
-    SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id)
-        && !EXITED.lock().unwrap_or_else(|e| e.into_inner()).contains(&id)
+    SPAWN_CWDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&id)
+        && !EXITED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
 }
 
 #[command(async)]
@@ -956,7 +995,10 @@ pub fn pty_write(state: State<PtyManager>, id: u64, data: String) -> Result<(), 
     // before the (bounded) queue wait (H-003).
     let writer = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        sessions.get(&id).map(|e| e.writer.clone()).ok_or("no such pty session")?
+        sessions
+            .get(&id)
+            .map(|e| e.writer.clone())
+            .ok_or("no such pty session")?
     };
     // Passthrough: xterm sends \r for Enter and ConPTY
     // wants it as-is. The old \r -> \r\r\n chain double-submitted every
@@ -977,18 +1019,24 @@ pub fn pty_resize(state: State<PtyManager>, id: u64, cols: u16, rows: u16) -> Re
     // spawn/kill/write (and resize of a dead pane errors below).
     let master = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        sessions.get(&id).map(|e| e.master.clone()).ok_or("no such pty session")?
+        sessions
+            .get(&id)
+            .map(|e| e.master.clone())
+            .ok_or("no such pty session")?
     };
     let dbg = pty_debug();
     if dbg {
         eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows}");
     }
-    let r = master.lock().unwrap_or_else(|e| e.into_inner()).resize(portable_pty::PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    });
+    let r = master
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .resize(portable_pty::PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     if dbg {
         match &r {
             Ok(_) => eprintln!("[gm-pty] id={id} pty_resize {cols}x{rows} ok"),
@@ -1023,8 +1071,14 @@ pub fn pty_kill(state: State<PtyManager>, id: u64) -> Result<(), String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id);
-    SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    SHELL_KINDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    SPAWN_CWDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    SHELL_KINDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
     EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     OUTPUTS
         .lock()
@@ -1067,7 +1121,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn classifies_windows_shells_for_safe_path_pasting() {
-        assert_eq!(shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"), "powershell");
+        assert_eq!(
+            shell_kind_for(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            "powershell"
+        );
         assert_eq!(shell_kind_for("cmd.exe"), "cmd");
     }
 
@@ -1111,7 +1168,12 @@ mod tests {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
         let pair = NativePtySystem::default()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty");
         let mut command = CommandBuilder::new("powershell.exe");
         command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 120"]);
@@ -1150,9 +1212,7 @@ mod tests {
         // and 32 chunks more than the queue holds, so the drain thread has to
         // have moved at least that many for the producer to finish. Even at
         // 20KB/s that is 20s of budget for a fifth of a megabyte.
-        let drained = rx
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .is_ok();
+        let drained = rx.recv_timeout(std::time::Duration::from_secs(20)).is_ok();
         assert!(
             child.try_wait().expect("poll child").is_none(),
             "the child must stay alive"
@@ -1185,7 +1245,12 @@ mod tests {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
         let pair = NativePtySystem::default()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty");
         let mut command = CommandBuilder::new("cmd.exe");
         command.args(["/C", "exit"]);
@@ -1207,7 +1272,10 @@ mod tests {
 
         reap_session(&sessions, 4242);
 
-        assert!(sessions.lock().unwrap().is_empty(), "the entry was not reaped");
+        assert!(
+            sessions.lock().unwrap().is_empty(),
+            "the entry was not reaped"
+        );
         // What pty_write does: it looks the session up, so a reaped one now
         // reports "no such pty session" instead of queueing into a pipe that
         // nobody drains any more.
@@ -1220,8 +1288,12 @@ mod tests {
         // against the source because the watcher needs an AppHandle to run.
         let src = include_str!("pty.rs");
         let body = &src[src.find("fn spawn_exit_watcher").expect("watcher")..];
-        let body = &body[..body.find("
-}").expect("watcher body")];
+        let body = &body[..body
+            .find(
+                "
+}",
+            )
+            .expect("watcher body")];
         assert!(
             body.contains("reap_session(&sessions, id)"),
             "the exit watcher no longer reaps the session: {body}"
@@ -1257,7 +1329,10 @@ mod tests {
 
     impl Write for Recorder {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.seen.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1273,9 +1348,7 @@ mod tests {
         // splitting is visible, and the run deliberately exceeds the queue
         // depth so the back-pressure wait is covered too.
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let writer = OrderedWriter::new(Box::new(Recorder {
-            seen: seen.clone(),
-        }));
+        let writer = OrderedWriter::new(Box::new(Recorder { seen: seen.clone() }));
         let chunks: Vec<Vec<u8>> = (0..(WRITE_QUEUE_DEPTH as u16 * 4))
             .map(|i| format!("[{i:04}]").into_bytes())
             .collect();
@@ -1295,10 +1368,7 @@ mod tests {
             want.len(),
             "writer thread did not drain the queue"
         );
-        assert_eq!(
-            got, want,
-            "queued writes reached the sink out of order"
-        );
+        assert_eq!(got, want, "queued writes reached the sink out of order");
     }
 
     #[test]
@@ -1388,10 +1458,7 @@ mod tests {
     #[test]
     fn killing_an_unknown_id_leaves_no_epoch_entry() {
         let id = 0x5A5A_5A5Au64;
-        EPOCHS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
+        EPOCHS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         bump_epoch_if_tracked(id);
         assert!(!EPOCHS
             .lock()
@@ -1451,11 +1518,17 @@ mod tests {
     #[test]
     fn exited_session_reports_not_alive() {
         let id = 0xA11CEu64;
-        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).insert(id, "C:\\x".into());
+        SPAWN_CWDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, "C:\\x".into());
         assert!(pty_alive(id));
         EXITED.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
         assert!(!pty_alive(id));
-        SPAWN_CWDS.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        SPAWN_CWDS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         EXITED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         assert!(!pty_alive(id));
     }
@@ -1472,9 +1545,17 @@ mod tests {
     #[test]
     fn bootstrap_binds_word_kill_guarded() {
         let b = powershell_bootstrap("C:\\repo");
-        assert!(b.contains("Ctrl+Backspace") && b.contains("BackwardKillWord"), "missing left-word binding");
-        assert!(b.contains("Ctrl+Delete") && b.contains("KillWord"), "missing right-word binding");
-        assert!(b.contains("Get-Module PSReadLine"), "binding must be guarded");
+        assert!(
+            b.contains("Ctrl+Backspace") && b.contains("BackwardKillWord"),
+            "missing left-word binding"
+        );
+        assert!(
+            b.contains("Ctrl+Delete") && b.contains("KillWord"),
+            "missing right-word binding"
+        );
+        assert!(
+            b.contains("Get-Module PSReadLine"),
+            "binding must be guarded"
+        );
     }
-
 }

@@ -1,0 +1,32 @@
+{
+  "id": "b3f5ce8ec",
+  "name": "npm run web stack",
+  "command": "npm run web",
+  "description": "npm run web",
+  "status": "failed",
+  "outputPath": ".pi\\tasks\\01a130bb-9d29-779e-a53b-8a3f72c7892a-4808\\b3f5ce8ec.output",
+  "cwd": "C:\\Users\\suman\\.t3\\worktrees\\guimux\\t3-a479dbbc",
+  "startTime": 1791819702512,
+  "endTime": 1791819704182,
+  "exitCode": 1,
+  "signal": null,
+  "pid": 7976,
+  "bytesWritten": 749,
+  "isAgent": false,
+  "surviveReload": false,
+  "error": "Exited with code 1",
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 900,
+  "shellPolicy": {
+    "policy": "cmd",
+    "executable": "C:\\Windows\\system32\\cmd.exe",
+    "argvPrefix": [
+      "/d",
+      "/s",
+      "/c"
+    ],
+    "dialect": "cmd"
+  }
+}

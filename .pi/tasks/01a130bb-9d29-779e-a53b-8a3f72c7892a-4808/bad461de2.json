@@ -1,0 +1,31 @@
+{
+  "id": "bad461de2",
+  "name": "rebuild web bridge",
+  "command": "cd src-tauri && cargo build --bin guimux-web",
+  "description": "rebuild guimux-web bin after fix",
+  "status": "completed",
+  "outputPath": ".pi\\tasks\\01a130bb-9d29-779e-a53b-8a3f72c7892a-4808\\bad461de2.output",
+  "cwd": "C:\\Users\\suman\\.t3\\worktrees\\guimux\\t3-a479dbbc",
+  "startTime": 1791819627227,
+  "endTime": 1791819631811,
+  "exitCode": 0,
+  "signal": null,
+  "pid": 26236,
+  "bytesWritten": 468,
+  "isAgent": false,
+  "surviveReload": false,
+  "notified": true,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true,
+  "timeoutSeconds": 900,
+  "shellPolicy": {
+    "policy": "cmd",
+    "executable": "C:\\Windows\\system32\\cmd.exe",
+    "argvPrefix": [
+      "/d",
+      "/s",
+      "/c"
+    ],
+    "dialect": "cmd"
+  }
+}

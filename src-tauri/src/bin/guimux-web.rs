@@ -123,7 +123,12 @@ fn handle(
         if name.eq_ignore_ascii_case("origin") {
             let origin = value.trim();
             if !origin.is_empty() && !is_vite(origin) {
-                return respond(&mut stream, "403 Forbidden", "text/plain", "origin not allowed");
+                return respond(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "origin not allowed",
+                );
             }
         }
     }
@@ -162,7 +167,8 @@ fn is_vite(origin: &str) -> bool {
     let Some(port) = origin.rsplit(':').next() else {
         return false;
     };
-    port == "8471" && (origin.starts_with("http://localhost:") || origin.starts_with("http://127.0.0.1:"))
+    port == "8471"
+        && (origin.starts_with("http://localhost:") || origin.starts_with("http://127.0.0.1:"))
 }
 
 /// Event names are dynamic (`pty:output-7`), so a listener is registered when
@@ -183,7 +189,10 @@ fn call(
         app.listen_any(event.to_string(), move |e| {
             // EventSource only reads `data:` frames; the payload is the raw
             // JSON Tauri serialized, so it goes in unquoted.
-            hub.publish(format!("data: {{\"id\":{id},\"payload\":{}}}\n\n", e.payload()));
+            hub.publish(format!(
+                "data: {{\"id\":{id},\"payload\":{}}}\n\n",
+                e.payload()
+            ));
         });
         return Ok(json!(id));
     }
@@ -225,7 +234,12 @@ fn call(
     }
 }
 
-fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) -> std::io::Result<()> {
+fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type\r\nAccess-Control-Allow-Methods: POST, GET, OPTIONS\r\nConnection: close\r\n\r\n{body}",
