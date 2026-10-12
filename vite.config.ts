@@ -57,6 +57,13 @@ export default defineConfig({
   server: {
     port: 8471,
     strictPort: true,
+    proxy: {
+      // `npm run web` starts the guimux-web bridge on 8472; the browser talks
+      // to it on its own origin. Origin is left alone so the bridge can tell a
+      // page from another origin.
+      "/rpc": "http://127.0.0.1:8472",
+      "/events": "http://127.0.0.1:8472",
+    },
     watch: {
       ignored: [
         "**/src-tauri/**",

@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
 use notify::Watcher as _NotifyWatcher;
-use tauri::{command, AppHandle, Emitter};
+use tauri::{command, AppHandle, Emitter, Runtime};
 #[cfg(windows)]
 use winapi::um::sysinfoapi::GetSystemDirectoryW;
 
@@ -775,7 +775,7 @@ struct WatchedRoots {
 static COALESCE_TX: std::sync::LazyLock<Mutex<Option<mpsc::SyncSender<String>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
-fn coalesce_tx(app: &AppHandle) -> mpsc::SyncSender<String> {
+fn coalesce_tx<R: Runtime>(app: &AppHandle<R>) -> mpsc::SyncSender<String> {
     let mut slot = COALESCE_TX.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(tx) = slot.clone() {
         return tx;
@@ -920,8 +920,8 @@ fn notify_change(tx: &mpsc::SyncSender<String>, root: &str) {
 
 /// `recursive` is the oversized-root fallback: one watch on the root, with
 /// notify covering the subtrees, so no per-directory bookkeeping is needed.
-fn spawn_watch_manager(
-    app: &AppHandle,
+fn spawn_watch_manager<R: Runtime>(
+    app: &AppHandle<R>,
     root: String,
     watch_root: PathBuf,
     dirs: Vec<PathBuf>,
@@ -1011,7 +1011,7 @@ fn spawn_watch_manager(
 }
 
 #[command(async)]
-pub fn fs_watch(app: AppHandle, path: String) -> Result<(), String> {
+pub fn fs_watch<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     reject_special_path(&p, "path")?;
     if !p.is_dir() {

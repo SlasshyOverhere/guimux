@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{command, AppHandle, Emitter, State};
+use tauri::{command, AppHandle, Emitter, Runtime, State};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStringExt;
@@ -602,8 +602,8 @@ fn reap_session(sessions: &Mutex<HashMap<u64, PtyEntry>>, id: u64) {
     sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
 }
 
-fn spawn_exit_watcher(
-    app: AppHandle,
+fn spawn_exit_watcher<R: Runtime>(
+    app: AppHandle<R>,
     id: u64,
     epoch: u64,
     slot: u64,
@@ -643,8 +643,8 @@ fn spawn_exit_watcher(
     });
 }
 
-fn spawn_output_pump(
-    app: AppHandle,
+fn spawn_output_pump<R: Runtime>(
+    app: AppHandle<R>,
     id: u64,
     epoch: u64,
     mut reader: Box<dyn Read + Send>,
@@ -691,8 +691,8 @@ fn spawn_output_pump(
     });
 }
 
-fn spawn_pair(
-    app: &AppHandle,
+fn spawn_pair<R: Runtime>(
+    app: &AppHandle<R>,
     state: &State<PtyManager>,
     id: u64,
     cwd: String,
@@ -709,8 +709,8 @@ fn spawn_pair(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_pair_inner(
-    app: &AppHandle,
+fn spawn_pair_inner<R: Runtime>(
+    app: &AppHandle<R>,
     state: &State<PtyManager>,
     id: u64,
     cwd: String,
@@ -872,9 +872,9 @@ fn spawn_pair_inner(
 }
 
 #[command(async)]
-pub fn pty_spawn(
-    app: AppHandle,
-    state: State<PtyManager>,
+pub fn pty_spawn<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PtyManager>,
     cwd: String,
     cols: u16,
     rows: u16,
@@ -921,9 +921,9 @@ pub fn pty_alive(id: u64) -> bool {
 }
 
 #[command(async)]
-pub fn pty_restart(
-    app: AppHandle,
-    state: State<PtyManager>,
+pub fn pty_restart<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, PtyManager>,
     id: u64,
     cols: u16,
     rows: u16,

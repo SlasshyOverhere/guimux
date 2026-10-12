@@ -586,7 +586,9 @@ export function WorktreeSidebar() {
 
   const openProject = async () => {
     try {
-      const raw = await open({ directory: true, multiple: false, title: "Add project" });
+      const raw = await open({ directory: true, multiple: false, title: "Add project" })
+        // The browser build has no OS folder dialog, so it asks for the path.
+        .catch(() => window.prompt("Project folder path"));
       if (!raw) return;
       const path = Array.isArray(raw) ? raw[0] : raw;
       useStore.getState().addProject(await detectToProject(path));

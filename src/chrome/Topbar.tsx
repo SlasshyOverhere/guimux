@@ -177,7 +177,8 @@ export function Topbar() {
         </>
       )}
 
-      <WindowControls />
+      {/* A browser tab has no window to control. */}
+      {"__TAURI_INTERNALS__" in window && <WindowControls />}
     </div>
   );
 }

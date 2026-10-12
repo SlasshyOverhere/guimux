@@ -129,6 +129,11 @@ const flight = createSingleFlight();
 
 /** Check for updates. Null = up to date (or a check was already running). */
 export async function checkForUpdates(): Promise<UpdateInfo | null> {
+  // The browser build has no updater plugin; say so instead of "try again later".
+  if (!("__TAURI_INTERNALS__" in window)) {
+    set({ status: "error", error: "Updates need the desktop app." });
+    return null;
+  }
   return (
     (await flight.run(async () => {
       set({ status: "checking", error: null });
@@ -226,7 +231,7 @@ export async function relaunchApp(): Promise<void> {
 let autoRan = false;
 
 export async function maybeAutoCheck(enabled: boolean): Promise<void> {
-  if (autoRan || !enabled) return;
+  if (autoRan || !enabled || !("__TAURI_INTERNALS__" in window)) return;
   autoRan = true;
   const info = await checkForUpdates();
   if (info) await notifyAvailable(info.version);

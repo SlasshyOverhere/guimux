@@ -15,11 +15,12 @@ const sameProject = (a: string, b: string) => normalizePath(a) === normalizePath
 
 /** Folder picker -> registered project. Null when the picker is cancelled. */
 async function pickProject(): Promise<Project | null> {
+  // The browser build has no OS folder dialog, so it asks for the path.
   const picked = await open({
     directory: true,
     multiple: false,
     title: "Open folder or git repository",
-  });
+  }).catch(() => window.prompt("Project folder path"));
   if (!picked) return null;
   const raw = Array.isArray(picked) ? picked[0] : (picked as string);
   return detectToProject(raw);
