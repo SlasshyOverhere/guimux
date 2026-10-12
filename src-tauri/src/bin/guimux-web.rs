@@ -77,7 +77,10 @@ fn main() {
         .expect("[gm-web] mock webview failed to start");
     let hub = Hub::default();
     let store = DesktopStore::open(desktop_store_path());
-    println!("[gm-web] sharing the desktop store at {}", store.path().display());
+    println!(
+        "[gm-web] sharing the desktop store at {}",
+        store.path().display()
+    );
 
     let listener = TcpListener::bind(("127.0.0.1", PORT)).unwrap_or_else(|e| {
         panic!("[gm-web] cannot bind 127.0.0.1:{PORT} ({e}) — is another web run alive?")
@@ -322,18 +325,30 @@ impl DesktopStore {
     }
 
     fn path(&self) -> PathBuf {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).path.clone()
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .path
+            .clone()
     }
 
     fn command(&self, cmd: &str, args: &Value) -> Result<Value, String> {
-        let key = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let key = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         let mut file = self.0.lock().unwrap_or_else(|e| e.into_inner());
         match cmd {
             // The resource id is opaque to the JS: it hands it back on every
             // other store command and there is only one store here.
             "load" => Ok(json!(1)),
             "get" => Ok(json!([
-                file.entries.get(&key("key")).cloned().unwrap_or(Value::Null),
+                file.entries
+                    .get(&key("key"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
                 file.entries.contains_key(&key("key"))
             ])),
             "set" => {
@@ -349,19 +364,24 @@ impl DesktopStore {
                 file.entries = base;
                 write_map(&file.path, &file.entries).map(|()| Value::Null)
             }
-            other => Err(format!("store.{other} is not implemented by the web bridge")),
+            other => Err(format!(
+                "store.{other} is not implemented by the web bridge"
+            )),
         }
     }
 }
 
 fn read_map(path: &Path) -> Option<Map<String, Value>> {
     let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Value>(&raw).ok()?.as_object().cloned()
+    serde_json::from_str::<Value>(&raw)
+        .ok()?
+        .as_object()
+        .cloned()
 }
 
 fn write_map(path: &Path, entries: &Map<String, Value>) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(&Value::Object(entries.clone()))
-        .map_err(|e| e.to_string())?;
+    let text =
+        serde_json::to_string_pretty(&Value::Object(entries.clone())).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, text.as_bytes()).is_ok() && std::fs::rename(&tmp, path).is_ok() {
         return Ok(());
