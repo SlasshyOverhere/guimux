@@ -5,11 +5,12 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use guimux_lib::{configure, conpty_dll};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
@@ -75,6 +76,8 @@ fn main() {
         .build()
         .expect("[gm-web] mock webview failed to start");
     let hub = Hub::default();
+    let store = DesktopStore::open(desktop_store_path());
+    println!("[gm-web] sharing the desktop store at {}", store.path().display());
 
     let listener = TcpListener::bind(("127.0.0.1", PORT)).unwrap_or_else(|e| {
         panic!("[gm-web] cannot bind 127.0.0.1:{PORT} ({e}) — is another web run alive?")
@@ -82,9 +85,14 @@ fn main() {
     println!("[gm-web] backend on http://127.0.0.1:{PORT}");
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let (app, webview, hub) = (app.handle().clone(), webview.clone(), hub.clone());
+        let (app, webview, hub, store) = (
+            app.handle().clone(),
+            webview.clone(),
+            hub.clone(),
+            store.clone(),
+        );
         std::thread::spawn(move || {
-            let _ = handle(stream, &app, &webview, &hub);
+            let _ = handle(stream, &app, &webview, &hub, &store);
         });
     }
 }
@@ -94,6 +102,7 @@ fn handle(
     app: &AppHandle<MockRuntime>,
     webview: &WebviewWindow<MockRuntime>,
     hub: &Hub,
+    store: &DesktopStore,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -154,7 +163,7 @@ fn handle(
     };
     let cmd = req.get("cmd").and_then(Value::as_str).unwrap_or_default();
     let args = req.get("args").cloned().unwrap_or(json!({}));
-    let body = match call(app, webview, hub, cmd, args) {
+    let body = match call(app, webview, hub, store, cmd, args) {
         Ok(value) => json!({ "ok": true, "value": value }),
         Err(error) => json!({ "ok": false, "error": error }),
     };
@@ -179,9 +188,13 @@ fn call(
     app: &AppHandle<MockRuntime>,
     webview: &WebviewWindow<MockRuntime>,
     hub: &Hub,
+    store: &DesktopStore,
     cmd: &str,
     args: Value,
 ) -> Result<Value, String> {
+    if let Some(rest) = cmd.strip_prefix("plugin:store|") {
+        return store.command(rest, &args);
+    }
     if let Some(event) = cmd.strip_prefix("plugin:event|listen") {
         let event = args.get("event").and_then(Value::as_str).unwrap_or(event);
         let id = hub.next_id();
@@ -265,9 +278,100 @@ fn stream_events(mut stream: TcpStream, hub: &Hub) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where the packaged app keeps `guimux.json`: tauri-plugin-store resolves
+/// relative store paths in `app_data_dir` + the bundle identifier, and
+/// `GUIMUX_STORE` overrides it for tests.
+fn desktop_store_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("GUIMUX_STORE") {
+        return path.into();
+    }
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join("Library").join("Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+            })
+    };
+    base.unwrap_or_default()
+        .join("com.guimux.app")
+        .join("guimux.json")
+}
+
+/// The four store-plugin commands the app actually calls, backed by the
+/// desktop app's own file — so `npm run web` reads and writes the projects the
+/// packaged app has instead of a browser-only copy. Both writers own the same
+/// key, so the last `save` wins for it (run one or the other, not both).
+#[derive(Clone)]
+struct DesktopStore(Arc<Mutex<StoreFile>>);
+
+struct StoreFile {
+    path: PathBuf,
+    entries: Map<String, Value>,
+}
+
+impl DesktopStore {
+    fn open(path: PathBuf) -> Self {
+        let entries = read_map(&path).unwrap_or_default();
+        Self(Arc::new(Mutex::new(StoreFile { path, entries })))
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).path.clone()
+    }
+
+    fn command(&self, cmd: &str, args: &Value) -> Result<Value, String> {
+        let key = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let mut file = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match cmd {
+            // The resource id is opaque to the JS: it hands it back on every
+            // other store command and there is only one store here.
+            "load" => Ok(json!(1)),
+            "get" => Ok(json!([
+                file.entries.get(&key("key")).cloned().unwrap_or(Value::Null),
+                file.entries.contains_key(&key("key"))
+            ])),
+            "set" => {
+                let value = args.get("value").cloned().unwrap_or(Value::Null);
+                file.entries.insert(key("key"), value);
+                Ok(Value::Null)
+            }
+            "save" => {
+                // Re-read first: keys the desktop app added since this process
+                // loaded the file must survive a browser write.
+                let mut base = read_map(&file.path).unwrap_or_default();
+                base.extend(file.entries.iter().map(|(k, v)| (k.clone(), v.clone())));
+                file.entries = base;
+                write_map(&file.path, &file.entries).map(|()| Value::Null)
+            }
+            other => Err(format!("store.{other} is not implemented by the web bridge")),
+        }
+    }
+}
+
+fn read_map(path: &Path) -> Option<Map<String, Value>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()?.as_object().cloned()
+}
+
+fn write_map(path: &Path, entries: &Map<String, Value>) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&Value::Object(entries.clone()))
+        .map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text.as_bytes()).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+        return Ok(());
+    }
+    std::fs::write(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_vite;
+    use super::{is_vite, DesktopStore};
 
     #[test]
     fn only_the_dev_page_may_drive_the_bridge() {
@@ -276,5 +380,36 @@ mod tests {
         assert!(!is_vite("http://evil.example"));
         assert!(!is_vite("http://localhost:3000"));
         assert!(!is_vite("http://localhost:8471.evil.example"));
+    }
+
+    #[test]
+    fn the_browser_writes_the_desktop_apps_own_store() {
+        let dir = std::env::temp_dir().join("gm-web-store-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("guimux.json");
+        std::fs::write(&path, r#"{"guimux-state-v1":{"projects":[{"id":"a"}]}}"#).unwrap();
+
+        let store = DesktopStore::open(path.clone());
+        store.command("load", &serde_json::json!({})).unwrap();
+        // The desktop app's projects are visible to the browser build.
+        let got = store.command("get", &serde_json::json!({"key":"guimux-state-v1"}));
+        assert_eq!(got.unwrap()[0]["projects"][0]["id"], serde_json::json!("a"));
+        let missing = store.command("get", &serde_json::json!({"key":"nope"}));
+        assert_eq!(missing.unwrap(), serde_json::json!([null, false]));
+
+        store
+            .command(
+                "set",
+                &serde_json::json!({"key":"guimux-state-v1","value":{"projects":[{"id":"b"}]}}),
+            )
+            .unwrap();
+        store.command("save", &serde_json::json!({})).unwrap();
+
+        // ...and what the browser wrote is what the desktop app will read.
+        let reopened = DesktopStore::open(path);
+        let got = reopened
+            .command("get", &serde_json::json!({"key":"guimux-state-v1"}))
+            .unwrap();
+        assert_eq!(got[0]["projects"][0]["id"], serde_json::json!("b"));
     }
 }
