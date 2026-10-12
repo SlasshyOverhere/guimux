@@ -23,3 +23,6 @@ Thumbs.db
 .impeccable/hook.cache.json
 .freebuff/
 .tmp-keys/
+
+# pi harness task logs
+.pi/
